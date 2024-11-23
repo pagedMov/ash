@@ -2,7 +2,8 @@ use std::collections::VecDeque;
 use log::{debug, trace};
 
 pub fn tokenize_input(input: String) -> VecDeque<String> {
-    let charstream = input.trim().chars();
+    let mut charstream = input.trim().chars().peekable();
+    if charstream.peek().is_none() { return VecDeque::new(); }
     let mut single_quoted: bool = false;
     let mut double_quoted: bool = false;
     let mut cur_token = String::new();
@@ -15,10 +16,12 @@ pub fn tokenize_input(input: String) -> VecDeque<String> {
         trace!("Checking character: {}", item);
         match item {
             ' ' | '\n' | ';' => {
-                cur_token.push(item);
-                if ! cur_token.is_empty() && ! single_quoted && ! double_quoted {
+                if (item == ';' || item == '\n' || single_quoted || double_quoted) && ! cur_token.is_empty() {
+                    cur_token.push(item);
+                }
+                if ! cur_token.trim().to_string().is_empty() && ! single_quoted && ! double_quoted {
                     debug!("Pushing token {}", cur_token);
-                    tokens.push_back(cur_token);
+                    tokens.push_back(cur_token.trim().to_string());
                     cur_token = String::new();
                 }
             },
@@ -42,6 +45,7 @@ pub fn parse_tokens(words: VecDeque<String>) -> VecDeque<VecDeque<String>> {
     debug!("Parsing words: {:?}", words);
     let mut paragraph: VecDeque<VecDeque<String>> = VecDeque::new();
     let mut sentence: VecDeque<String> = VecDeque::new();
+    if words.is_empty() { return VecDeque::new(); }
 
     for word in words {
         trace!("Checking word: {}", word);
@@ -50,9 +54,12 @@ pub fn parse_tokens(words: VecDeque<String>) -> VecDeque<VecDeque<String>> {
         match lastchar.unwrap() {
             ';' | '\n' => { // Delimiters
                 let word_trimmed = word.trim_end_matches([';','\n']).to_string(); // Cut off delimiters
-                sentence.push_back(word_trimmed.trim().to_string());
-                trace!("Pushing sentence: {:?}", sentence);
-                paragraph.push_back(sentence);
+
+                if ! sentence.is_empty() {
+                    sentence.push_back(word_trimmed.trim().to_string());
+                    trace!("Pushing sentence: {:?}", sentence);
+                    paragraph.push_back(sentence);
+                }
                 sentence = VecDeque::new();
             }
             _ => {

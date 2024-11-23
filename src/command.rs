@@ -1,5 +1,6 @@
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self};
+use std::collections::VecDeque;
 use std::process::{ChildStdout, Command, Stdio};
 use std::path::PathBuf;
 use log::{trace, error};
