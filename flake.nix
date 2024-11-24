@@ -32,8 +32,8 @@
           };
           devShells.default = mkShell {
             buildInputs = [ rust-bin.stable.latest.default ];
-            shelllHook = ''
-              zsh
+            shellHook = ''
+              exec zsh
             '';
           };
         }
