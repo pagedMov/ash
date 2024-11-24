@@ -112,3 +112,15 @@ fn test_parse_tokens_with_only_semicolons() {
 
     assert_eq!(parsed, expected);
 }
+#[test]
+fn test_parse_tokens_with_trailing_semicolon() {
+    let input = vec!["echo".to_string(), "Hello;".to_string(), ";".to_string(), "ls;".to_string()];
+    let parsed = parser::parse_tokens(input.into());
+
+    let expected: VecDeque<VecDeque<String>> = vec![
+        vec!["echo", "Hello"].into_iter().map(|s| s.into()).collect(),
+        vec!["ls"].into_iter().map(|s| s.into()).collect(),
+    ].into_iter().collect();
+
+    assert_eq!(parsed, expected);
+}
