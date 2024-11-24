@@ -14,6 +14,7 @@ fn main() {
         match ast {
             Ok(ast) => {
                 println!("AST: {:#?}", ast);
+                command::node_walk(ast)
             }
             Err(e) => {
                 println!("{}",e);

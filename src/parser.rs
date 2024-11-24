@@ -1,7 +1,7 @@
 use log::debug;
 #[derive(Debug,Clone)]
 pub enum ASTNode {
-  Command {
+  ShCommand {
     name: String,
     args: Vec<String>,
     redirs: Vec<Redirection>,
@@ -11,8 +11,8 @@ pub enum ASTNode {
   },
   Conditional {
     condition: Box<ASTNode>,
-    body1: Vec<ASTNode>,
-    body2: Vec<ASTNode>
+    body1: Option<Box<ASTNode>>,
+    body2: Option<Box<ASTNode>>
   },
   Loop {
     condition: Box<ASTNode>,
@@ -26,6 +26,15 @@ pub enum ASTNode {
 pub struct Redirection {
   direction: RedirectionType,
   file: String
+}
+
+impl Redirection {
+    pub fn get_direction(&self) -> RedirectionType {
+        self.direction.clone()
+    }
+    pub fn get_filepath(&self) -> String {
+        self.file.clone()
+    }
 }
 
 #[derive(Debug,Clone)]
@@ -177,7 +186,7 @@ impl<'a> Parser {
         }
       }
 
-      let command = ASTNode::Command {
+      let command = ASTNode::ShCommand {
         name,
         args,
         redirs
@@ -219,7 +228,7 @@ impl<'a> Parser {
   fn parse_conditional(&mut self) -> Result<ASTNode,&'a str> {
     self.advance();
 
-    let condition = Box::new(self.parse_command()?);
+    let condition = Box::new(self.parse_pipeline()?);
     debug!("Parsing new conditional with condition: {:?}",condition);
 
     loop {
@@ -231,8 +240,8 @@ impl<'a> Parser {
         },
         Token::Then => {
           self.advance();
-          let mut body1 = Vec::new();
-          let mut body2 = Vec::new();
+          let mut body1: Option<Box<ASTNode>> = None;
+          let mut body2: Option<Box<ASTNode>> = None;
           loop {
             let token = self.current_token();
             match *token {
@@ -244,8 +253,8 @@ impl<'a> Parser {
               Token::Else => {
                 self.advance();
                 match self.current_token() {
-                  Token::If => body2.push(self.parse_conditional()?),
-                  _ => body2.push(self.parse_pipeline()?),
+                  Token::If => body2 = Some(Box::new(self.parse_conditional()?)),
+                  _ => body2 = Some(Box::new(self.parse_pipeline()?)),
                 }
               }
               Token::Fi => {
@@ -254,7 +263,7 @@ impl<'a> Parser {
                 return Ok(conditional);
               }
               _ => {
-                body1.push(self.parse_pipeline()?);
+                body1 = Some(Box::new(self.parse_pipeline()?));
               }
             }
           }
