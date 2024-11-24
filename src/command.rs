@@ -137,18 +137,20 @@ pub fn exec_conditional(conditional: ASTNode) -> Result<ExitStatus, String> {
             if condition_status == Some(0) {
                 debug!("Condition is true, executing body1");
                 if let Some(body) = body1 {
-                    return execute(*body);
+                    execute(*body)
                 } else if let Some(body) = body2 {
                     debug!("Condition is false, executing body2");
-                    return execute(*body);
+                    execute(*body)
                 } else {
-                    return Err("Found empty if statement".to_string());
+                    Err("Found empty if statement".to_string())
                 }
+            } else if let Some(body) = body2 {
+                debug!("Condition is false, executing body2");
+                execute(*body)
+            } else {
+                Err("Found empty if statement".to_string())
             }
         }
         _ => panic!("Expected Conditional, found some other ASTNode type"),
     }
-
-    debug!("Condition did not evaluate to true, returning error");
-    Err("Condition did not evaluate to true".to_string())
 }
