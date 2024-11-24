@@ -1,4 +1,5 @@
 use log::debug;
+use crate::environment::Environment;
 #[derive(Debug,Clone)]
 pub enum ASTNode {
   ShCommand {
@@ -46,6 +47,7 @@ pub enum RedirectionType {
 #[derive(Clone,Debug)]
 pub enum Token {
   Word(String),
+  Var(String),
   Semicolon,
   Newline,
   Pipe,
@@ -63,7 +65,7 @@ pub enum Token {
   Eof,
 }
 
-pub fn tokenize(input: &str) -> Vec<Token> {
+pub fn tokenize(input: &str, environment: &Environment) -> Vec<Token> {
   let mut tokens: Vec<Token> = Vec::new();
   let mut chars = input.chars().peekable();
   debug!("Tokenizing input: {}",input);
@@ -91,28 +93,46 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         tokens.push(Token::Newline);
         chars.next();
       }
+      '$' => {
+          chars.next();
+          let mut var = String::new();
+          while let Some(&c) = chars.peek() {
+            if ";|\n<> \t".contains(c) { // Whitespace, semicolons, newlines, operators
+                break;
+            }
+              var.push(c);
+              chars.next();
+            }
+          if let Some(variable) = environment.get_var(&var) {
+              tokens.push(Token::Word(variable.clone()));
+          }
+      }
       _ => {
         let mut word = String::new();
         while let Some(&c) = chars.peek() {
-          if c == ';' { break; }
-          if c == '\n' { break; }
-          if c.is_whitespace() || "|<>".contains(c) {
-            break;
-          }
+            if ";|\n<> \t".contains(c) { // Whitespace, semicolons, newlines, operators
+                break;
+            }
           word.push(c);
           chars.next();
         }
-        match word.as_str() {
-          "if" => { tokens.push(Token::If); }
-          "then" => { tokens.push(Token::Then); }
-          "else" => { tokens.push(Token::Else); }
-          "fi" => { tokens.push(Token::Fi); }
-          "for" => { tokens.push(Token::For); }
-          "while" => { tokens.push(Token::While); }
-          "until" => { tokens.push(Token::Until); }
-          "do" => { tokens.push(Token::Do); }
-          "done" => { tokens.push(Token::Done); }
-          _ => { tokens.push(Token::Word(word)); }
+        if let Some(alias) = environment.get_alias(&word) {
+            let mut alias_tokens = tokenize(alias,environment);
+            let _ = alias_tokens.pop(); // Removes Eof token
+            tokens.extend(alias_tokens)
+        } else {
+            match word.as_str() {
+              "if" => { tokens.push(Token::If); }
+              "then" => { tokens.push(Token::Then); }
+              "else" => { tokens.push(Token::Else); }
+              "fi" => { tokens.push(Token::Fi); }
+              "for" => { tokens.push(Token::For); }
+              "while" => { tokens.push(Token::While); }
+              "until" => { tokens.push(Token::Until); }
+              "do" => { tokens.push(Token::Do); }
+              "done" => { tokens.push(Token::Done); }
+              _ => { tokens.push(Token::Word(word)); }
+            }
         }
       }
     }
