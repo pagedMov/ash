@@ -1,4 +1,5 @@
 use log::debug;
+use crate::helper;
 use crate::environment::Environment;
 
 static BUILTINS: [&str; 6] = ["cd", "echo", "exit", "export", "alias", "unset"];
@@ -55,7 +56,7 @@ pub enum RedirectionType {
 #[derive(Clone,Debug)]
 pub enum Token {
   Word(String),
-  Var(String),
+  Var((String,String)),
   Semicolon,
   Newline,
   Pipe,
@@ -126,8 +127,11 @@ pub fn tokenize(input: &str, environment: &Environment) -> Vec<Token> {
         }
         if let Some(alias) = environment.get_alias(&word) {
             let mut alias_tokens = tokenize(alias,environment);
-            let _ = alias_tokens.pop(); // Removes Eof token
+            let _eof_token = alias_tokens.pop(); // Removes Eof token
             tokens.extend(alias_tokens)
+        } else if helper::is_var_declaration(word.clone()) {
+                let (key,value) = helper::extract_var(word).unwrap();
+                tokens.push(Token::Var((key,value)));
         } else {
             match word.as_str() {
               "if" => { tokens.push(Token::If); }
@@ -306,14 +310,19 @@ impl<'a> Parser {
       }
     }
   }
-  pub fn parse_input(&mut self) -> Result<Vec<ASTNode>,String> {
+  pub fn parse_input(&mut self, environment: &mut Environment) -> Result<Vec<ASTNode>,String> {
     let mut statements = Vec::new();
     debug!("Parsing new input!");
 
     loop {
       let token = self.current_token();
-      match *token {
+      match token {
         Token::Eof => break,
+        Token::Var((key,value)) => {
+            environment.set_var(key.as_str(), value.as_str());
+            self.advance();
+
+        }
         Token::If => {
           let conditional = self.parse_conditional();
           match conditional {

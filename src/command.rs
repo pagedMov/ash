@@ -1,62 +1,60 @@
-use log::{debug, trace};
-use std::fs::File;
+use std::fs::{OpenOptions, File};
 use std::path::Path;
 use std::io::{self, Read, Write};
 use std::env::{self, set_current_dir};
 use std::os::unix::process::ExitStatusExt;
-use crate::environment::{self, Environment};
-use crate::parser::{RedirectionType, ASTNode};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 
-pub fn node_walk(nodes: Vec<ASTNode>, environment: &Environment) {
+use crate::helper;
+use crate::environment::{self, Environment};
+use crate::parser::{RedirectionType, ASTNode};
+
+pub fn node_walk(nodes: Vec<ASTNode>, environment: &mut Environment) -> Result<(), (ExitStatus,String)> {
     for node in nodes {
         match &node {
             ASTNode::Builtin { name: _, args: _, redirs: _ } => {
-                debug!("Executing ShCommand node");
                 let _ = exec_builtin(node, environment, false);
             }
             ASTNode::ShCommand { name: _, args: _, redirs: _ } => {
-                debug!("Executing ShCommand node");
                 let _ = exec_cmd(node, environment);
             }
             ASTNode::Pipeline { commands: _ } => {
-                debug!("Executing Pipeline node");
                 let _ = exec_cmd(node, environment);
             },
             ASTNode::Conditional { condition: _, body1: _, body2: _ } => {
-                debug!("Executing Conditional node");
                 let _ = exec_conditional(node, environment);
             },
             _ => panic!("Unexpected node type found while walking"),
         }
     }
+    Ok(())
 }
 
 pub fn mk_process(command: ASTNode, stdin: Option<Vec<u8>>, pipeout: bool) -> Result<Child, String> {
-    debug!("Creating process for command: {:?}", command);
 
     match command {
         ASTNode::ShCommand { name, args, redirs } => {
             let mut child = Command::new(name.clone());
-            debug!("Command: {} with args: {:?}", name, args);
-            debug!("Stdin: {:?}",stdin);
-            debug!("Pipeout: {}",pipeout);
             child.args(args);
 
             for redir in redirs {
-                debug!("Handling redirection: {:?}", redir);
-                let file = File::open(redir.get_filepath())
-                    .map_err(|e| format!("Failed to open file '{}': {}", redir.get_filepath(), e))?;
-
                 match redir.get_direction() {
                     RedirectionType::Input => {
-                        debug!("Redirecting input from file: {}", redir.get_filepath());
+                        let file = OpenOptions::new()
+                            .read(true)
+                            .open(redir.get_filepath())
+                            .map_err(|e| e.to_string())?;
                         if stdin.is_none() {
                             child.stdin(Stdio::from(file));
                         }
                     }
                     RedirectionType::Output => {
-                        debug!("Redirecting output to file: {}", redir.get_filepath());
+                        let file = OpenOptions::new()
+                            .create(true)
+                            .truncate(true)
+                            .write(true)
+                            .open(redir.get_filepath())
+                            .map_err(|e| e.to_string())?;
                         child.stdout(Stdio::from(file));
                     }
                 }
@@ -67,15 +65,12 @@ pub fn mk_process(command: ASTNode, stdin: Option<Vec<u8>>, pipeout: bool) -> Re
             }
 
             if pipeout {
-                debug!("Setting up pipeout for the command");
                 child.stdout(Stdio::piped());
             }
 
-            debug!("Spawning child process for pipeline");
             let mut child = child.spawn().map_err(|e| e.to_string())?;
 
             if let Some(input) = stdin {
-                debug!("Setting stdin from previous command's stdout");
                 let _child_stdin = child.stdin.as_mut()
                     .unwrap()
                     .write_all(&input);
@@ -87,33 +82,62 @@ pub fn mk_process(command: ASTNode, stdin: Option<Vec<u8>>, pipeout: bool) -> Re
     }
 }
 
-pub fn exec_builtin (node: ASTNode, environment: &Environment, pipeout: bool) -> Result<(ExitStatus,Option<String>), String> {
+pub fn exec_builtin (node: ASTNode, environment: &mut Environment, pipeout: bool) -> Result<(ExitStatus,Option<String>), (ExitStatus,String)> {
     match &node {
-        ASTNode::Builtin { name, args, redirs: _ } => {
+        ASTNode::Builtin { name, args, redirs } => {
             match name.as_str() {
                 "cd" => {
                     if let Some(path) = args.first() {
                         // Use the provided argument as the new directory
-                        env::set_current_dir(Path::new(path)).map_err(|e| e.to_string())?;
+                        env::set_current_dir(Path::new(path)).map_err(|e| (ExitStatus::from_raw(1),e.to_string()))?;
                         Ok((ExitStatus::from_raw(0),None))
                     } else {
                         // Fall back to HOME or root directory
                         let root = "/".to_string();
                         let fallback_dir = environment.get_var("HOME").unwrap_or(&root);
-                        env::set_current_dir(Path::new(&fallback_dir)).map_err(|e| e.to_string())?;
+                        env::set_current_dir(Path::new(&fallback_dir)).map_err(|e| (ExitStatus::from_raw(1),e.to_string()))?;
                         Ok((ExitStatus::from_raw(0),None))
                     }
                 },
                 "echo" => {
                     let output = args.join(" "); // Combine all arguments with spaces
-                    debug!("Echoing: {}",output);
-                    if !pipeout { println!("{}",output); }
+                    if !redirs.is_empty() {
+                        for redir in redirs {
+                            if let RedirectionType::Output = redir.get_direction() {
+                                let mut file = OpenOptions::new()
+                                    .create(true)
+                                    .truncate(true)
+                                    .write(true)
+                                    .open(redir.get_filepath())
+                                    .map_err(|e| (ExitStatus::from_raw(1), e.to_string()))?;
+
+                                let _ = file.write_all(output.as_bytes());
+                            }
+                        }
+
+                    } else if !pipeout {
+                        println!("{}",output);
+                    }
+
                     Ok((ExitStatus::from_raw(0),Some(output)))
                 },
-                "exit" => { todo!() },
-                "export" => { todo!() },
+                "export" => {
+                    for arg in args {
+                        if helper::is_var_declaration(arg.to_string()) {
+                            if let Some((key, value)) = arg.split_once('=') {
+                                environment.export_var(key, value);
+                            } else {
+                                return Err((ExitStatus::from_raw(1),"Error parsing key-value pair".to_string()));
+                            }
+                        } else {
+                            return Err((ExitStatus::from_raw(1), "Invalid input for export builtin".to_string()));
+                        }
+                    }
+                    Ok((ExitStatus::from_raw(0),None))
+                },
                 "alias" => { todo!() },
                 "unset" => { todo!() },
+                "exit" => { todo!() },
                 _ => { todo!() }
             }
         }
@@ -121,50 +145,40 @@ pub fn exec_builtin (node: ASTNode, environment: &Environment, pipeout: bool) ->
     }
 }
 
-pub fn exec_cmd(node: ASTNode, environment: &Environment) -> Result<ExitStatus, String> {
-    debug!("Executing ASTNode: {:?}", node);
+pub fn exec_cmd(node: ASTNode, environment: &mut Environment) -> Result<ExitStatus, (ExitStatus,String)> {
 
     match &node {
         ASTNode::ShCommand { name: _, args: _, redirs: _ } => {
-            debug!("Executing ShCommand");
-            let mut child = mk_process(node, None, false)?;
-            debug!("Spawning child process for ShCommand");
-            let status = child.wait().map_err(|e| e.to_string())?;
-            debug!("Child process exited with status: {:?}", status);
+            let mut child = mk_process(node, None, false).map_err(|e| (ExitStatus::from_raw(1),e))?;
+            let status = child.wait().map_err(|e| (ExitStatus::from_raw(1),e.to_string()))?;
             Ok(status)
         }
 
         ASTNode::Pipeline { commands } => {
-            debug!("Executing pipeline with {} commands", commands.len());
             let mut stdin: Option<Vec<u8>> = None; // Standard input
             let mut pipeout = true;
             let mut command_iter = commands.iter().peekable();
 
             while let Some(command) = command_iter.next() {
                 if command_iter.peek().is_none() {
-                    debug!("Last command found, not piping output");
                     pipeout = false;
                 }
-                debug!("Command_iter: {:?}", command_iter);
 
                 if let ASTNode::Builtin { .. } = command {
                     let (_status,output) = exec_builtin(command.clone(), environment, pipeout)?;
-                    if let Some(stdout) = output {
+                    if let Some(stdout) = output { // Get stdout from shell builtin
                         stdin = Some(stdout.into_bytes());
                     }
 
                     continue;
                 }
 
-                debug!("Processing command in pipeline: {:?}", command);
-                let mut child = mk_process(command.clone(), stdin.clone(), pipeout)?;
+                let mut child = mk_process(command.clone(), stdin.clone(), pipeout).map_err(|e| (ExitStatus::from_raw(1),e))?;
 
+                child.wait().map_err(|e| (ExitStatus::from_raw(1),e));
 
-                debug!("Waiting for child process to finish");
-                child.wait().map_err(|e| e.to_string())?;
-
-                let mut stdout_buffer: Vec<u8> = vec![];
-                if let Some(output) = child.stdout.as_mut() {
+                if let Some(output) = child.stdout.as_mut() { // Get stdout from shell command
+                    let mut stdout_buffer: Vec<u8> = vec![];
                     let _ = output.read_to_end(&mut stdout_buffer);
                     stdin = Some(stdout_buffer);
                 }
@@ -174,39 +188,32 @@ pub fn exec_cmd(node: ASTNode, environment: &Environment) -> Result<ExitStatus, 
         }
 
         ASTNode::Conditional { condition: _, body1: _, body2: _ } => {
-            debug!("Executing conditional statement");
-            exec_conditional(node, environment).map_err(|e| e.to_string())
+            Ok(exec_conditional(node, environment)?)
         }
 
         _ => panic!("Expected Pipeline or ShCommand node, got some other ASTNode type"),
     }
 }
 
-pub fn exec_conditional(conditional: ASTNode, environment: &Environment) -> Result<ExitStatus, String> {
-    debug!("Executing conditional ASTNode: {:?}", conditional);
+pub fn exec_conditional(conditional: ASTNode, environment: &mut Environment) -> Result<ExitStatus, (ExitStatus,String)> {
 
     match conditional {
         ASTNode::Conditional { condition, body1, body2 } => {
-            debug!("Evaluating condition of the conditional");
 
             let condition_status = exec_cmd(*condition, environment)?.code();
-            debug!("Condition status: {:?}", condition_status);
 
             if condition_status == Some(0) {
-                debug!("Condition is true, executing body1");
                 if let Some(body) = body1 {
                     exec_cmd(*body, environment)
                 } else if let Some(body) = body2 {
-                    debug!("Condition is false, executing body2");
                     exec_cmd(*body, environment)
                 } else {
-                    Err("Found empty if statement".to_string())
+                    Err((ExitStatus::from_raw(1),"Found empty if statement".to_string()))
                 }
             } else if let Some(body) = body2 {
-                debug!("Condition is false, executing body2");
                 exec_cmd(*body, environment)
             } else {
-                Err("Found empty if statement".to_string())
+                Err((ExitStatus::from_raw(1),"Found empty if statement".to_string()))
             }
         }
         _ => panic!("Expected Conditional, found some other ASTNode type"),
