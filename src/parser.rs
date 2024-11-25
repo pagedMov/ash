@@ -1,7 +1,15 @@
 use log::debug;
 use crate::environment::Environment;
+
+static BUILTINS: [&str; 6] = ["cd", "echo", "exit", "export", "alias", "unset"];
+
 #[derive(Debug,Clone)]
 pub enum ASTNode {
+  Builtin {
+    name: String,
+    args: Vec<String>,
+    redirs: Vec<Redirection>,
+  },
   ShCommand {
     name: String,
     args: Vec<String>,
@@ -204,6 +212,12 @@ impl<'a> Parser {
           }
           _ => break
         }
+      }
+
+      if BUILTINS.contains(&name.as_str()) {
+          let builtin = ASTNode::Builtin { name, args, redirs };
+          debug!("Returning shell builtin: {:?}", builtin);
+          return Ok(builtin)
       }
 
       let command = ASTNode::ShCommand {

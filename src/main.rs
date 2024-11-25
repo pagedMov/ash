@@ -17,7 +17,7 @@ fn main() {
         match ast {
             Ok(ast) => {
                 debug!("AST: {:#?}", ast);
-                command::node_walk(ast)
+                command::node_walk(ast, &environ)
             }
             Err(e) => {
                 println!("{}",e);
