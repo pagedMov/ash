@@ -1,6 +1,6 @@
 use std::fs::OpenOptions;
 use std::path::Path;
-use std::io::{Read, Write};
+use std::io::{Read, Write, stdout};
 use std::env::{self};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -100,7 +100,8 @@ pub fn exec_builtin (node: ASTNode, environment: &mut Environment, pipeout: bool
                     }
                 },
                 "echo" => {
-                    let output = args.join(" "); // Combine all arguments with spaces
+                    let mut output = args.join(" "); // Combine all arguments with spaces
+                    output.push('\n');
                     if !redirs.is_empty() {
                         for redir in redirs {
                             if let RedirectionType::Output = redir.get_direction() {
@@ -116,7 +117,7 @@ pub fn exec_builtin (node: ASTNode, environment: &mut Environment, pipeout: bool
                         }
 
                     } else if !pipeout {
-                        println!("{}",output);
+                        helper::write_stdout(output.clone().into_bytes())?
                     }
 
                     Ok((ExitStatus::from_raw(0),Some(output)))
@@ -180,7 +181,11 @@ pub fn exec_cmd(node: ASTNode, environment: &mut Environment) -> Result<ExitStat
                 if let Some(output) = child.stdout.as_mut() { // Get stdout from shell command
                     let mut stdout_buffer: Vec<u8> = vec![];
                     let _ = output.read_to_end(&mut stdout_buffer);
-                    stdin = Some(stdout_buffer);
+                    if !pipeout {
+                        helper::write_stdout(stdout_buffer)?;
+                    } else {
+                        stdin = Some(stdout_buffer);
+                    }
                 }
             }
 
@@ -257,7 +262,7 @@ mod tests {
         assert!(result.is_ok());
 
         if let Ok((_status, Some(output))) = result {
-            assert_eq!(output, "Hello, World!");
+            assert_eq!(output, "Hello, World!\n");
         } else {
             panic!("Expected echo output, got none or error");
         }
@@ -316,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn test_redirection_output() {
+    fn test_builtin_redirection_output() {
         let mut environment = setup_environment();
         let temp_file = "/tmp/test_output";
 
@@ -330,7 +335,6 @@ mod tests {
         };
 
         let result = exec_builtin(node, &mut environment, false);
-        println!("{:?}",result);
         assert!(result.is_ok());
 
         let mut file = OpenOptions::new()
@@ -340,6 +344,35 @@ mod tests {
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
         assert_eq!(contents.trim(), "Hello");
+
+        // Cleanup
+        std::fs::remove_file(temp_file).unwrap();
+    }
+
+    #[test]
+    fn test_command_redirection_output() {
+        let mut environment = setup_environment();
+        let temp_file = "/tmp/test_output2";
+
+        let node = ASTNode::ShCommand {
+            name: "printf".to_string(),
+            args: vec!["Hello, World!\n".to_string()],
+            redirs: vec![Redirection::new(
+                RedirectionType::Output,
+                temp_file.to_string(),
+            )],
+        };
+
+        let result = exec_cmd(node, &mut environment);
+        assert!(result.is_ok());
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(temp_file)
+            .unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents.trim(), "Hello, World!");
 
         // Cleanup
         std::fs::remove_file(temp_file).unwrap();
