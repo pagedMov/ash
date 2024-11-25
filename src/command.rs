@@ -1,12 +1,12 @@
 use log::{debug, trace};
 use std::fs::File;
 use std::path::Path;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::env::{self, set_current_dir};
 use std::os::unix::process::ExitStatusExt;
 use crate::environment::{self, Environment};
 use crate::parser::{RedirectionType, ASTNode};
-use std::process::{ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 
 pub fn node_walk(nodes: Vec<ASTNode>, environment: &Environment) {
     for node in nodes {
@@ -32,7 +32,7 @@ pub fn node_walk(nodes: Vec<ASTNode>, environment: &Environment) {
     }
 }
 
-pub fn mk_process(command: ASTNode, stdin: Option<ChildStdout>, pipeout: bool) -> Result<Command, String> {
+pub fn mk_process(command: ASTNode, stdin: Option<Vec<u8>>, pipeout: bool) -> Result<Child, String> {
     debug!("Creating process for command: {:?}", command);
 
     match command {
@@ -62,14 +62,23 @@ pub fn mk_process(command: ASTNode, stdin: Option<ChildStdout>, pipeout: bool) -
                 }
             }
 
-            if let Some(input) = stdin {
-                debug!("Setting stdin from previous command's stdout");
-                child.stdin(Stdio::from(input));
+            if stdin.is_some() {
+                child.stdin(Stdio::piped());
             }
 
             if pipeout {
                 debug!("Setting up pipeout for the command");
                 child.stdout(Stdio::piped());
+            }
+
+            debug!("Spawning child process for pipeline");
+            let mut child = child.spawn().map_err(|e| e.to_string())?;
+
+            if let Some(input) = stdin {
+                debug!("Setting stdin from previous command's stdout");
+                let _child_stdin = child.stdin.as_mut()
+                    .unwrap()
+                    .write_all(&input);
             }
 
             Ok(child)
@@ -118,9 +127,8 @@ pub fn exec_cmd(node: ASTNode, environment: &Environment) -> Result<ExitStatus, 
     match &node {
         ASTNode::ShCommand { name: _, args: _, redirs: _ } => {
             debug!("Executing ShCommand");
-            let mut command = mk_process(node, None, false)?;
+            let mut child = mk_process(node, None, false)?;
             debug!("Spawning child process for ShCommand");
-            let mut child = command.spawn().map_err(|e| e.to_string())?;
             let status = child.wait().map_err(|e| e.to_string())?;
             debug!("Child process exited with status: {:?}", status);
             Ok(status)
@@ -128,8 +136,7 @@ pub fn exec_cmd(node: ASTNode, environment: &Environment) -> Result<ExitStatus, 
 
         ASTNode::Pipeline { commands } => {
             debug!("Executing pipeline with {} commands", commands.len());
-            let mut stdin: Option<ChildStdout> = None; // Standard input
-            let mut strin: Option<String> = None; // String input for pipes, used by builtins like echo
+            let mut stdin: Option<Vec<u8>> = None; // Standard input
             let mut pipeout = true;
             let mut command_iter = commands.iter().peekable();
 
@@ -143,36 +150,24 @@ pub fn exec_cmd(node: ASTNode, environment: &Environment) -> Result<ExitStatus, 
                 if let ASTNode::Builtin { .. } = command {
                     let (_status,output) = exec_builtin(command.clone(), environment, pipeout)?;
                     if let Some(stdout) = output {
-                        strin = Some(stdout);
-                        stdin = None;
+                        stdin = Some(stdout.into_bytes());
                     }
 
                     continue;
                 }
 
                 debug!("Processing command in pipeline: {:?}", command);
-                let mut process = mk_process(command.clone(), stdin, pipeout)?;
-
-                if strin.is_some() { // Overwrite stdin defined in mk_process
-                    process.stdin(Stdio::piped());
-                }
-
-                debug!("Spawning child process for pipeline");
-                let mut child = process.spawn().map_err(|e| e.to_string())?;
-
-                if let Some(stringinput) = strin { // From builtins like echo
-                    debug!("Writing bytes to child stdin from string: {}",stringinput);
-                    debug!("Child process: {:?}",child);
-                    let _child_stdin = child.stdin.as_mut()
-                        .unwrap()
-                        .write_all(stringinput.as_bytes());
-                    strin = None;
-                }
+                let mut child = mk_process(command.clone(), stdin.clone(), pipeout)?;
 
 
                 debug!("Waiting for child process to finish");
                 child.wait().map_err(|e| e.to_string())?;
-                stdin = child.stdout.take();
+
+                let mut stdout_buffer: Vec<u8> = vec![];
+                if let Some(output) = child.stdout.as_mut() {
+                    let _ = output.read_to_end(&mut stdout_buffer);
+                    stdin = Some(stdout_buffer);
+                }
             }
 
             Ok(ExitStatus::from_raw(0))
