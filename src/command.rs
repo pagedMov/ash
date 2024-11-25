@@ -1,6 +1,6 @@
 use std::fs::OpenOptions;
 use std::path::Path;
-use std::io::{Read, Write, stdout};
+use std::io::{Read, Write};
 use std::env::{self};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -90,13 +90,13 @@ pub fn exec_builtin (node: ASTNode, environment: &mut Environment, pipeout: bool
                     if let Some(path) = args.first() {
                         // Use the provided argument as the new directory
                         env::set_current_dir(Path::new(path)).map_err(|e| (ExitStatus::from_raw(1),e.to_string()))?;
-                        Ok((ExitStatus::from_raw(0),None))
+                        Ok((helper::succeed(),None))
                     } else {
                         // Fall back to HOME or root directory
                         let root = "/".to_string();
                         let fallback_dir = environment.get_var("HOME").unwrap_or(&root);
                         env::set_current_dir(Path::new(&fallback_dir)).map_err(|e| (ExitStatus::from_raw(1),e.to_string()))?;
-                        Ok((ExitStatus::from_raw(0),None))
+                        Ok((helper::succeed(),None))
                     }
                 },
                 "echo" => {
@@ -120,7 +120,7 @@ pub fn exec_builtin (node: ASTNode, environment: &mut Environment, pipeout: bool
                         helper::write_stdout(output.clone().into_bytes())?
                     }
 
-                    Ok((ExitStatus::from_raw(0),Some(output)))
+                    Ok((helper::succeed(),Some(output)))
                 },
                 "export" => {
                     for arg in args {
@@ -128,15 +128,28 @@ pub fn exec_builtin (node: ASTNode, environment: &mut Environment, pipeout: bool
                             if let Some((key, value)) = arg.split_once('=') {
                                 environment.export_var(key, value);
                             } else {
-                                return Err((ExitStatus::from_raw(1),"Error parsing key-value pair".to_string()));
+                                return Err(helper::fail("Error parsing key-value pair"));
                             }
                         } else {
-                            return Err((ExitStatus::from_raw(1), "Invalid input for export builtin".to_string()));
+                            return Err(helper::fail("Invalid input for export builtin"));
                         }
                     }
-                    Ok((ExitStatus::from_raw(0),None))
+                    Ok((helper::succeed(),None))
                 },
-                "alias" => { todo!() },
+                "alias" => {
+                    if args.len() != 1 { return Err(helper::fail("alias takes exactly one argument")); }
+                    let arg = args.clone().pop().unwrap().to_string();
+                    if helper::is_var_declaration(arg.clone()) {
+                        if let Some((key,value)) = arg.split_once('=') {
+                            environment.set_alias(key, value);
+                        } else {
+                            return Err(helper::fail("Error parsing key-value pair for alias"));
+                        }
+                    } else {
+                        return Err(helper::fail("Invalid argument format for alias"));
+                    }
+                    Ok((helper::succeed(),None))
+                },
                 "unset" => { todo!() },
                 "exit" => { todo!() },
                 _ => { todo!() }
@@ -189,7 +202,7 @@ pub fn exec_cmd(node: ASTNode, environment: &mut Environment) -> Result<ExitStat
                 }
             }
 
-            Ok(ExitStatus::from_raw(0))
+            Ok(helper::succeed())
         }
 
         ASTNode::Conditional { condition: _, body1: _, body2: _ } => {
@@ -213,12 +226,12 @@ pub fn exec_conditional(conditional: ASTNode, environment: &mut Environment) -> 
                 } else if let Some(body) = body2 {
                     exec_cmd(*body, environment)
                 } else {
-                    Err((ExitStatus::from_raw(1),"Found empty if statement".to_string()))
+                    Err(helper::fail("Found empty if statement"))
                 }
             } else if let Some(body) = body2 {
                 exec_cmd(*body, environment)
             } else {
-                Err((ExitStatus::from_raw(1),"Found empty if statement".to_string()))
+                Err(helper::fail("Found empty if statement"))
             }
         }
         _ => panic!("Expected Conditional, found some other ASTNode type"),
