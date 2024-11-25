@@ -32,13 +32,17 @@ pub enum ASTNode {
   }
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,PartialEq)]
 pub struct Redirection {
   direction: RedirectionType,
   file: String
 }
 
 impl Redirection {
+
+    pub fn new(direction: RedirectionType, file: String) -> Self {
+        Redirection { direction, file }
+    }
     pub fn get_direction(&self) -> RedirectionType {
         self.direction.clone()
     }
@@ -47,13 +51,13 @@ impl Redirection {
     }
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,PartialEq)]
 pub enum RedirectionType {
   Input, // <
   Output // >
 }
 
-#[derive(Clone,Debug)]
+#[derive(Clone,Debug,PartialEq)]
 pub enum Token {
   Word(String),
   Var((String,String)),
@@ -347,4 +351,195 @@ impl<'a> Parser {
     debug!("Constructed statements: {:?}",statements);
     Ok(statements)
   }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::environment::Environment;
+
+    #[test]
+    fn test_tokenize_simple_command() {
+        let env = Environment::new();
+        let input = "echo hello";
+        let tokens = tokenize(input, &env);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("echo".to_string()),
+                Token::Word("hello".to_string()),
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_redirections() {
+        let env = Environment::new();
+        let input = "cat < input.txt > output.txt";
+        let tokens = tokenize(input, &env);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("cat".to_string()),
+                Token::RedirectIn,
+                Token::Word("input.txt".to_string()),
+                Token::RedirectOut,
+                Token::Word("output.txt".to_string()),
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_with_variables() {
+        let mut env = Environment::new();
+        env.set_var("VAR", "value");
+        let input = "echo $VAR";
+        let tokens = tokenize(input, &env);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("echo".to_string()),
+                Token::Word("value".to_string()),
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_alias() {
+        let mut env = Environment::new();
+        env.set_alias("ls", "echo alias_ls");
+        let input = "ls";
+        let tokens = tokenize(input, &env);
+
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Word("echo".to_string()),
+                Token::Word("alias_ls".to_string()),
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_builtin() {
+        let tokens = vec![
+            Token::Word("echo".to_string()),
+            Token::Word("hello".to_string()),
+            Token::Eof,
+        ];
+        let mut parser = Parser::new(tokens);
+        let command = parser.parse_command().unwrap();
+
+        if let ASTNode::Builtin { name, args, redirs } = command {
+            assert_eq!(name, "echo");
+            assert_eq!(args, vec!["hello"]);
+            assert!(redirs.is_empty());
+        } else {
+            panic!("Expected ASTNode::Builtin");
+        }
+    }
+
+    #[test]
+    fn test_parse_command() {
+        let tokens = vec![
+            Token::Word("command".to_string()),
+            Token::Word("arg1".to_string()),
+            Token::Word("arg2".to_string()),
+            Token::Eof,
+        ];
+        let mut parser = Parser::new(tokens);
+        let command = parser.parse_command().unwrap();
+
+        if let ASTNode::ShCommand { name, args, redirs } = command {
+            assert_eq!(name, "command");
+            assert_eq!(args, vec!["arg1", "arg2"]);
+            assert!(redirs.is_empty());
+        } else {
+            panic!("Expected ASTNode::ShCommand");
+        }
+    }
+
+    #[test]
+    fn test_parse_pipeline() {
+        let tokens = vec![
+            Token::Word("echo".to_string()),
+            Token::Word("hello".to_string()),
+            Token::Pipe,
+            Token::Word("wc".to_string()),
+            Token::Eof,
+        ];
+
+        let mut parser = Parser::new(tokens);
+        let pipeline = parser.parse_pipeline().unwrap();
+
+        // Ensure it's a Pipeline node and unwrap the commands
+        if let ASTNode::Pipeline { commands } = pipeline {
+            // Check the number of commands in the pipeline (2)
+            assert_eq!(commands.len(), 2);
+
+            // Check the first command in the pipeline, should be a Builtin (echo)
+            if let ASTNode::Builtin { name, args, redirs } = &commands[0] {
+                assert_eq!(name, "echo");
+                assert_eq!(args, &vec!["hello".to_string()]);
+                assert_eq!(redirs, &Vec::<Redirection>::new());  // Use Vec::new() for an empty vector
+            } else {
+                panic!("Expected ASTNode::Builtin for the first command");
+            }
+
+            // Check the second command in the pipeline, should be a Builtin (wc)
+            if let ASTNode::ShCommand { name, args, redirs } = &commands[1] {
+                assert_eq!(name, "wc");
+                assert_eq!(args.len(), 0); // "wc" should have no arguments in this case
+                assert_eq!(redirs, &Vec::<Redirection>::new());
+            } else {
+                panic!("Expected ASTNode::ShCommand for the second command");
+            }
+        } else {
+            panic!("Expected ASTNode::Pipeline");
+        }
+    }
+
+    #[test]
+    fn test_parse_conditional() {
+        let tokens = vec![
+            Token::If,
+            Token::Word("true".to_string()),
+            Token::Then,
+            Token::Word("echo".to_string()),
+            Token::Word("yes".to_string()),
+            Token::Fi,
+            Token::Eof,
+        ];
+        let mut parser = Parser::new(tokens);
+        let conditional = parser.parse_conditional().unwrap();
+
+        if let ASTNode::Conditional { condition: _, body1, body2 } = conditional {
+            assert!(body2.is_none());
+            if let Some(body1) = body1 {
+                if let ASTNode::Pipeline { commands } = *body1 {
+                    assert_eq!(commands.len(), 1);
+                }
+            }
+        } else {
+            panic!("Expected ASTNode::Conditional");
+        }
+    }
+
+    #[test]
+    fn test_redirection_methods() {
+        let redirection = Redirection {
+            direction: RedirectionType::Input,
+            file: "input.txt".to_string(),
+        };
+
+        assert_eq!(redirection.get_direction(), RedirectionType::Input);
+        assert_eq!(redirection.get_filepath(), "input.txt".to_string());
+    }
 }

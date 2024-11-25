@@ -58,7 +58,7 @@ impl Environment {
     }
 
     pub fn export_var(&mut self, key: &str, value: &str) {
-        self.exported_variables.insert(key.clone().to_string());
+        self.exported_variables.insert(key.to_string());
         self.variables.insert(key.to_string(),value.to_string());
     }
 }

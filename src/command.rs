@@ -1,12 +1,12 @@
-use std::fs::{OpenOptions, File};
+use std::fs::OpenOptions;
 use std::path::Path;
-use std::io::{self, Read, Write};
-use std::env::{self, set_current_dir};
+use std::io::{Read, Write};
+use std::env::{self};
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 
 use crate::helper;
-use crate::environment::{self, Environment};
+use crate::environment::Environment;
 use crate::parser::{RedirectionType, ASTNode};
 
 pub fn node_walk(nodes: Vec<ASTNode>, environment: &mut Environment) -> Result<(), (ExitStatus,String)> {
@@ -109,7 +109,7 @@ pub fn exec_builtin (node: ASTNode, environment: &mut Environment, pipeout: bool
                                     .truncate(true)
                                     .write(true)
                                     .open(redir.get_filepath())
-                                    .map_err(|e| (ExitStatus::from_raw(1), e.to_string()))?;
+                                    .map_err(|e| (ExitStatus::from_raw(1), format!("Echo failed: {}",e)))?;
 
                                 let _ = file.write_all(output.as_bytes());
                             }
@@ -175,7 +175,7 @@ pub fn exec_cmd(node: ASTNode, environment: &mut Environment) -> Result<ExitStat
 
                 let mut child = mk_process(command.clone(), stdin.clone(), pipeout).map_err(|e| (ExitStatus::from_raw(1),e))?;
 
-                child.wait().map_err(|e| (ExitStatus::from_raw(1),e));
+                let _ = child.wait().map_err(|e| (ExitStatus::from_raw(1),e));
 
                 if let Some(output) = child.stdout.as_mut() { // Get stdout from shell command
                     let mut stdout_buffer: Vec<u8> = vec![];
@@ -217,5 +217,165 @@ pub fn exec_conditional(conditional: ASTNode, environment: &mut Environment) -> 
             }
         }
         _ => panic!("Expected Conditional, found some other ASTNode type"),
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{Redirection, RedirectionType};
+
+    fn setup_environment() -> Environment {
+        Environment::new()
+    }
+
+    #[test]
+    fn test_exec_builtin_cd() {
+        let mut environment = setup_environment();
+        let node = ASTNode::Builtin {
+            name: "cd".to_string(),
+            args: vec!["/".to_string()],
+            redirs: vec![],
+        };
+
+        let result = exec_builtin(node, &mut environment, false);
+        assert!(result.is_ok());
+        assert_eq!(std::env::current_dir().unwrap(), Path::new("/"));
+    }
+
+    #[test]
+    fn test_exec_builtin_echo() {
+        let mut environment = setup_environment();
+        let node = ASTNode::Builtin {
+            name: "echo".to_string(),
+            args: vec!["Hello, World!".to_string()],
+            redirs: vec![],
+        };
+
+        let result = exec_builtin(node, &mut environment, false);
+        assert!(result.is_ok());
+
+        if let Ok((_status, Some(output))) = result {
+            assert_eq!(output, "Hello, World!");
+        } else {
+            panic!("Expected echo output, got none or error");
+        }
+    }
+
+    #[test]
+    fn test_exec_builtin_export() {
+        let mut environment = setup_environment();
+        let node = ASTNode::Builtin {
+            name: "export".to_string(),
+            args: vec!["VAR=value".to_string()],
+            redirs: vec![],
+        };
+
+        let result = exec_builtin(node, &mut environment, false);
+        assert!(result.is_ok());
+        assert_eq!(environment.get_var("VAR"), Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn test_exec_sh_command() {
+        let mut environment = setup_environment();
+        let node = ASTNode::ShCommand {
+            name: "true".to_string(),
+            args: vec![],
+            redirs: vec![],
+        };
+
+        let result = exec_cmd(node, &mut environment);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().code(), Some(0));
+    }
+
+    #[test]
+    fn test_exec_pipeline() {
+        let mut environment = setup_environment();
+        let pipeline = ASTNode::Pipeline {
+            commands: vec![
+                ASTNode::ShCommand {
+                    name: "echo".to_string(),
+                    args: vec!["Hello".to_string()],
+                    redirs: vec![],
+                },
+                ASTNode::ShCommand {
+                    name: "wc".to_string(),
+                    args: vec!["-w".to_string()],
+                    redirs: vec![],
+                },
+            ],
+        };
+
+        let result = exec_cmd(pipeline, &mut environment);
+        assert!(result.is_ok());
+        // Assuming "echo Hello | wc -w" outputs 1
+        assert_eq!(result.unwrap().code(), Some(0));
+    }
+
+    #[test]
+    fn test_redirection_output() {
+        let mut environment = setup_environment();
+        let temp_file = "/tmp/test_output";
+
+        let node = ASTNode::Builtin {
+            name: "echo".to_string(),
+            args: vec!["Hello".to_string()],
+            redirs: vec![Redirection::new(
+                RedirectionType::Output,
+                temp_file.to_string(),
+            )],
+        };
+
+        let result = exec_builtin(node, &mut environment, false);
+        println!("{:?}",result);
+        assert!(result.is_ok());
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(temp_file)
+            .unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents.trim(), "Hello");
+
+        // Cleanup
+        std::fs::remove_file(temp_file).unwrap();
+    }
+
+    #[test]
+    fn test_conditional_execution() {
+        let mut environment = setup_environment();
+
+        let condition = Box::new(ASTNode::ShCommand {
+            name: "true".to_string(),
+            args: vec![],
+            redirs: vec![],
+        });
+
+        let body1 = Box::new(ASTNode::ShCommand {
+            name: "echo".to_string(),
+            args: vec!["Condition met".to_string()],
+            redirs: vec![],
+        });
+
+        let body2 = Box::new(ASTNode::ShCommand {
+            name: "echo".to_string(),
+            args: vec!["Condition not met".to_string()],
+            redirs: vec![],
+        });
+
+        let conditional = ASTNode::Conditional {
+            condition,
+            body1: Some(body1),
+            body2: Some(body2),
+        };
+
+        let result = exec_cmd(conditional, &mut environment);
+        assert!(result.is_ok());
+        // Assuming "echo Condition met" outputs properly
+        assert_eq!(result.unwrap().code(), Some(0));
     }
 }

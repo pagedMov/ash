@@ -18,7 +18,15 @@ fn main() {
         match ast {
             Ok(ast) => {
                 debug!("AST: {:#?}", ast);
-                command::node_walk(ast, &mut environ)
+                match command::node_walk(ast, &mut environ) {
+                    Ok(_) => {
+                        environ.set_var("?","0");
+                    }
+                    Err(e) => {
+                        environ.set_var("?", &e.0.to_string());
+                        println!("{}",e.1);
+                    }
+                }
             }
             Err(e) => {
                 println!("{}",e);
