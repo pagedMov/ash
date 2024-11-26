@@ -1,9 +1,9 @@
 use std::fs::OpenOptions;
 use std::path::Path;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::env::{self};
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 use crate::helper;
 use crate::environment::Environment;
@@ -30,20 +30,20 @@ pub fn node_walk(nodes: Vec<ASTNode>, environment: &mut Environment) -> Result<(
     Ok(())
 }
 
-pub fn mk_process(command: ASTNode, stdin: Option<Vec<u8>>, pipeout: bool) -> Result<Child, String> {
+pub fn mk_process(command: ASTNode, stdin: Option<Vec<u8>>, pipeout: bool) -> Result<(ExitStatus,Vec<u8>), (ExitStatus,String)> {
 
     match command {
         ASTNode::ShCommand { name, args, redirs } => {
             let mut child = Command::new(name.clone());
             child.args(args);
 
-            for redir in redirs {
+            for redir in &redirs {
                 match redir.get_direction() {
                     RedirectionType::Input => {
                         let file = OpenOptions::new()
                             .read(true)
                             .open(redir.get_filepath())
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| helper::fail(&e.to_string()))?;
                         if stdin.is_none() {
                             child.stdin(Stdio::from(file));
                         }
@@ -54,7 +54,7 @@ pub fn mk_process(command: ASTNode, stdin: Option<Vec<u8>>, pipeout: bool) -> Re
                             .truncate(true)
                             .write(true)
                             .open(redir.get_filepath())
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| helper::fail(&e.to_string()))?;
                         child.stdout(Stdio::from(file));
                     }
                 }
@@ -68,17 +68,37 @@ pub fn mk_process(command: ASTNode, stdin: Option<Vec<u8>>, pipeout: bool) -> Re
                 child.stdout(Stdio::piped());
             }
 
-            let mut child = child.spawn().map_err(|e| e.to_string())?;
+            let mut child = child.spawn().map_err(|e| helper::fail(&e.to_string()))?;
 
             if let Some(input) = stdin {
-                let _child_stdin = child.stdin.as_mut()
-                    .unwrap()
-                    .write_all(&input);
+                helper::read_bytes(child.stdin.as_mut().unwrap(), &input)
+                    .map_err(|e| helper::fail(&e))?
             }
 
-            Ok(child)
+            let status = child.wait().map_err(|e| helper::fail(&e.to_string()))?;
+
+            // Collect output
+            let mut stdout_buffer: Vec<u8> = vec![];
+            if let Some(output) = child.stdout.as_mut() {
+                stdout_buffer = helper::write_bytes(output)
+                    .map_err(|e| helper::fail(&e))?;
+            }
+
+            let mut stderr_buffer: Vec<u8> = vec![];
+            if let Some(error) = child.stderr.as_mut() {
+                stderr_buffer = helper::write_bytes(error)
+                    .map_err(|e| helper::fail(&e))?;
+            }
+
+            if !pipeout && redirs.is_empty() {
+                helper::write_stdout(stdout_buffer.clone())?;
+            }
+
+            helper::write_stderr(stderr_buffer.clone())?;
+
+            Ok((status,stdout_buffer))
         }
-        _ => Err("Expected ShCommand, got some other ASTNode from the parser".to_string()),
+        _ => Err(helper::fail("Expected ShCommand, got some other ASTNode from the parser")),
     }
 }
 
@@ -163,8 +183,7 @@ pub fn exec_cmd(node: ASTNode, environment: &mut Environment) -> Result<ExitStat
 
     match &node {
         ASTNode::ShCommand { name: _, args: _, redirs: _ } => {
-            let mut child = mk_process(node, None, false).map_err(|e| (ExitStatus::from_raw(1),e))?;
-            let status = child.wait().map_err(|e| (ExitStatus::from_raw(1),e.to_string()))?;
+            let (status,_stdout) = mk_process(node, None, false)?;
             Ok(status)
         }
 
@@ -172,6 +191,7 @@ pub fn exec_cmd(node: ASTNode, environment: &mut Environment) -> Result<ExitStat
             let mut stdin: Option<Vec<u8>> = None; // Standard input
             let mut pipeout = true;
             let mut command_iter = commands.iter().peekable();
+            let mut final_status = ExitStatus::from_raw(1);
 
             while let Some(command) = command_iter.next() {
                 if command_iter.peek().is_none() {
@@ -179,30 +199,21 @@ pub fn exec_cmd(node: ASTNode, environment: &mut Environment) -> Result<ExitStat
                 }
 
                 if let ASTNode::Builtin { .. } = command {
-                    let (_status,output) = exec_builtin(command.clone(), environment, pipeout)?;
+                    let (status,output) = exec_builtin(command.clone(), environment, pipeout)?;
                     if let Some(stdout) = output { // Get stdout from shell builtin
                         stdin = Some(stdout.into_bytes());
                     }
+                    final_status = status;
 
                     continue;
                 }
 
-                let mut child = mk_process(command.clone(), stdin.clone(), pipeout).map_err(|e| (ExitStatus::from_raw(1),e))?;
-
-                let _ = child.wait().map_err(|e| (ExitStatus::from_raw(1),e));
-
-                if let Some(output) = child.stdout.as_mut() { // Get stdout from shell command
-                    let mut stdout_buffer: Vec<u8> = vec![];
-                    let _ = output.read_to_end(&mut stdout_buffer);
-                    if !pipeout {
-                        helper::write_stdout(stdout_buffer)?;
-                    } else {
-                        stdin = Some(stdout_buffer);
-                    }
-                }
+                let (status,stdout) = mk_process(command.clone(), stdin.clone(), pipeout)?;
+                final_status = status;
+                stdin = Some(stdout);
             }
 
-            Ok(helper::succeed())
+            Ok(final_status)
         }
 
         ASTNode::Conditional { condition: _, body1: _, body2: _ } => {
@@ -354,9 +365,8 @@ mod tests {
             .read(true)
             .open(temp_file)
             .unwrap();
-        let mut contents = String::new();
-        file.read_to_string(&mut contents).unwrap();
-        assert_eq!(contents.trim(), "Hello");
+        let contents = helper::write_bytes(&mut file).unwrap();
+        assert_eq!(String::from_utf8(contents).unwrap().trim(), "Hello");
 
         // Cleanup
         std::fs::remove_file(temp_file).unwrap();
@@ -383,9 +393,8 @@ mod tests {
             .read(true)
             .open(temp_file)
             .unwrap();
-        let mut contents = String::new();
-        file.read_to_string(&mut contents).unwrap();
-        assert_eq!(contents.trim(), "Hello, World!");
+        let contents = helper::write_bytes(&mut file).unwrap();
+        assert_eq!(String::from_utf8(contents).unwrap().trim(), "Hello, World!");
 
         // Cleanup
         std::fs::remove_file(temp_file).unwrap();
