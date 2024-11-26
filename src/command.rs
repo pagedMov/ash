@@ -1,14 +1,12 @@
 use log::{debug, error, info, trace, warn}; // Import logging macros
-use std::env::{self};
-use std::fs::OpenOptions;
-use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::builtins::{self, alias};
+use crate::builtins;
 use crate::environment::Environment;
 use crate::helper;
 use crate::parser::{ASTNode, RedirectionType};
 
+#[derive(Debug,PartialEq)]
 pub struct CommandOutput {
     exit_code: i32,
     stdout: Vec<u8>,
@@ -51,11 +49,15 @@ pub fn node_walk(
         match &node {
             ASTNode::Builtin { .. } | ASTNode::ShCommand { .. } | ASTNode::Pipeline { .. } => {
                 trace!("Executing shell command or pipeline");
-                exec_cmd(node, environment)?;
+                let command = exec_cmd(&node, environment, None)?;
+                let output = command.stdout().to_vec();
+                helper::write_stdout(output)?;
             }
             ASTNode::Conditional { .. } => {
                 trace!("Executing conditional statement");
-                exec_conditional(node, environment)?;
+                let command = exec_conditional(node, environment)?;
+                let output = command.stdout().to_vec();
+                helper::write_stdout(output)?;
             }
             _ => {
                 error!("Unexpected AST node type: {:?}", node);
@@ -146,72 +148,60 @@ pub fn mk_process(
 }
 
 pub fn exec_cmd(
-    node: ASTNode,
+    node: &ASTNode,
     environment: &mut Environment,
-) -> Result<i32, (i32, String)> {
-    match &node {
+    mut stdin: Option<Vec<u8>>
+) -> Result<CommandOutput, (i32, String)> {
+    match node {
+        ASTNode::Builtin { name, args, redirs } => {
+            trace!("Executing builtin command within pipeline");
+            let output = match name.as_str() {
+                "cd" => builtins::cd(args.to_vec(), environment)?,
+                "echo" => builtins::echo(args.to_vec(), redirs.to_vec())?,
+                "export" => builtins::export(args.to_vec(), environment)?,
+                "alias" => builtins::alias(args.to_vec(), environment)?,
+                "exit" => builtins::exit(args.to_vec())?,
+                "unset" => builtins::unset(args.to_vec(), environment)?,
+                _ => {
+                    error!("Unknown builtin command: {}",name);
+                    panic!("Expected builtin, got {}",name);
+                }
+            };
+            Ok(output)
+        }
         ASTNode::ShCommand { .. } => {
             info!("Executing shell command");
-            let output = mk_process(node, None)?;
+            let output = mk_process(node.clone(), stdin)?;
             debug!("Shell command executed with exit code: {}", output.exit_code());
-            Ok(output.exit_code())
+            Ok(output)
         }
         ASTNode::Pipeline { commands } => {
             info!("Executing pipeline with {} commands", commands.len());
-            let mut stdin: Option<Vec<u8>> = None;
-            let mut pipeout: bool;
-            let mut final_status = 1;
+            let mut final_output = CommandOutput::simple_success(); // placeholder
 
             for (i, command) in commands.iter().enumerate() {
                 debug!("Processing command {} in pipeline", i + 1);
-                pipeout = commands.last() != Some(command);
-                trace!("Pipeout: {}", pipeout);
 
-                if let ASTNode::Builtin { name, args, redirs } = command {
-                    trace!("Executing builtin command within pipeline");
-                    let output = match name.as_str() {
-                        "cd" => builtins::cd(args.to_vec(), environment)?,
-                        "echo" => builtins::echo(args.to_vec(), redirs.to_vec())?,
-                        "export" => builtins::export(args.to_vec(), environment)?,
-                        "alias" => builtins::alias(args.to_vec(), environment)?,
-                        "exit" => builtins::exit(args.to_vec())?,
-                        "unset" => builtins::unset(args.to_vec(), environment)?,
-                    };
-                    let output = exec_builtin(command.clone(), environment)?;
-                    let stdout = output.stdout();
-                    let stderr = output.stderr();
-                    if !stdout.is_empty() {
-                        if pipeout {
-                            debug!("Piping stdout to the next command in pipeline");
-                            stdin = Some(stdout.to_vec());
-                        } else {
-                            trace!("Writing final output of pipeline to stdout");
-                            helper::write_stdout(stdout.to_vec())?;
-                        }
-                    }
-                    final_status = output.exit_code();
+                let output: CommandOutput;
+                if let Some(input) = &stdin {
+                    output = exec_cmd(command, environment, Some(input.to_vec()))?;
                 } else {
-                    trace!("Executing external command within pipeline");
-                    let output = mk_process(command.clone(), stdin.clone())?;
-                    let stdout = output.stdout();
-                    let stderr = output.stderr();
-                    final_status = output.exit_code();
-                    if pipeout {
-                        debug!("Piping stdout to the next command in pipeline");
-                        stdin = Some(output.stdout().to_vec());
-                    } else {
-                        trace!("Writing final output of pipeline to stdout");
-                        helper::write_stdout(stdout.to_vec())?;
-                    }
+                    output = exec_cmd(command, environment, None)?;
                 }
+
+                let stdout = output.stdout();
+                let _stderr = output.stderr();
+
+                stdin = Some(output.stdout().to_vec());
+
+                final_output = output;
             }
 
-            debug!("Pipeline completed with final exit code: {}", final_status);
-            Ok(final_status)
+            Ok(final_output)
         }
         ASTNode::Conditional { .. } => {
             info!("Executing conditional statement");
-            exec_conditional(node, environment)
+            exec_conditional(node.clone(), environment)
         }
         _ => {
             error!("Unexpected ASTNode type: {:?}", node);
@@ -223,7 +213,7 @@ pub fn exec_cmd(
 pub fn exec_conditional(
     conditional: ASTNode,
     environment: &mut Environment,
-) -> Result<i32, (i32, String)> {
+) -> Result<CommandOutput, (i32, String)> {
     if let ASTNode::Conditional {
         condition,
         body1,
@@ -231,17 +221,17 @@ pub fn exec_conditional(
     } = conditional
     {
         info!("Evaluating conditional statement");
-        let condition_status = exec_cmd(*condition, environment)?;
-        debug!("Condition evaluated with status: {}", condition_status);
+        let condition_status = exec_cmd(&condition, environment, None)?;
+        debug!("Condition evaluated with status: {}", condition_status.exit_code());
 
-        if condition_status == 0 {
+        if condition_status.exit_code() == 0 {
             trace!("Condition succeeded; executing body1");
             if let Some(body) = body1 {
-                return exec_cmd(*body, environment);
+                return exec_cmd(&body, environment, None);
             }
             trace!("body1 is empty; falling back to body2 (if any)");
             if let Some(body) = body2 {
-                return exec_cmd(*body, environment);
+                return exec_cmd(&body, environment, None);
             }
             warn!("Empty conditional statement encountered");
             return Err(helper::fail("Found empty if statement"));
@@ -249,7 +239,7 @@ pub fn exec_conditional(
 
         trace!("Condition failed; executing body2 (if any)");
         if let Some(body) = body2 {
-            return exec_cmd(*body, environment);
+            return exec_cmd(&body, environment, None);
         }
 
         warn!("Empty conditional statement encountered");
@@ -264,13 +254,15 @@ pub fn exec_conditional(
 mod tests {
     use super::*;
     use crate::parser::{Redirection, RedirectionType};
+    use std::fs::OpenOptions;
+    use std::path::Path;
 
     fn setup_environment() -> Environment {
         Environment::new()
     }
 
     #[test]
-    fn test_exec_builtin_cd() {
+    fn test_builtins_cd() {
         let mut environment = setup_environment();
         let node = ASTNode::Builtin {
             name: "cd".to_string(),
@@ -278,13 +270,13 @@ mod tests {
             redirs: vec![],
         };
 
-        let result = exec_builtin(node, &mut environment);
+        let result = exec_cmd(&node, &mut environment, None);
         assert!(result.is_ok());
         assert_eq!(std::env::current_dir().unwrap(), Path::new("/"));
     }
 
     #[test]
-    fn test_exec_builtin_echo() {
+    fn test_builtins_echo() {
         let mut environment = setup_environment();
         let node = ASTNode::Builtin {
             name: "echo".to_string(),
@@ -292,7 +284,7 @@ mod tests {
             redirs: vec![],
         };
 
-        let result = exec_builtin(node, &mut environment);
+        let result = exec_cmd(&node, &mut environment, None);
         assert!(result.is_ok());
 
         if let Ok(output) = result {
@@ -303,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exec_builtin_export() {
+    fn test_builtins_export() {
         let mut environment = setup_environment();
         let node = ASTNode::Builtin {
             name: "export".to_string(),
@@ -311,7 +303,7 @@ mod tests {
             redirs: vec![],
         };
 
-        let result = exec_builtin(node, &mut environment);
+        let result = exec_cmd(&node, &mut environment, None);
         assert!(result.is_ok());
         assert_eq!(environment.get_var("VAR"), Some(&"value".to_string()));
     }
@@ -325,9 +317,9 @@ mod tests {
             redirs: vec![],
         };
 
-        let result = exec_cmd(node, &mut environment);
+        let result = exec_cmd(&node, &mut environment, None);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 0);
+        assert_eq!(result.unwrap().exit_code(), 0);
     }
 
     #[test]
@@ -348,10 +340,10 @@ mod tests {
             ],
         };
 
-        let result = exec_cmd(pipeline, &mut environment);
+        let result = exec_cmd(&pipeline, &mut environment, None);
         assert!(result.is_ok());
         // Assuming "echo Hello | wc -w" outputs 1
-        assert_eq!(result.unwrap(), 0);
+        assert_eq!(result.unwrap().exit_code(), 0);
     }
 
     #[test]
@@ -368,7 +360,7 @@ mod tests {
             )],
         };
 
-        let result = exec_builtin(node, &mut environment);
+        let result = exec_cmd(&node, &mut environment, None);
         assert!(result.is_ok());
 
         let mut file = OpenOptions::new().read(true).open(temp_file).unwrap();
@@ -393,7 +385,7 @@ mod tests {
             )],
         };
 
-        let result = exec_cmd(node, &mut environment);
+        let result = exec_cmd(&node, &mut environment, None);
         assert!(result.is_ok());
 
         let mut file = OpenOptions::new().read(true).open(temp_file).unwrap();
@@ -433,9 +425,9 @@ mod tests {
             body2: Some(body2),
         };
 
-        let result = exec_cmd(conditional, &mut environment);
+        let result = exec_cmd(&conditional, &mut environment, None);
         assert!(result.is_ok());
         // Assuming "echo Condition met" outputs properly
-        assert_eq!(result.unwrap(), 0);
+        assert_eq!(result.unwrap().exit_code(), 0);
     }
 }
