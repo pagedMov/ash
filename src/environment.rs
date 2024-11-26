@@ -1,4 +1,5 @@
 use std::collections::{HashSet, HashMap};
+use std::env::{self};
 
 #[derive(Default)]
 pub struct Environment {
@@ -10,12 +11,10 @@ pub struct Environment {
 impl Environment {
     pub fn new() -> Self {
         let mut environment = Environment {
-            exported_variables: HashSet::new(),
             variables: HashMap::new(),
             aliases: HashMap::new()
         };
-        for (key,value) in std::env::vars() {
-            environment.exported_variables.insert(key.clone());
+        for (key,value) in env::vars() {
             environment.variables.insert(key,value);
         }
 
@@ -48,9 +47,7 @@ impl Environment {
 
     pub fn unset_var(&mut self,key: &str) -> Result<(),i32> {
         if self.variables.contains_key(key) {
-            if self.exported_variables.contains(key) {
-                let _ = self.exported_variables.remove(key);
-            }
+            env::remove_var(key);
             let _ = self.variables.remove(key);
             return Ok(());
         }
@@ -58,7 +55,7 @@ impl Environment {
     }
 
     pub fn export_var(&mut self, key: &str, value: &str) {
-        self.exported_variables.insert(key.to_string());
+        env::set_var(key, value);
         self.variables.insert(key.to_string(),value.to_string());
     }
 }

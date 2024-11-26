@@ -9,7 +9,7 @@ use std::io::{stdout, stderr, Read, Write};
 use crate::parser::Redirection;
 
 pub fn is_var_declaration(word: String) -> bool {
-    let regex = Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_-]*=[^=]+$").unwrap();
+    let regex = Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_-]*=[^=]*$").unwrap();
     regex.is_match(&word)
 }
 
