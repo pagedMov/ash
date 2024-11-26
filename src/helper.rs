@@ -1,8 +1,6 @@
 use regex::Regex;
 use std::str::Chars;
 use std::iter::Peekable;
-use std::os::unix::process::ExitStatusExt;
-use std::process::ExitStatus;
 use std::io::{stdout, stderr, Read, Write};
 
 pub fn is_var_declaration(word: String) -> bool {
@@ -10,11 +8,23 @@ pub fn is_var_declaration(word: String) -> bool {
     regex.is_match(&word)
 }
 
-pub fn fail(reason: &str) -> (ExitStatus,String) {
-    (ExitStatus::from_raw(1),reason.to_string())
+pub fn extract_var(word: String) -> Result<(String, String), (i32,String)> {
+    if let Some((key, value)) = word.split_once('=') {
+        if !key.is_empty() {
+            Ok((key.to_string(), value.to_string()))
+        } else {
+            Err(fail("Error parsing key-value pair: key is empty"))
+        }
+    } else {
+        Err(fail("Error parsing key-value pair: no '=' found"))
+    }
 }
-pub fn succeed() -> ExitStatus {
-    ExitStatus::from_raw(0)
+
+pub fn fail(reason: &str) -> (i32,String) {
+    (1,reason.to_string())
+}
+pub fn succeed() -> i32 {
+    0
 }
 
 pub fn build_word(chars: &mut Peekable<Chars<'_>>,mut singlequote: bool, mut doublequote: bool, mut word: String) -> String {
@@ -44,45 +54,116 @@ pub fn build_word(chars: &mut Peekable<Chars<'_>>,mut singlequote: bool, mut dou
     word
 }
 
-pub fn read_bytes<R>(read_from: &mut R) -> Result<Vec<u8>,String> where R: Read  {
+pub fn read_bytes<R>(writer: &mut R) -> Result<Vec<u8>,String> where R: Read  {
     let mut buffer: Vec<u8> = vec![];
-    match read_from.read_to_end(&mut buffer) {
+    match writer.read_to_end(&mut buffer) {
         Ok(_) => { Ok(buffer) },
         Err(e) => { Err(e.to_string()) }
     }
 }
 
-pub fn write_bytes<W>(write_to: &mut W, read_from: &[u8]) -> Result<(),String> where W: Write  {
-    match write_to.write_all(read_from) {
+pub fn write_bytes<W>(reader: &mut W, writer: &[u8]) -> Result<(),String> where W: Write  {
+    match reader.write_all(writer) {
         Ok(_) => { Ok(()) },
         Err(e) => { Err(e.to_string()) }
     }
 }
 
-pub fn write_stdout(output: Vec<u8>) -> Result<(),(ExitStatus, String)> {
-    stdout().write_all(&output).map_err(|e| {
-        (ExitStatus::from_raw(1), format!("Echo failed: {}", e))
-    })?;
-    stdout().flush().map_err(|e| {
-        (ExitStatus::from_raw(1), format!("Echo failed: {}", e))
-    })?;
+pub fn write_stdout(output: Vec<u8>) -> Result<(),(i32, String)> {
+    stdout().write_all(&output)
+        .map_err(|e| fail(&format!("Echo failed: {}",e)))?;
+    stdout().flush()
+        .map_err(|e| fail(&format!("Echo failed: {}",e)))?;
     Ok(())
 }
 
-pub fn write_stderr(output: Vec<u8>) -> Result<(),(ExitStatus, String)> {
-    stderr().write_all(&output).map_err(|e| {
-        (ExitStatus::from_raw(1), format!("Echo failed: {}", e))
-    })?;
-    stderr().flush().map_err(|e| {
-        (ExitStatus::from_raw(1), format!("Echo failed: {}", e))
-    })?;
+pub fn write_stderr(output: Vec<u8>) -> Result<(),(i32, String)> {
+    stderr().write_all(&output)
+        .map_err(|e| fail(&format!("Echo failed: {}",e)))?;
+    stderr().flush()
+        .map_err(|e| fail(&format!("Echo failed: {}",e)))?;
     Ok(())
 }
 
-pub fn extract_var(word: String) -> Result<(String,String),String> {
-    if let Some((key, value)) = word.split_once('=') {
-        Ok((key.to_string(),value.to_string()))
-    } else {
-        Err("Error parsing key-value pair".to_string())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_is_var_declaration() {
+        assert!(is_var_declaration("VAR=value".to_string()));
+        assert!(is_var_declaration("a1_b2=value".to_string()));
+        assert!(is_var_declaration("VAR1=value".to_string()));
+        assert!(!is_var_declaration("=value".to_string()));
+        assert!(!is_var_declaration("1VAR=value".to_string()));
+        assert!(!is_var_declaration("VAR==value".to_string()));
+    }
+
+    #[test]
+    fn test_extract_var() {
+        assert_eq!(
+            extract_var("VAR=value".to_string()).unwrap(),
+            ("VAR".to_string(), "value".to_string())
+        );
+        assert_eq!(
+            extract_var("KEY=12345".to_string()).unwrap(),
+            ("KEY".to_string(), "12345".to_string())
+        );
+        assert!(extract_var("KEY=value=extra".to_string()).is_ok());
+        assert!(extract_var("=value".to_string()).is_err());
+    }
+
+    #[test]
+    fn test_fail_and_succeed() {
+        let fail_result = fail("Some error");
+        println!("error code: {:?}",fail_result.0);
+        assert_eq!(fail_result.0, 1);
+        assert_eq!(fail_result.1, "Some error");
+
+        let success_status = succeed();
+        assert_eq!(success_status, 0);
+    }
+
+    #[test]
+    fn test_build_word() {
+        let mut chars = "\"hello world\"; more".chars().peekable();
+        assert_eq!(build_word(&mut chars, false, false, String::new()), "hello world");
+        assert_eq!(chars.collect::<String>(), "; more");
+
+        let mut chars = "'single quoted'; other".chars().peekable();
+        assert_eq!(build_word(&mut chars, false, false, String::new()), "single quoted");
+        assert_eq!(chars.collect::<String>(), "; other");
+
+        let mut chars = "plainword<>next".chars().peekable();
+        assert_eq!(build_word(&mut chars, false, false, String::new()), "plainword");
+        assert_eq!(chars.collect::<String>(), "<>next");
+    }
+
+    #[test]
+    fn test_read_bytes() {
+        let input = b"test data";
+        let mut cursor = Cursor::new(input);
+        let result = read_bytes(&mut cursor).unwrap();
+        assert_eq!(result, input.to_vec());
+    }
+
+    #[test]
+    fn test_write_bytes() {
+        let mut buffer = Vec::new();
+        write_bytes(&mut buffer, b"test write").unwrap();
+        assert_eq!(buffer, b"test write");
+    }
+
+    #[test]
+    fn test_write_stdout() {
+        let output = b"stdout test\n";
+        assert!(write_stdout(output.to_vec()).is_ok());
+    }
+
+    #[test]
+    fn test_write_stderr() {
+        let output = b"stderr test\n";
+        assert!(write_stderr(output.to_vec()).is_ok());
     }
 }

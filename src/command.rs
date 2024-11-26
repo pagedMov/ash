@@ -1,9 +1,7 @@
 use std::env::{self};
 use std::fs::OpenOptions;
-use std::io::Write;
-use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 
 use crate::environment::Environment;
 use crate::helper;
@@ -12,7 +10,7 @@ use crate::parser::{ASTNode, RedirectionType};
 pub fn node_walk(
     nodes: Vec<ASTNode>,
     environment: &mut Environment,
-) -> Result<(), (ExitStatus, String)> {
+) -> Result<(), (i32, String)> {
     for node in nodes {
         match &node {
             ASTNode::Builtin { .. } => {
@@ -34,7 +32,7 @@ pub fn mk_process(
     command: ASTNode,
     stdin: Option<Vec<u8>>,
     pipeout: bool,
-) -> Result<(ExitStatus, Vec<u8>), (ExitStatus, String)> {
+) -> Result<(i32, Vec<u8>), (i32, String)> {
     if let ASTNode::ShCommand { name, args, redirs } = command {
         let mut child = Command::new(name.clone());
         child.args(args);
@@ -96,7 +94,7 @@ pub fn mk_process(
 
         helper::write_stderr(stderr_buffer.clone())?;
 
-        return Ok((status, stdout_buffer));
+        return Ok((status.code().unwrap(), stdout_buffer));
     }
     Err(helper::fail(
         "Expected ShCommand, got some other ASTNode from the parser",
@@ -107,7 +105,7 @@ pub fn exec_builtin(
     node: ASTNode,
     environment: &mut Environment,
     pipeout: bool,
-) -> Result<(ExitStatus, Option<String>), (ExitStatus, String)> {
+) -> Result<(i32, Option<String>), (i32, String)> {
     if let ASTNode::Builtin { name, args, redirs } = &node {
         match name.as_str() {
             "cd" => {
@@ -118,7 +116,7 @@ pub fn exec_builtin(
                         .unwrap_or("/")
                 });
                 env::set_current_dir(Path::new(path))
-                    .map_err(|e| (ExitStatus::from_raw(1), e.to_string()))?;
+                    .map_err(|e| helper::fail(&e.to_string()))?;
                 Ok((helper::succeed(), None))
             }
             "echo" => {
@@ -131,9 +129,7 @@ pub fn exec_builtin(
                                 .truncate(true)
                                 .write(true)
                                 .open(redir.get_filepath())
-                                .map_err(|e| {
-                                    (ExitStatus::from_raw(1), format!("Echo failed: {}", e))
-                                })?;
+                                .map_err(|e| helper::fail(&e.to_string()))?;
                             helper::write_bytes(&mut file, output.as_bytes())
                                 .map_err(|e| helper::fail(&e))?
                         }
@@ -185,7 +181,7 @@ pub fn exec_builtin(
 pub fn exec_cmd(
     node: ASTNode,
     environment: &mut Environment,
-) -> Result<ExitStatus, (ExitStatus, String)> {
+) -> Result<i32, (i32, String)> {
     match &node {
         ASTNode::ShCommand { .. } => {
             let (status, _) = mk_process(node, None, false)?;
@@ -194,7 +190,7 @@ pub fn exec_cmd(
         ASTNode::Pipeline { commands } => {
             let mut stdin: Option<Vec<u8>> = None;
             let mut pipeout: bool;
-            let mut final_status = ExitStatus::from_raw(1);
+            let mut final_status = 1;
 
             for command in commands.iter() {
                 pipeout = commands.last() != Some(command);
@@ -222,16 +218,16 @@ pub fn exec_cmd(
 pub fn exec_conditional(
     conditional: ASTNode,
     environment: &mut Environment,
-) -> Result<ExitStatus, (ExitStatus, String)> {
+) -> Result<i32, (i32, String)> {
     if let ASTNode::Conditional {
         condition,
         body1,
         body2,
     } = conditional
     {
-        let condition_status = exec_cmd(*condition, environment)?.code();
+        let condition_status = exec_cmd(*condition, environment)?;
 
-        if condition_status == Some(0) {
+        if condition_status == 0 {
             if let Some(body) = body1 {
                 return exec_cmd(*body, environment);
             }
@@ -317,7 +313,7 @@ mod tests {
 
         let result = exec_cmd(node, &mut environment);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().code(), Some(0));
+        assert_eq!(result.unwrap(), 0);
     }
 
     #[test]
@@ -341,7 +337,7 @@ mod tests {
         let result = exec_cmd(pipeline, &mut environment);
         assert!(result.is_ok());
         // Assuming "echo Hello | wc -w" outputs 1
-        assert_eq!(result.unwrap().code(), Some(0));
+        assert_eq!(result.unwrap(), 0);
     }
 
     #[test]
@@ -425,6 +421,6 @@ mod tests {
         let result = exec_cmd(conditional, &mut environment);
         assert!(result.is_ok());
         // Assuming "echo Condition met" outputs properly
-        assert_eq!(result.unwrap().code(), Some(0));
+        assert_eq!(result.unwrap(), 0);
     }
 }

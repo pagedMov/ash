@@ -1,3 +1,4 @@
+#![feature(exit_status_error)]
 pub mod command;
 pub mod parser;
 pub mod prompt;
