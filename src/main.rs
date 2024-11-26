@@ -1,9 +1,9 @@
-#![feature(exit_status_error)]
 pub mod command;
 pub mod parser;
 pub mod prompt;
 pub mod environment;
 pub mod helper;
+pub mod builtins;
 use log::{info, debug};
 
 fn main() {

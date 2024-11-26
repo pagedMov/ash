@@ -1,7 +1,12 @@
 use regex::Regex;
+use std::fs::OpenOptions;
+use std::path::Path;
+use std::process::{Child, ChildStdin,ChildStdout};
 use std::str::Chars;
 use std::iter::Peekable;
 use std::io::{stdout, stderr, Read, Write};
+
+use crate::parser::Redirection;
 
 pub fn is_var_declaration(word: String) -> bool {
     let regex = Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_-]*=[^=]+$").unwrap();
@@ -18,6 +23,28 @@ pub fn extract_var(word: String) -> Result<(String, String), (i32,String)> {
     } else {
         Err(fail("Error parsing key-value pair: no '=' found"))
     }
+}
+
+pub fn redirect_input(redir: Redirection) -> Result<Vec<u8>,(i32,String)> {
+    let mut buffer: Vec<u8> = vec![];
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(redir.get_filepath())
+        .map_err(|e| fail(&e.to_string()))?;
+    let file_content = read_bytes(&mut file)?;
+    write_bytes(&mut buffer, &file_content)?;
+    Ok(buffer)
+}
+
+pub fn redirect_output(buffer: Vec<u8>, redir: Redirection) -> Result<(),(i32,String)> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(redir.get_filepath())
+        .map_err(|e| fail(&e.to_string()))?;
+    write_bytes(&mut file, &buffer)?;
+    Ok(())
 }
 
 pub fn fail(reason: &str) -> (i32,String) {
@@ -54,18 +81,18 @@ pub fn build_word(chars: &mut Peekable<Chars<'_>>,mut singlequote: bool, mut dou
     word
 }
 
-pub fn read_bytes<R>(writer: &mut R) -> Result<Vec<u8>,String> where R: Read  {
+pub fn read_bytes<R>(writer: &mut R) -> Result<Vec<u8>,(i32,String)> where R: Read  {
     let mut buffer: Vec<u8> = vec![];
     match writer.read_to_end(&mut buffer) {
         Ok(_) => { Ok(buffer) },
-        Err(e) => { Err(e.to_string()) }
+        Err(e) => { Err(fail(&e.to_string())) }
     }
 }
 
-pub fn write_bytes<W>(reader: &mut W, writer: &[u8]) -> Result<(),String> where W: Write  {
+pub fn write_bytes<W>(reader: &mut W, writer: &[u8]) -> Result<(),(i32,String)> where W: Write  {
     match reader.write_all(writer) {
         Ok(_) => { Ok(()) },
-        Err(e) => { Err(e.to_string()) }
+        Err(e) => { Err(fail(&e.to_string())) }
     }
 }
 

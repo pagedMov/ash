@@ -1,4 +1,5 @@
-use log::debug;
+use log::{info,trace,error,debug,};
+
 use crate::helper;
 use crate::environment::Environment;
 
@@ -54,7 +55,8 @@ impl Redirection {
 #[derive(Debug,Clone,PartialEq)]
 pub enum RedirectionType {
     Input, // <
-    Output // >
+    Output,// >
+    Error // 2>
 }
 
 #[derive(Clone,Debug,PartialEq)]
@@ -66,6 +68,7 @@ pub enum Token {
     Pipe,
     RedirectIn,
     RedirectOut,
+    RedirectErr,
     If,
     Then,
     Else,
@@ -81,7 +84,6 @@ pub enum Token {
 pub fn tokenize(input: &str, environment: &Environment) -> Vec<Token> {
     let mut tokens: Vec<Token> = Vec::new();
     let mut chars = input.chars().peekable();
-    debug!("Tokenizing input: {}",input);
 
     while let Some(&ch) = chars.peek() {
         match ch {
@@ -167,11 +169,10 @@ pub fn tokenize(input: &str, environment: &Environment) -> Vec<Token> {
     }
 
     tokens.push(Token::Eof);
-    debug!("Returning tokens: {:?}",tokens);
     tokens
 }
 
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -179,19 +180,23 @@ pub struct Parser {
 
 impl<'a> Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        debug!("Initializing parser");
+        debug!("Initializing parser with tokens: {:?}", tokens);
         Self { tokens, pos: 0 }
     }
+
     fn current_token(&self) -> &Token {
         let token = self.tokens.get(self.pos).unwrap_or(&Token::Eof);
-        debug!("Getting current token: {:?}",token);
+        trace!("Getting current token: {:?}", token);
         token
     }
+
     fn advance(&mut self) {
+        trace!("Advancing from token at position {}: {:?}", self.pos, self.current_token());
         self.pos += 1;
     }
-    fn parse_command(&mut self) -> Result<ASTNode,&'a str> {
-        debug!("Parsing command...");
+
+    fn parse_command(&mut self) -> Result<ASTNode, &'a str> {
+        info!("Starting to parse command...");
         if let Token::Word(name) = self.current_token() {
             let name = name.clone();
             self.advance();
@@ -201,6 +206,7 @@ impl<'a> Parser {
 
             loop {
                 let token = self.current_token().clone();
+                trace!("Processing token in command: {:?}", token);
                 match token {
                     Token::Word(arg) => {
                         args.push(arg);
@@ -209,158 +215,195 @@ impl<'a> Parser {
                     Token::RedirectIn => {
                         self.advance();
                         if let Token::Word(file) = self.current_token() {
+                            trace!("Adding input redirection: {}", file);
                             redirs.push(Redirection {
                                 direction: RedirectionType::Input,
-                                file: file.clone()
+                                file: file.clone(),
                             });
                             self.advance();
                         } else {
-                            return Err("Expecteed file after '<'");
+                            error!("Expected file after '<', found: {:?}", self.current_token());
+                            return Err("Expected file after '<'");
                         }
                     }
                     Token::RedirectOut => {
                         self.advance();
                         if let Token::Word(file) = self.current_token() {
+                            trace!("Adding output redirection: {}", file);
                             redirs.push(Redirection {
                                 direction: RedirectionType::Output,
-                                file: file.clone()
+                                file: file.clone(),
                             });
                             self.advance();
                         } else {
+                            error!("Expected file after '>', found: {:?}", self.current_token());
                             return Err("Expected file after '>'");
                         }
                     }
-                    _ => break
+                    _ => break,
                 }
             }
 
             if BUILTINS.contains(&name.as_str()) {
                 let builtin = ASTNode::Builtin { name, args, redirs };
-                debug!("Returning shell builtin: {:?}", builtin);
-                return Ok(builtin)
+                debug!("Parsed builtin command: {:?}", builtin);
+                return Ok(builtin);
             }
 
-            let command = ASTNode::ShCommand {
-                name,
-                args,
-                redirs
-            };
-            debug!("Returning command: {:?}",command);
+            let command = ASTNode::ShCommand { name, args, redirs };
+            debug!("Parsed shell command: {:?}", command);
             Ok(command)
         } else {
+            error!("Unexpected token when parsing command: {:?}", self.current_token());
             Err("Unexpected token found")
         }
     }
-    fn parse_pipeline(&mut self) -> Result<ASTNode,&'a str> {
+
+    fn parse_pipeline(&mut self) -> Result<ASTNode, &'a str> {
+        info!("Starting to parse pipeline...");
         let mut commands = vec![self.parse_command()?];
-        debug!("Parsing pipeline: {:?}",commands);
+        debug!("First command in pipeline: {:?}", commands[0]);
 
         loop {
             let token = self.current_token();
             match *token {
                 Token::Pipe => {
+                    trace!("Found pipe, adding next command to pipeline...");
                     self.advance();
                     commands.push(self.parse_command()?);
                 }
                 Token::Semicolon | Token::Newline => {
+                    trace!("End of pipeline detected");
                     self.advance();
-                    break
+                    break;
                 }
-                _ => break
+                _ => break,
             }
         }
 
         if commands.len() == 1 {
             let command = commands.remove(0);
-            debug!("Returning command: {:?}", command);
+            trace!("Pipeline contains a single command: {:?}", command);
             Ok(command)
         } else {
-            debug!("Returning pipeline: {:?}",commands);
+            debug!("Parsed pipeline with commands: {:?}", commands);
             Ok(ASTNode::Pipeline { commands })
         }
     }
-    fn parse_conditional(&mut self) -> Result<ASTNode,&'a str> {
+
+    fn parse_conditional(&mut self) -> Result<ASTNode, &'a str> {
+        info!("Starting to parse conditional...");
         self.advance();
 
         let condition = Box::new(self.parse_pipeline()?);
-        debug!("Parsing new conditional with condition: {:?}",condition);
+        debug!("Parsed condition of conditional: {:?}", condition);
+
+        let mut body1: Option<Box<ASTNode>> = None;
+        let mut body2: Option<Box<ASTNode>> = None;
 
         loop {
             let token = self.current_token();
+            trace!("Processing token in conditional: {:?}", token);
+
             match *token {
                 Token::Semicolon => {
+                    trace!("Skipping semicolon in conditional");
                     self.advance();
                     continue;
-                },
+                }
                 Token::Then => {
+                    trace!("Found 'then', parsing body1...");
                     self.advance();
-                    let mut body1: Option<Box<ASTNode>> = None;
-                    let mut body2: Option<Box<ASTNode>> = None;
+
                     loop {
                         let token = self.current_token();
                         match *token {
                             Token::Semicolon => {
+                                trace!("Skipping semicolon in body1");
                                 self.advance();
                                 continue;
-                            },
-                            Token::Eof => { return Err("Unexpected End of File"); }
+                            }
                             Token::Else => {
+                                trace!("Found 'else', parsing body2...");
                                 self.advance();
                                 match self.current_token() {
-                                    Token::If => body2 = Some(Box::new(self.parse_conditional()?)),
-                                    _ => body2 = Some(Box::new(self.parse_pipeline()?)),
+                                    Token::If => {
+                                        trace!("Found 'else if', parsing nested conditional...");
+                                        body2 = Some(Box::new(self.parse_conditional()?));
+                                    }
+                                    _ => {
+                                        body2 = Some(Box::new(self.parse_pipeline()?));
+                                    }
                                 }
+                                continue;
                             }
                             Token::Fi => {
-                                let conditional = ASTNode::Conditional { condition, body1, body2};
-                                debug!("Returning conditional: {:?}", conditional);
-                                return Ok(conditional);
+                                trace!("Found 'fi', completing conditional parsing...");
+                                self.advance();
+                                return Ok(ASTNode::Conditional { condition, body1, body2 });
                             }
                             _ => {
+                                trace!("Parsing body1 pipeline...");
                                 body1 = Some(Box::new(self.parse_pipeline()?));
                             }
                         }
                     }
                 }
-                _ => { return Err("Unexpected token"); }
+                _ => {
+                    error!("Unexpected token in conditional: {:?}", token);
+                    return Err("Unexpected token");
+                }
             }
         }
     }
-    pub fn parse_input(&mut self, environment: &mut Environment) -> Result<Vec<ASTNode>,String> {
+
+    pub fn parse_input(&mut self, environment: &mut Environment) -> Result<Vec<ASTNode>, String> {
         let mut statements = Vec::new();
-        debug!("Parsing new input!");
+        info!("Starting to parse input...");
 
         loop {
             let token = self.current_token();
+            trace!("Current token in input parsing: {:?}", token);
+
             match token {
-                Token::Eof => break,
-                Token::Var((key,value)) => {
+                Token::Eof => {
+                    trace!("End of input detected");
+                    break;
+                }
+                Token::Var((key, value)) => {
+                    trace!("Setting variable: {}={}", key, value);
                     environment.set_var(key.as_str(), value.as_str());
                     self.advance();
-
                 }
                 Token::If => {
-                    let conditional = self.parse_conditional();
-                    match conditional {
+                    trace!("Found 'if', parsing conditional...");
+                    match self.parse_conditional() {
                         Ok(conditional) => {
                             statements.push(conditional);
                             self.advance();
                         }
-                        Err(e) => { return Err(format!("Failed to parse conditional: {}",e)); }
+                        Err(e) => {
+                            error!("Failed to parse conditional: {}", e);
+                            return Err(format!("Failed to parse conditional: {}", e));
+                        }
                     }
                 }
                 _ => {
-                    let pipeline = self.parse_pipeline();
-                    match pipeline {
+                    info!("Parsing pipeline...");
+                    match self.parse_pipeline() {
                         Ok(pipeline) => {
                             statements.push(pipeline);
                         }
-                        Err(e) => { return Err(format!("Failed to parse pipeline: {}",e)); }
+                        Err(e) => {
+                            error!("Failed to parse pipeline: {}", e);
+                            return Err(format!("Failed to parse pipeline: {}", e));
+                        }
                     }
                 }
             }
         }
-        debug!("Constructed statements: {:?}",statements);
+
+        debug!("Parsed input into statements: {:?}", statements);
         Ok(statements)
     }
 }
