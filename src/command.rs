@@ -1,254 +1,254 @@
-use std::fs::OpenOptions;
-use std::path::Path;
-use std::io::Write;
 use std::env::{self};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 
-use crate::helper;
 use crate::environment::Environment;
-use crate::parser::{RedirectionType, ASTNode};
+use crate::helper;
+use crate::parser::{ASTNode, RedirectionType};
 
-pub fn node_walk(nodes: Vec<ASTNode>, environment: &mut Environment) -> Result<(), (ExitStatus,String)> {
+pub fn node_walk(
+    nodes: Vec<ASTNode>,
+    environment: &mut Environment,
+) -> Result<(), (ExitStatus, String)> {
     for node in nodes {
         match &node {
-            ASTNode::Builtin { name: _, args: _, redirs: _ } => {
+            ASTNode::Builtin { .. } => {
                 let _ = exec_builtin(node, environment, false);
             }
-            ASTNode::ShCommand { name: _, args: _, redirs: _ } => {
+            ASTNode::ShCommand { .. } | ASTNode::Pipeline { .. } => {
                 let _ = exec_cmd(node, environment);
             }
-            ASTNode::Pipeline { commands: _ } => {
-                let _ = exec_cmd(node, environment);
-            },
-            ASTNode::Conditional { condition: _, body1: _, body2: _ } => {
+            ASTNode::Conditional { .. } => {
                 let _ = exec_conditional(node, environment);
-            },
+            }
             _ => panic!("Unexpected node type found while walking"),
         }
     }
     Ok(())
 }
 
-pub fn mk_process(command: ASTNode, stdin: Option<Vec<u8>>, pipeout: bool) -> Result<(ExitStatus,Vec<u8>), (ExitStatus,String)> {
+pub fn mk_process(
+    command: ASTNode,
+    stdin: Option<Vec<u8>>,
+    pipeout: bool,
+) -> Result<(ExitStatus, Vec<u8>), (ExitStatus, String)> {
+    if let ASTNode::ShCommand { name, args, redirs } = command {
+        let mut child = Command::new(name.clone());
+        child.args(args);
 
-    match command {
-        ASTNode::ShCommand { name, args, redirs } => {
-            let mut child = Command::new(name.clone());
-            child.args(args);
-
-            for redir in &redirs {
-                match redir.get_direction() {
-                    RedirectionType::Input => {
-                        let file = OpenOptions::new()
-                            .read(true)
-                            .open(redir.get_filepath())
-                            .map_err(|e| helper::fail(&e.to_string()))?;
-                        if stdin.is_none() {
-                            child.stdin(Stdio::from(file));
-                        }
-                    }
-                    RedirectionType::Output => {
-                        let file = OpenOptions::new()
-                            .create(true)
-                            .truncate(true)
-                            .write(true)
-                            .open(redir.get_filepath())
-                            .map_err(|e| helper::fail(&e.to_string()))?;
-                        child.stdout(Stdio::from(file));
+        for redir in &redirs {
+            match redir.get_direction() {
+                RedirectionType::Input => {
+                    let file = OpenOptions::new()
+                        .read(true)
+                        .open(redir.get_filepath())
+                        .map_err(|e| helper::fail(&e.to_string()))?;
+                    if stdin.is_none() {
+                        child.stdin(Stdio::from(file));
                     }
                 }
+                RedirectionType::Output => {
+                    let file = OpenOptions::new()
+                        .create(true)
+                        .truncate(true)
+                        .write(true)
+                        .open(redir.get_filepath())
+                        .map_err(|e| helper::fail(&e.to_string()))?;
+                    child.stdout(Stdio::from(file));
+                }
             }
-
-            if stdin.is_some() {
-                child.stdin(Stdio::piped());
-            }
-
-            if pipeout {
-                child.stdout(Stdio::piped());
-            }
-
-            let mut child = child.spawn().map_err(|e| helper::fail(&e.to_string()))?;
-
-            if let Some(input) = stdin {
-                helper::read_bytes(child.stdin.as_mut().unwrap(), &input)
-                    .map_err(|e| helper::fail(&e))?
-            }
-
-            let status = child.wait().map_err(|e| helper::fail(&e.to_string()))?;
-
-            // Collect output
-            let mut stdout_buffer: Vec<u8> = vec![];
-            if let Some(output) = child.stdout.as_mut() {
-                stdout_buffer = helper::write_bytes(output)
-                    .map_err(|e| helper::fail(&e))?;
-            }
-
-            let mut stderr_buffer: Vec<u8> = vec![];
-            if let Some(error) = child.stderr.as_mut() {
-                stderr_buffer = helper::write_bytes(error)
-                    .map_err(|e| helper::fail(&e))?;
-            }
-
-            if !pipeout && redirs.is_empty() {
-                helper::write_stdout(stdout_buffer.clone())?;
-            }
-
-            helper::write_stderr(stderr_buffer.clone())?;
-
-            Ok((status,stdout_buffer))
         }
-        _ => Err(helper::fail("Expected ShCommand, got some other ASTNode from the parser")),
+
+        if stdin.is_some() {
+            child.stdin(Stdio::piped());
+        }
+
+        if pipeout {
+            child.stdout(Stdio::piped());
+        }
+
+        let mut child = child.spawn().map_err(|e| helper::fail(&e.to_string()))?;
+
+        if let Some(input) = stdin {
+            helper::write_bytes(child.stdin.as_mut().unwrap(), &input)
+                .map_err(|e| helper::fail(&e))?
+        }
+
+        let status = child.wait().map_err(|e| helper::fail(&e.to_string()))?;
+        let mut stdout_buffer = vec![];
+
+        if let Some(output) = child.stdout.as_mut() {
+            stdout_buffer = helper::read_bytes(output).map_err(|e| helper::fail(&e))?;
+        }
+
+        let mut stderr_buffer = vec![];
+
+        if let Some(error) = child.stderr.as_mut() {
+            stderr_buffer = helper::read_bytes(error).map_err(|e| helper::fail(&e))?;
+        }
+
+        if !pipeout && redirs.is_empty() {
+            helper::write_stdout(stdout_buffer.clone())?;
+        }
+
+        helper::write_stderr(stderr_buffer.clone())?;
+
+        return Ok((status, stdout_buffer));
     }
+    Err(helper::fail(
+        "Expected ShCommand, got some other ASTNode from the parser",
+    ))
 }
 
-pub fn exec_builtin (node: ASTNode, environment: &mut Environment, pipeout: bool) -> Result<(ExitStatus,Option<String>), (ExitStatus,String)> {
-    match &node {
-        ASTNode::Builtin { name, args, redirs } => {
-            match name.as_str() {
-                "cd" => {
-                    if let Some(path) = args.first() {
-                        // Use the provided argument as the new directory
-                        env::set_current_dir(Path::new(path)).map_err(|e| (ExitStatus::from_raw(1),e.to_string()))?;
-                        Ok((helper::succeed(),None))
-                    } else {
-                        // Fall back to HOME or root directory
-                        let root = "/".to_string();
-                        let fallback_dir = environment.get_var("HOME").unwrap_or(&root);
-                        env::set_current_dir(Path::new(&fallback_dir)).map_err(|e| (ExitStatus::from_raw(1),e.to_string()))?;
-                        Ok((helper::succeed(),None))
-                    }
-                },
-                "echo" => {
-                    let mut output = args.join(" "); // Combine all arguments with spaces
-                    output.push('\n');
-                    if !redirs.is_empty() {
-                        for redir in redirs {
-                            if let RedirectionType::Output = redir.get_direction() {
-                                let mut file = OpenOptions::new()
-                                    .create(true)
-                                    .truncate(true)
-                                    .write(true)
-                                    .open(redir.get_filepath())
-                                    .map_err(|e| (ExitStatus::from_raw(1), format!("Echo failed: {}",e)))?;
-
-                                let _ = file.write_all(output.as_bytes());
-                            }
-                        }
-
-                    } else if !pipeout {
-                        helper::write_stdout(output.clone().into_bytes())?
-                    }
-
-                    Ok((helper::succeed(),Some(output)))
-                },
-                "export" => {
-                    for arg in args {
-                        if helper::is_var_declaration(arg.to_string()) {
-                            if let Some((key, value)) = arg.split_once('=') {
-                                environment.export_var(key, value);
-                            } else {
-                                return Err(helper::fail("Error parsing key-value pair"));
-                            }
-                        } else {
-                            return Err(helper::fail("Invalid input for export builtin"));
+pub fn exec_builtin(
+    node: ASTNode,
+    environment: &mut Environment,
+    pipeout: bool,
+) -> Result<(ExitStatus, Option<String>), (ExitStatus, String)> {
+    if let ASTNode::Builtin { name, args, redirs } = &node {
+        match name.as_str() {
+            "cd" => {
+                let path = args.first().map(String::as_str).unwrap_or_else(|| {
+                    environment
+                        .get_var("HOME")
+                        .map(String::as_str)
+                        .unwrap_or("/")
+                });
+                env::set_current_dir(Path::new(path))
+                    .map_err(|e| (ExitStatus::from_raw(1), e.to_string()))?;
+                Ok((helper::succeed(), None))
+            }
+            "echo" => {
+                let output = args.join(" ") + "\n";
+                if !redirs.is_empty() {
+                    for redir in redirs {
+                        if let RedirectionType::Output = redir.get_direction() {
+                            let mut file = OpenOptions::new()
+                                .create(true)
+                                .truncate(true)
+                                .write(true)
+                                .open(redir.get_filepath())
+                                .map_err(|e| {
+                                    (ExitStatus::from_raw(1), format!("Echo failed: {}", e))
+                                })?;
+                            helper::write_bytes(&mut file, output.as_bytes())
+                                .map_err(|e| helper::fail(&e))?
                         }
                     }
-                    Ok((helper::succeed(),None))
-                },
-                "alias" => {
-                    if args.len() != 1 { return Err(helper::fail("alias takes exactly one argument")); }
-                    let arg = args.clone().pop().unwrap().to_string();
+                } else if !pipeout {
+                    helper::write_stdout(output.clone().into_bytes())?;
+                }
+                Ok((helper::succeed(), Some(output)))
+            }
+            "export" => {
+                for arg in args {
                     if helper::is_var_declaration(arg.clone()) {
-                        if let Some((key,value)) = arg.split_once('=') {
-                            environment.set_alias(key, value);
+                        if let Some((key, value)) = arg.split_once('=') {
+                            environment.export_var(key, value);
                         } else {
-                            return Err(helper::fail("Error parsing key-value pair for alias"));
+                            return Err(helper::fail("Error parsing key-value pair"));
                         }
                     } else {
-                        return Err(helper::fail("Invalid argument format for alias"));
+                        return Err(helper::fail("Invalid input for export builtin"));
                     }
-                    Ok((helper::succeed(),None))
-                },
-                "unset" => { todo!() },
-                "exit" => { todo!() },
-                _ => { todo!() }
+                }
+                Ok((helper::succeed(), None))
             }
+            "alias" => {
+                if args.len() != 1 {
+                    return Err(helper::fail("alias takes exactly one argument"));
+                }
+                let arg = args[0].clone();
+                if helper::is_var_declaration(arg.clone()) {
+                    if let Some((key, value)) = arg.split_once('=') {
+                        environment.set_alias(key, value);
+                    } else {
+                        return Err(helper::fail("Error parsing key-value pair for alias"));
+                    }
+                } else {
+                    return Err(helper::fail("Invalid argument format for alias"));
+                }
+                Ok((helper::succeed(), None))
+            }
+            "unset" => todo!(),
+            "exit" => todo!(),
+            _ => panic!("Expected a shell builtin, got: {}", name),
         }
-        _ => panic!("Expected builtin token, got something else")
+    } else {
+        panic!("Expected builtin token, got something else");
     }
 }
 
-pub fn exec_cmd(node: ASTNode, environment: &mut Environment) -> Result<ExitStatus, (ExitStatus,String)> {
-
+pub fn exec_cmd(
+    node: ASTNode,
+    environment: &mut Environment,
+) -> Result<ExitStatus, (ExitStatus, String)> {
     match &node {
-        ASTNode::ShCommand { name: _, args: _, redirs: _ } => {
-            let (status,_stdout) = mk_process(node, None, false)?;
+        ASTNode::ShCommand { .. } => {
+            let (status, _) = mk_process(node, None, false)?;
             Ok(status)
         }
-
         ASTNode::Pipeline { commands } => {
-            let mut stdin: Option<Vec<u8>> = None; // Standard input
-            let mut pipeout = true;
-            let mut command_iter = commands.iter().peekable();
+            let mut stdin: Option<Vec<u8>> = None;
+            let mut pipeout: bool;
             let mut final_status = ExitStatus::from_raw(1);
 
-            while let Some(command) = command_iter.next() {
-                if command_iter.peek().is_none() {
-                    pipeout = false;
-                }
+            for command in commands.iter() {
+                pipeout = commands.last() != Some(command);
 
                 if let ASTNode::Builtin { .. } = command {
-                    let (status,output) = exec_builtin(command.clone(), environment, pipeout)?;
-                    if let Some(stdout) = output { // Get stdout from shell builtin
+                    let (status, output) = exec_builtin(command.clone(), environment, pipeout)?;
+                    if let Some(stdout) = output {
                         stdin = Some(stdout.into_bytes());
                     }
                     final_status = status;
-
-                    continue;
+                } else {
+                    let (status, stdout) = mk_process(command.clone(), stdin.clone(), pipeout)?;
+                    final_status = status;
+                    stdin = Some(stdout);
                 }
-
-                let (status,stdout) = mk_process(command.clone(), stdin.clone(), pipeout)?;
-                final_status = status;
-                stdin = Some(stdout);
             }
 
             Ok(final_status)
         }
-
-        ASTNode::Conditional { condition: _, body1: _, body2: _ } => {
-            Ok(exec_conditional(node, environment)?)
-        }
-
+        ASTNode::Conditional { .. } => exec_conditional(node, environment),
         _ => panic!("Expected Pipeline or ShCommand node, got some other ASTNode type"),
     }
 }
 
-pub fn exec_conditional(conditional: ASTNode, environment: &mut Environment) -> Result<ExitStatus, (ExitStatus,String)> {
+pub fn exec_conditional(
+    conditional: ASTNode,
+    environment: &mut Environment,
+) -> Result<ExitStatus, (ExitStatus, String)> {
+    if let ASTNode::Conditional {
+        condition,
+        body1,
+        body2,
+    } = conditional
+    {
+        let condition_status = exec_cmd(*condition, environment)?.code();
 
-    match conditional {
-        ASTNode::Conditional { condition, body1, body2 } => {
-
-            let condition_status = exec_cmd(*condition, environment)?.code();
-
-            if condition_status == Some(0) {
-                if let Some(body) = body1 {
-                    exec_cmd(*body, environment)
-                } else if let Some(body) = body2 {
-                    exec_cmd(*body, environment)
-                } else {
-                    Err(helper::fail("Found empty if statement"))
-                }
-            } else if let Some(body) = body2 {
-                exec_cmd(*body, environment)
-            } else {
-                Err(helper::fail("Found empty if statement"))
+        if condition_status == Some(0) {
+            if let Some(body) = body1 {
+                return exec_cmd(*body, environment);
             }
+            if let Some(body) = body2 {
+                return exec_cmd(*body, environment);
+            }
+            return Err(helper::fail("Found empty if statement"));
         }
-        _ => panic!("Expected Conditional, found some other ASTNode type"),
-    }
-}
 
+        if let Some(body) = body2 {
+            return exec_cmd(*body, environment);
+        }
+
+        return Err(helper::fail("Found empty if statement"));
+    }
+    panic!("Expected Conditional, found some other ASTNode type");
+}
 
 #[cfg(test)]
 mod tests {
@@ -361,11 +361,8 @@ mod tests {
         let result = exec_builtin(node, &mut environment, false);
         assert!(result.is_ok());
 
-        let mut file = OpenOptions::new()
-            .read(true)
-            .open(temp_file)
-            .unwrap();
-        let contents = helper::write_bytes(&mut file).unwrap();
+        let mut file = OpenOptions::new().read(true).open(temp_file).unwrap();
+        let contents = helper::read_bytes(&mut file).unwrap();
         assert_eq!(String::from_utf8(contents).unwrap().trim(), "Hello");
 
         // Cleanup
@@ -389,11 +386,8 @@ mod tests {
         let result = exec_cmd(node, &mut environment);
         assert!(result.is_ok());
 
-        let mut file = OpenOptions::new()
-            .read(true)
-            .open(temp_file)
-            .unwrap();
-        let contents = helper::write_bytes(&mut file).unwrap();
+        let mut file = OpenOptions::new().read(true).open(temp_file).unwrap();
+        let contents = helper::read_bytes(&mut file).unwrap();
         assert_eq!(String::from_utf8(contents).unwrap().trim(), "Hello, World!");
 
         // Cleanup

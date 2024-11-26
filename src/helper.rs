@@ -44,7 +44,7 @@ pub fn build_word(chars: &mut Peekable<Chars<'_>>,mut singlequote: bool, mut dou
     word
 }
 
-pub fn write_bytes<R>(read_from: &mut R) -> Result<Vec<u8>,String> where R: Read  {
+pub fn read_bytes<R>(read_from: &mut R) -> Result<Vec<u8>,String> where R: Read  {
     let mut buffer: Vec<u8> = vec![];
     match read_from.read_to_end(&mut buffer) {
         Ok(_) => { Ok(buffer) },
@@ -52,7 +52,7 @@ pub fn write_bytes<R>(read_from: &mut R) -> Result<Vec<u8>,String> where R: Read
     }
 }
 
-pub fn read_bytes<W>(write_to: &mut W, read_from: &[u8]) -> Result<(),String> where W: Write  {
+pub fn write_bytes<W>(write_to: &mut W, read_from: &[u8]) -> Result<(),String> where W: Write  {
     match write_to.write_all(read_from) {
         Ok(_) => { Ok(()) },
         Err(e) => { Err(e.to_string()) }

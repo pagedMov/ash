@@ -4,7 +4,7 @@ use crate::environment::Environment;
 
 static BUILTINS: [&str; 6] = ["cd", "echo", "exit", "export", "alias", "unset"];
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,PartialEq)]
 pub enum ASTNode {
     Builtin {
         name: String,
