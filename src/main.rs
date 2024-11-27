@@ -8,7 +8,7 @@ use log::{info, debug};
 
 fn main() {
     env_logger::init();
-    let mut environ = environment::Environment::new();
+    let mut environ = environment::Environment::new(true);
     loop {
         let input = prompt::prompt();
         let tokens = parser::tokenize(input.as_str(),&environ);
@@ -21,7 +21,7 @@ fn main() {
                 debug!("AST: {:#?}", ast);
                 match command::node_walk(ast, &mut environ) {
                     Ok(_) => {
-                        environ.set_var("?","0");
+                        environ.export_var("?","0");
                     }
                     Err(e) => {
                         environ.set_var("?", &e.0.to_string());

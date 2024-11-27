@@ -1,4 +1,5 @@
-use log::{info,trace,error,debug,};
+use log::{info,trace,error,debug};
+use regex::Regex;
 
 use crate::helper;
 use crate::environment::Environment;
@@ -62,7 +63,6 @@ pub enum RedirectionType {
 #[derive(Clone,Debug,PartialEq)]
 pub enum Token {
     Word(String),
-    Var((String,String)),
     Semicolon,
     Newline,
     Pipe,
@@ -133,11 +133,6 @@ pub fn tokenize(input: &str, environment: &Environment) -> Vec<Token> {
                     let mut alias_tokens = tokenize(alias,environment);
                     let _eof_token = alias_tokens.pop(); // Removes Eof token
                     tokens.extend(alias_tokens)
-
-                } else if helper::is_var_declaration(word.clone()) {
-                    let (key,value) = helper::extract_var(word).unwrap();
-                    tokens.push(Token::Var((key,value)));
-
                 } else {
                     match word.as_str() {
                         "if" => { tokens.push(Token::If); }
@@ -149,18 +144,6 @@ pub fn tokenize(input: &str, environment: &Environment) -> Vec<Token> {
                         "until" => { tokens.push(Token::Until); }
                         "do" => { tokens.push(Token::Do); }
                         "done" => { tokens.push(Token::Done); }
-                        "alias" => {
-                            // alias needs special treatment since the syntax 'key=value' is reserved for
-                            // variable assignment, so its arg gets consumed as a variable otherwise
-                            // so let's just push the next word here instead of looping again
-                            tokens.push(Token::Word(word));
-                            if let Some(&' ') = chars.peek() {
-                                chars.next(); // Skip space
-                                let mut alias_def = String::new();
-                                alias_def = helper::build_word(&mut chars, false, false, alias_def);
-                                tokens.push(Token::Word(alias_def))
-                            }
-                        }
                         _ => { tokens.push(Token::Word(word)); }
                     }
                 }
@@ -195,7 +178,7 @@ impl<'a> Parser {
         self.pos += 1;
     }
 
-    fn parse_command(&mut self) -> Result<ASTNode, &'a str> {
+    fn parse_command(&mut self,environment: &mut Environment) -> Result<ASTNode, &'a str> {
         info!("Starting to parse command...");
         if let Token::Word(name) = self.current_token() {
             let name = name.clone();
@@ -209,6 +192,14 @@ impl<'a> Parser {
                 trace!("Processing token in command: {:?}", token);
                 match token {
                     Token::Word(arg) => {
+                        // Here we increment the value of '$#'
+                        let pos_params = helper::increment_string(
+                            environment
+                            .get_internal("num_params")
+                            .map_or("", |v| v)
+                            .to_string()
+                        );
+                        environment.set_internal("num_params", &pos_params);
                         args.push(arg);
                         self.advance();
                     }
@@ -244,13 +235,17 @@ impl<'a> Parser {
                 }
             }
 
-            if BUILTINS.contains(&name.as_str()) {
+            if BUILTINS.contains(&name.as_str()) || helper::is_var_declaration(&name) {
+                environment.set_internal("0",name.as_str());
+                environment.set_internal("num_params","0");
                 let builtin = ASTNode::Builtin { name, args, redirs };
                 debug!("Parsed builtin command: {:?}", builtin);
                 return Ok(builtin);
             }
 
+            environment.set_internal("0",name.as_str());
             let command = ASTNode::ShCommand { name, args, redirs };
+
             debug!("Parsed shell command: {:?}", command);
             Ok(command)
         } else {
@@ -259,9 +254,9 @@ impl<'a> Parser {
         }
     }
 
-    fn parse_pipeline(&mut self) -> Result<ASTNode, &'a str> {
+    fn parse_pipeline(&mut self, environment: &mut Environment) -> Result<ASTNode, &'a str> {
         info!("Starting to parse pipeline...");
-        let mut commands = vec![self.parse_command()?];
+        let mut commands = vec![self.parse_command(environment)?];
         debug!("First command in pipeline: {:?}", commands[0]);
 
         loop {
@@ -270,7 +265,7 @@ impl<'a> Parser {
                 Token::Pipe => {
                     trace!("Found pipe, adding next command to pipeline...");
                     self.advance();
-                    commands.push(self.parse_command()?);
+                    commands.push(self.parse_command(environment)?);
                 }
                 Token::Semicolon | Token::Newline => {
                     trace!("End of pipeline detected");
@@ -291,11 +286,11 @@ impl<'a> Parser {
         }
     }
 
-    fn parse_conditional(&mut self) -> Result<ASTNode, &'a str> {
+    fn parse_conditional(&mut self, environment: &mut Environment) -> Result<ASTNode, &'a str> {
         info!("Starting to parse conditional...");
         self.advance();
 
-        let condition = Box::new(self.parse_pipeline()?);
+        let condition = Box::new(self.parse_pipeline(environment)?);
         debug!("Parsed condition of conditional: {:?}", condition);
 
         let mut body1: Option<Box<ASTNode>> = None;
@@ -329,10 +324,10 @@ impl<'a> Parser {
                                 match self.current_token() {
                                     Token::If => {
                                         trace!("Found 'else if', parsing nested conditional...");
-                                        body2 = Some(Box::new(self.parse_conditional()?));
+                                        body2 = Some(Box::new(self.parse_conditional(environment)?));
                                     }
                                     _ => {
-                                        body2 = Some(Box::new(self.parse_pipeline()?));
+                                        body2 = Some(Box::new(self.parse_pipeline(environment)?));
                                     }
                                 }
                                 continue;
@@ -344,7 +339,7 @@ impl<'a> Parser {
                             }
                             _ => {
                                 trace!("Parsing body1 pipeline...");
-                                body1 = Some(Box::new(self.parse_pipeline()?));
+                                body1 = Some(Box::new(self.parse_pipeline(environment)?));
                             }
                         }
                     }
@@ -370,14 +365,9 @@ impl<'a> Parser {
                     trace!("End of input detected");
                     break;
                 }
-                Token::Var((key, value)) => {
-                    trace!("Setting variable: {}={}", key, value);
-                    environment.set_var(key.as_str(), value.as_str());
-                    self.advance();
-                }
                 Token::If => {
                     trace!("Found 'if', parsing conditional...");
-                    match self.parse_conditional() {
+                    match self.parse_conditional(environment) {
                         Ok(conditional) => {
                             statements.push(conditional);
                             self.advance();
@@ -390,7 +380,7 @@ impl<'a> Parser {
                 }
                 _ => {
                     info!("Parsing pipeline...");
-                    match self.parse_pipeline() {
+                    match self.parse_pipeline(environment) {
                         Ok(pipeline) => {
                             statements.push(pipeline);
                         }
@@ -411,11 +401,11 @@ impl<'a> Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::environment::Environment;
+    use crate::environment::{self, Environment};
 
     #[test]
     fn test_tokenize_simple_command() {
-        let env = Environment::new();
+        let env = Environment::new(false);
         let input = "echo hello";
         let tokens = tokenize(input, &env);
 
@@ -431,7 +421,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_redirections() {
-        let env = Environment::new();
+        let env = Environment::new(false);
         let input = "cat < input.txt > output.txt";
         let tokens = tokenize(input, &env);
 
@@ -450,7 +440,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_with_variables() {
-        let mut env = Environment::new();
+        let mut env = Environment::new(false);
         env.set_var("VAR", "value");
         let input = "echo $VAR";
         let tokens = tokenize(input, &env);
@@ -467,7 +457,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_alias() {
-        let mut env = Environment::new();
+        let mut env = Environment::new(false);
         env.set_alias("ls", "echo alias_ls");
         let input = "ls";
         let tokens = tokenize(input, &env);
@@ -484,13 +474,14 @@ mod tests {
 
     #[test]
     fn test_parse_builtin() {
+        let mut environment = Environment::new(false);
         let tokens = vec![
             Token::Word("echo".to_string()),
             Token::Word("hello".to_string()),
             Token::Eof,
         ];
         let mut parser = Parser::new(tokens);
-        let command = parser.parse_command().unwrap();
+        let command = parser.parse_command(&mut environment).unwrap();
 
         if let ASTNode::Builtin { name, args, redirs } = command {
             assert_eq!(name, "echo");
@@ -503,6 +494,7 @@ mod tests {
 
     #[test]
     fn test_parse_command() {
+        let mut environment = Environment::new(false);
         let tokens = vec![
             Token::Word("command".to_string()),
             Token::Word("arg1".to_string()),
@@ -510,7 +502,7 @@ mod tests {
             Token::Eof,
         ];
         let mut parser = Parser::new(tokens);
-        let command = parser.parse_command().unwrap();
+        let command = parser.parse_command(&mut environment).unwrap();
 
         if let ASTNode::ShCommand { name, args, redirs } = command {
             assert_eq!(name, "command");
@@ -523,6 +515,7 @@ mod tests {
 
     #[test]
     fn test_parse_pipeline() {
+        let mut environment = Environment::new(false);
         let tokens = vec![
             Token::Word("echo".to_string()),
             Token::Word("hello".to_string()),
@@ -532,7 +525,7 @@ mod tests {
         ];
 
         let mut parser = Parser::new(tokens);
-        let pipeline = parser.parse_pipeline().unwrap();
+        let pipeline = parser.parse_pipeline(&mut environment).unwrap();
 
         // Ensure it's a Pipeline node and unwrap the commands
         if let ASTNode::Pipeline { commands } = pipeline {
@@ -563,6 +556,7 @@ mod tests {
 
     #[test]
     fn test_parse_conditional() {
+        let mut environment = Environment::new(false);
         let tokens = vec![
             Token::If,
             Token::Word("true".to_string()),
@@ -573,7 +567,7 @@ mod tests {
             Token::Eof,
         ];
         let mut parser = Parser::new(tokens);
-        let conditional = parser.parse_conditional().unwrap();
+        let conditional = parser.parse_conditional(&mut environment).unwrap();
 
         if let ASTNode::Conditional { condition: _, body1, body2 } = conditional {
             assert!(body2.is_none());

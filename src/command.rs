@@ -163,8 +163,14 @@ pub fn exec_cmd(
                 "exit" => builtins::exit(args.to_vec())?,
                 "unset" => builtins::unset(args.to_vec(), environment)?,
                 _ => {
-                    error!("Unknown builtin command: {}",name);
-                    panic!("Expected builtin, got {}",name);
+                    if helper::is_var_declaration(name) {
+                        let (key, value) = name.split_once('=').unwrap();
+                        environment.set_var(key, value);
+                        CommandOutput::simple_success()
+                    } else {
+                        error!("Unknown builtin command: {}",name);
+                        panic!("Expected builtin, got {}",name);
+                    }
                 }
             };
             Ok(output)
@@ -258,7 +264,7 @@ mod tests {
     use std::path::Path;
 
     fn setup_environment() -> Environment {
-        Environment::new()
+        Environment::new(false)
     }
 
     #[test]
