@@ -2,7 +2,9 @@ use log::{info,trace,error,debug};
 use std::collections::VecDeque;
 use std::iter::Peekable;
 use std::str::Chars;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{Notify,mpsc};
+use tokio::task::JoinHandle;
 
 use crate::event::{self,ShellEvent};
 use crate::event::ShellError;
@@ -86,14 +88,6 @@ pub enum Token {
     Null
 }
 
-#[derive(Debug)]
-pub struct Parser {
-    token: Token,
-    input: String,
-    token_sender: mpsc::Sender<Token>,
-    token_receiver: mpsc::Receiver<Token>,
-    node_sender: mpsc::Sender<event::ShellEvent>
-}
 
 fn build_word(
     chars: &mut VecDeque<char>
@@ -226,16 +220,178 @@ pub async fn tokenize(input: &str, outbox: mpsc::Sender<Token>) -> Result<(), Sh
     Ok(())
 }
 
+async fn parse_conditional(tokens: Vec<Token>,outbox: mpsc::Sender<ShellEvent>) -> Option<ASTNode> {
+    todo!("Implement conditional parsing")
+}
+
+async fn parse_pipeline(tokens: Vec<Token>, outbox: mpsc::Sender<ShellEvent>) -> Option<ASTNode> {
+    debug!("Parsing pipeline");
+    let mut tokens = VecDeque::from(tokens);
+    let mut commands = Vec::new();
+    let mut args = Vec::new();
+    let mut redirs = Vec::new();
+
+    while let Some(token) = tokens.pop_front() {
+        debug!("Current token in pipeline: {:?}", token);
+
+        match token {
+            Token::Word(name) => {
+                debug!("Found command: {}", name);
+
+                while let Some(token) = tokens.front() {
+                    match token {
+                        Token::Word(arg) => {
+                            debug!("Found argument: {}", arg);
+                            args.push(arg.clone());
+                            tokens.pop_front();
+                        }
+                        Token::RedirectIn(file) => {
+                            debug!("Found input redirection '<'");
+                            redirs.push(Redirection {
+                                direction: RedirectionType::Input,
+                                file: file.clone(),
+                            });
+                            tokens.pop_front();
+                        }
+                        Token::RedirectOut(file) => {
+                            debug!("Found output redirection '>'");
+                            redirs.push(Redirection {
+                                direction: RedirectionType::Output,
+                                file: file.clone(),
+                            });
+                            tokens.pop_front();
+                        }
+                        Token::RedirectErr(file) => {
+                            debug!("Found error redirection '2>'");
+                            redirs.push(Redirection {
+                                direction: RedirectionType::Error,
+                                file: file.clone(),
+                            });
+                            tokens.pop_front();
+                        }
+                        _ => break, // Stop processing arguments and redirections
+                    }
+                }
+
+                debug!("Finished parsing command: {}", name);
+                commands.push(ASTNode::ShCommand {
+                    name,
+                    args: std::mem::take(&mut args),
+                    redirs: std::mem::take(&mut redirs),
+                });
+            }
+            Token::Pipe => {
+                debug!("Found pipe '|', continuing to next command");
+            }
+            Token::Semicolon | Token::Newline | Token::Eof => {
+                debug!("End of pipeline detected: {:?}", token);
+                break;
+            }
+            _ => {
+                debug!("Unexpected token in pipeline: {:?}", token);
+                return None;
+            }
+        }
+    }
+
+    if commands.len() == 1 {
+        let command = commands.remove(0);
+        debug!("Returning single command: {:?}", command);
+        Some(command)
+    } else if !commands.is_empty() {
+        let pipeline = ASTNode::Pipeline { commands };
+        debug!("Returning pipeline: {:?}", pipeline);
+        Some(pipeline)
+    } else {
+        debug!("No commands found in pipeline.");
+        None
+    }
+}
+
+#[derive(Debug)]
+pub struct NodeDispatcher {
+    outbox: mpsc::Sender<ShellEvent>,
+    node_queue: Vec<JoinHandle<Option<ASTNode>>>, // Handles return a result
+    notify: Arc<Notify>,
+}
+
+impl NodeDispatcher {
+    /// Create a new NodeDispatcher.
+    pub fn new(outbox: mpsc::Sender<ShellEvent>) -> Self {
+        Self {
+            outbox,
+            node_queue: Vec::new(),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Add a new task handle to the queue.
+    pub fn push_handle(&mut self, handle: JoinHandle<Option<ASTNode>>) {
+        self.node_queue.push(handle);
+        self.notify.notify_one();
+    }
+
+    /// Start processing tasks in the correct order.
+    pub async fn start(&mut self) {
+        loop {
+            if let Some(handle) = self.node_queue.first_mut() {
+                match handle.await {
+                    Ok(Some(node)) => {
+                        // Handle successful node creation
+                        if let Err(err) = self
+                            .outbox
+                            .send(ShellEvent::NewASTNode(node)) // Send the created node
+                            .await
+                        {
+                            error!("Failed to send AST node: {:?}", err);
+                        }
+                    }
+                    Ok(None) => {
+                        // TODO: properly handle case where parser returns None
+                        error!("Node task failed");
+                    }
+                    Err(join_error) => {
+                        // Handle task panics
+                        error!("Task panicked: {:?}", join_error);
+                    }
+                }
+
+                // Remove the completed task from the queue
+                self.node_queue.remove(0);
+            } else {
+                // Wait for new tasks to be added if the queue is empty
+                self.notify.notified().await;
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Parser {
+    token: Token,
+    input: String,
+    token_sender: mpsc::Sender<Token>,
+    token_receiver: mpsc::Receiver<Token>,
+    node_outbox: mpsc::Sender<event::ShellEvent>,
+    node_dispatcher: NodeDispatcher
+
+}
+
 impl Parser {
-    pub fn new(input: String, output: mpsc::Sender<event::ShellEvent>) -> Self {
+    pub fn new(input: String, output: mpsc::Sender<ShellEvent>) -> Self {
         let (token_sender, token_receiver) = mpsc::channel(100);
         Self {
             token: Token::Null,
             input,
             token_sender,
             token_receiver,
-            node_sender: output,
+            node_outbox: output.clone(),
+            node_dispatcher: NodeDispatcher::new(output),
         }
+    }
+
+    pub fn outbox(&self) -> mpsc::Sender<ShellEvent> {
+        self.node_outbox.clone()
     }
 
     pub async fn handle_input(&mut self) -> Result<(), ShellError> {
@@ -263,22 +419,49 @@ impl Parser {
                     debug!("Reached Eof token. Exiting parse_input loop.");
                     break;
                 }
-                Token::If => {
-                    debug!("Detected 'If' token. Parsing conditional...");
-                    if let Some(node) = self.parse_conditional().await {
-                        self.send_ast_node(node).await?;
-                    } else {
-                        error!("Failed to parse conditional.");
-                        return Err(ShellError::InvalidSyntax("Invalid conditional".into()));
+                _ => match self.token {
+                    Token::If => {
+                        debug!("Detected 'If' token. Parsing conditional...");
+                        let mut conditional_tokens: Vec<Token> = vec![];
+                        let outbox = self.outbox();
+                        while self.token != Token::Fi {
+                            if self.token == Token::Eof {
+                                // TODO: make sure these errors are actually being handled
+                                // whereever they are being sent to
+                                return Err(ShellError::InvalidSyntax("'fi' token not found in conditional".into()));
+                            }
+                            conditional_tokens.push(self.token.clone());
+                            self.next_token().await;
+                        }
+
+                        self.dispatch_handle(
+                            tokio::spawn(async move {
+                                parse_conditional(conditional_tokens,outbox).await
+                            })
+                        );
                     }
-                }
-                _ => {
-                    debug!("Delegating to parse_pipeline for token: {:?}", self.token);
-                    if let Some(node) = self.parse_pipeline().await {
-                        self.send_ast_node(node).await?;
-                    } else {
-                        error!("Failed to parse pipeline.");
-                        return Err(ShellError::InvalidSyntax("Invalid pipeline".into()));
+                    _ => {
+                        debug!("Delegating to parse_pipeline for token: {:?}", self.token);
+                        let mut pipeline_tokens: Vec<Token> = vec![];
+                        let outbox = self.outbox();
+                        loop {
+                            match self.token {
+                                Token::Eof | Token::Semicolon | Token::Newline => {
+                                    debug!("Reached delimiter in pipeline token parsing");
+                                    break;
+                                }
+                                _ => {
+                                    pipeline_tokens.push(self.token.clone());
+                                    self.next_token().await;
+                                }
+                            }
+                        }
+
+                        self.dispatch_handle(
+                            tokio::spawn(async move {
+                                parse_pipeline(pipeline_tokens,outbox).await
+                            })
+                        );
                     }
                 }
             }
@@ -290,7 +473,7 @@ impl Parser {
         }
 
         debug!("Finished parsing input. Sending prompt event.");
-        self.send_prompt().await?;
+        self.dispatch_prompt().await?;
         Ok(())
     }
 
@@ -304,108 +487,16 @@ impl Parser {
         }
     }
 
-    async fn parse_pipeline(&mut self) -> Option<ASTNode> {
-        debug!("Parsing pipeline");
-        let mut commands = Vec::new();
-        let mut args = Vec::new();
-        let mut redirs = Vec::new();
 
-        loop {
-            debug!("Current token in pipeline: {:?}", self.token);
 
-            match &mut self.token {
-                Token::Word(name) => {
-                    let name = name.clone();
-                    debug!("Found command: {}", name);
-                    self.next_token().await;
-
-                    loop {
-                        debug!("Processing token for arguments or redirections: {:?}", self.token);
-                        match self.token.clone() {
-                            Token::Word(arg) => {
-                                debug!("Found argument: {}", arg);
-                                args.push(arg);
-                                self.next_token().await;
-                            }
-                            Token::RedirectIn(file) => {
-                                debug!("Found input redirection '<'");
-                                redirs.push(Redirection {
-                                    direction: RedirectionType::Input,
-                                    file,
-                                });
-                                self.next_token().await;
-                            }
-                            Token::RedirectOut(file) => {
-                                debug!("Found output redirection '>'");
-                                redirs.push(Redirection {
-                                    direction: RedirectionType::Output,
-                                    file,
-                                });
-                                self.next_token().await;
-                            }
-                            Token::RedirectErr(file) => {
-                                debug!("Found error redirection '2>'");
-                                redirs.push(Redirection {
-                                    direction: RedirectionType::Error,
-                                    file,
-                                });
-                                self.next_token().await;
-                            }
-                            _ => break,
-                        }
-                    }
-
-                    debug!("Finished parsing command: {}", name);
-                    commands.push(ASTNode::ShCommand {
-                        name,
-                        args: std::mem::take(&mut args),
-                        redirs: std::mem::take(&mut redirs),
-                    });
-                }
-                Token::Pipe => {
-                    debug!("Found pipe '|', continuing to next command");
-                    self.next_token().await;
-                }
-                Token::Semicolon | Token::Newline | Token::Eof => {
-                    debug!("End of pipeline detected: {:?}", self.token);
-                    break;
-                }
-                _ => {
-                    debug!("Unexpected token in pipeline: {:?}", self.token);
-                    return None;
-                }
-            }
-        }
-
-        if commands.len() == 1 {
-            let command = commands.remove(0);
-            debug!("Returning single command: {:?}", command);
-            Some(command)
-        } else if !commands.is_empty() {
-            let pipeline = ASTNode::Pipeline { commands };
-            debug!("Returning pipeline: {:?}", pipeline);
-            Some(pipeline)
-        } else {
-            debug!("No commands found in pipeline.");
-            None
-        }
+    fn dispatch_handle(&mut self, handle: JoinHandle<Option<ASTNode>>) {
+        debug!("Sending AST node: {:?}", handle);
+        self.node_dispatcher.push_handle(handle);
     }
 
-    async fn parse_conditional(&mut self) -> Option<ASTNode> {
-        todo!("Implement conditional parsing")
-    }
-
-    async fn send_ast_node(&self, node: ASTNode) -> Result<(), ShellError> {
-        debug!("Sending AST node: {:?}", node);
-        self.node_sender
-            .send(ShellEvent::NewASTNode(node))
-            .await
-            .map_err(|_| ShellError::IoError("Failed to send AST node".to_string()))
-    }
-
-    async fn send_prompt(&self) -> Result<(), ShellError> {
+    async fn dispatch_prompt(&self) -> Result<(), ShellError> {
         debug!("Sending prompt event");
-        self.node_sender
+        self.outbox()
             .send(ShellEvent::Prompt)
             .await
             .map_err(|_| ShellError::IoError("Failed to send prompt event".to_string()))
@@ -418,8 +509,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn setup_parser(input: &str) -> (Parser, mpsc::Receiver<ShellEvent>) {
-        let (node_sender, node_receiver) = mpsc::channel(100);
-        let parser = Parser::new(input.to_string(), node_sender);
+        let (node_outbox, node_receiver) = mpsc::channel(100);
+        let parser = Parser::new(input.to_string(), node_outbox);
         (parser, node_receiver)
     }
 
