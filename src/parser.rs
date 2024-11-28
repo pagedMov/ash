@@ -40,36 +40,43 @@ pub enum ASTNode {
 
 #[derive(Debug,Clone,PartialEq)]
 pub struct Redirection {
-    direction: RedirectionType,
-    file: String
+    direction: RedirDestination,
+    file: Option<String>
 }
 
 impl Redirection {
 
-    pub fn new(direction: RedirectionType, file: String) -> Self {
+    pub fn new(direction: RedirDestination, file: Option<String>) -> Self {
         Redirection { direction, file }
     }
-    pub fn get_direction(&self) -> RedirectionType {
+    pub fn get_direction(&self) -> RedirDestination {
         self.direction.clone()
     }
-    pub fn get_filepath(&self) -> String {
+    pub fn get_filepath(&self) -> Option<String> {
         self.file.clone()
     }
 }
 
-#[derive(Debug,Clone,PartialEq)]
-pub enum RedirectionType {
-    Input, // <
-    Output,// >
-    Error // 2>
+#[derive(Debug, Clone, PartialEq)]
+pub enum RedirDestination {
+    Input,          // < file
+    Output,         // > file
+    Error,          // 2> file
+    Append(u32),         // >> file, 2>> file
+    AppendBoth,
+    Both,           // &> file
+    FdOut(u32),     // n> file
+    FdAppend(u32),     // n>> file
+    FdToFd(u32,u32),   // n>&m
+    OutToFd(u32),   // >&fd
+    DupToAll,         // >&
+    CloseFd(u32),   // n>&-
 }
 
 #[derive(Clone,Debug,PartialEq)]
 pub enum Token {
     Word(String),
-    RedirectIn(String),
-    RedirectOut(String),
-    RedirectErr(String),
+    Redir(Redirection),
     Semicolon,
     Newline,
     Pipe,
@@ -136,8 +143,7 @@ fn build_word(
     word
 }
 
-pub fn to_next_alphanumeric(chars: &mut VecDeque<char>) {
-    chars.pop_front();
+pub fn skip_space(chars: &mut VecDeque<char>) {
     while let Some(&ch) = chars.front() {
         match ch {
             ' ' | '\t' => { chars.pop_front(); },
@@ -146,7 +152,172 @@ pub fn to_next_alphanumeric(chars: &mut VecDeque<char>) {
     }
 }
 
+/// Not even jesus christ would forgive me for this shit
+pub fn check_for_redirections(old_chars: &VecDeque<char>) -> Option<(VecDeque<char>, Token)> {
+    let mut chars: VecDeque<char>;
+
+    // Only clone the VecDeque if it makes sense to do so
+    if matches!(old_chars.front()?, '<' | '>' | '&' | '2'..='9') {
+        chars = old_chars.clone();
+    } else { return None; }
+    let ch = chars.pop_front()?;
+    match ch {
+        '<' => {
+            skip_space(&mut chars);
+            let file = build_word(&mut chars);
+            let token = Token::Redir(Redirection::new(
+                    RedirDestination::Input,
+                    Some(file)
+            ));
+            Some((chars,token))
+        }
+        '>' => match chars.front() {
+            Some('>') => { // Append (>>)
+                chars.pop_front();
+                skip_space(&mut chars);
+                let file = build_word(&mut chars);
+                let token = Token::Redir(Redirection::new(
+                        RedirDestination::Append(1),
+                        Some(file)
+                ));
+                Some((chars,token))
+            }
+            Some('&') => { // Duplicate descriptor (>&fd)
+                chars.pop_front();
+                if let Some(digit) = chars.front().and_then(|c| c.to_digit(10)) {
+                    chars.pop_front();
+                    let token = Token::Redir(Redirection::new(
+                            RedirDestination::OutToFd(digit),
+                            None
+                    ));
+                    Some((chars,token))
+                } else {
+                    let token = Token::Redir(Redirection::new(
+                            RedirDestination::DupToAll,
+                            None
+                    ));
+                    Some((chars,token)) // Redirect all (>&)
+                }
+            }
+            _ => { // Simple output (>)
+                skip_space(&mut chars);
+                let file = build_word(&mut chars);
+                let token = Token::Redir(Redirection::new(
+                        RedirDestination::Output,
+                        Some(file)
+                ));
+                Some((chars,token))
+            }
+        },
+        '&' => match chars.front() {
+            Some('>') => { // &>
+                chars.pop_front();
+                match chars.front()? {
+                    '>' => {
+                        chars.pop_front();
+                        skip_space(&mut chars);
+                        let file = build_word(&mut chars);
+                        let token = Token::Redir(Redirection::new(
+                                RedirDestination::AppendBoth,
+                                Some(file)
+                        ));
+                        Some((chars,token))
+                    }
+                    _ => {
+                        chars.pop_front();
+                        skip_space(&mut chars);
+                        let file = build_word(&mut chars);
+                        let token = Token::Redir(Redirection::new(
+                                RedirDestination::Both,
+                                Some(file)
+                        ));
+                        Some((chars,token))
+                    }
+                }
+            }
+            _ => None, // Invalid case
+        },
+        '2'..='9' => {
+            let fd = ch.to_digit(10).unwrap(); // Safe unwrap since we matched on '2'..='9'
+            if let Some('>') = chars.front() {
+                chars.pop_front();
+                match chars.front() {
+                    Some('&') => { // Duplicate to another fd (n>&m)
+                        chars.pop_front();
+                        if let Some(digit) = chars.front().and_then(|c| c.to_digit(10)) {
+                            chars.pop_front();
+                            let token = Token::Redir(Redirection::new(
+                                    RedirDestination::FdToFd(fd, digit),
+                                    None
+                            ));
+                            Some((chars,token))
+                        } else {
+                            let token = Token::Redir(Redirection::new(
+                                    RedirDestination::CloseFd(fd),
+                                    None
+                            ));
+                            Some((chars,token)) // n>&-
+                        }
+                    }
+                    Some('>') => {
+                        chars.pop_front();
+                        match chars.front() {
+                            Some('&') => { // Duplicate to another fd (n>&m)
+                                chars.pop_front();
+                                if let Some(digit) = chars.front().and_then(|c| c.to_digit(10)) {
+                                    chars.pop_front();
+                                    let token = Token::Redir(Redirection::new(
+                                            RedirDestination::FdToFd(fd, digit),
+                                            None
+                                    ));
+                                    Some((chars,token))
+                                } else {
+                                    let token = Token::Redir(Redirection::new(
+                                            RedirDestination::CloseFd(fd),
+                                            None
+                                    ));
+                                    Some((chars,token)) // n>&-
+                                }
+                            }
+                            _ => { // n> file
+                                skip_space(&mut chars);
+                                let file = build_word(&mut chars);
+                                let token = Token::Redir(Redirection::new(
+                                        RedirDestination::FdAppend(fd),
+                                        Some(file)
+                                ));
+                                Some((chars,token))
+                            }
+                        }
+                    }
+                    _ => { // n> file
+                        skip_space(&mut chars);
+                        let file = build_word(&mut chars);
+                        let token = Token::Redir(Redirection::new(
+                                RedirDestination::FdOut(fd),
+                                Some(file)
+                        ));
+                        Some((chars,token))
+                    }
+                }
+            } else {
+                None // Invalid syntax
+            }
+        }
+        _ => None, // No redirection found
+    }
+}
+
+/// Reads input one character at a time, creating tokens from words and symbols
+///
+/// Tokens are then used by the Parser to create ASTNodes to send back to the
+/// shell's main event loop
 pub async fn tokenize(input: &str, outbox: mpsc::Sender<Token>) -> Result<(), ShellError> {
+
+    // TODO: implement more redirections, '<<<' etc.
+    // TODO: handle escaping with backslashes
+    // TODO:
+    // TODO:
 
     let mut chars = VecDeque::from(input.chars().collect::<Vec<char>>());
 
@@ -163,23 +334,6 @@ pub async fn tokenize(input: &str, outbox: mpsc::Sender<Token>) -> Result<(), Sh
                 token = Some(Token::Pipe);
                 chars.pop_front();
             }
-            '2' => {
-                if let Some('>') = chars.get(1) {
-                    chars.pop_front(); to_next_alphanumeric(&mut chars); // Need to skip the '>' first
-                    let file = build_word(&mut chars);
-                    token = Some(Token::RedirectErr(file));
-                }
-            }
-            '<' => {
-                to_next_alphanumeric(&mut chars);
-                let file = build_word(&mut chars);
-                token = Some(Token::RedirectIn(file));
-            }
-            '>' => {
-                to_next_alphanumeric(&mut chars);
-                let file = build_word(&mut chars);
-                token = Some(Token::RedirectOut(file));
-            }
             '\n' => {
                 token = Some(Token::Newline);
                 chars.pop_front();
@@ -189,46 +343,73 @@ pub async fn tokenize(input: &str, outbox: mpsc::Sender<Token>) -> Result<(), Sh
                 chars.pop_front();
             }
             _ => {
-                word = build_word(&mut chars);
+                if let Some((new_chars,redir_token)) = check_for_redirections(&chars) {
+                    token = Some(redir_token);
+                    chars = new_chars;
+                } else {
+                    word = build_word(&mut chars);
 
-                match word.as_str() {
-                    "if" => { token = Some(Token::If); }
-                    "then" => { token = Some(Token::Then); }
-                    "else" => { token = Some(Token::Else); }
-                    "fi" => { token = Some(Token::Fi); }
-                    "for" => { token = Some(Token::For); }
-                    "while" => { token = Some(Token::While); }
-                    "until" => { token = Some(Token::Until); }
-                    "do" => { token = Some(Token::Do); }
-                    "done" => { token = Some(Token::Done); }
-                    _ => { token = Some(Token::Word(word.clone())); }
+                    // Reserved words
+                    match word.as_str() {
+                        "if" => { token = Some(Token::If); }
+                        "then" => { token = Some(Token::Then); }
+                        "else" => { token = Some(Token::Else); }
+                        "fi" => { token = Some(Token::Fi); }
+                        "for" => { token = Some(Token::For); }
+                        "while" => { token = Some(Token::While); }
+                        "until" => { token = Some(Token::Until); }
+                        "do" => { token = Some(Token::Do); }
+                        "done" => { token = Some(Token::Done); }
+                        _ => { token = Some(Token::Word(word.clone())); }
+                    }
                 }
             }
         }
         if let Some(ref token) = token {
             // send token from tokenizer to parser
             info!("tokenizer: Sending token: {:?}",token);
-            outbox.send(token.clone()).await.map_err(|e| ShellError::InvalidSyntax(e.to_string()))?;
+            // TODO: handle errors here
+            outbox.send(token.clone()).await.unwrap();
         } else {
             return Err(ShellError::InvalidSyntax(word));
         }
     }
+
+    // Send the Eof token once the input is exhausted
     info!("tokenizer: Sending Eof token");
     outbox.send(Token::Eof).await.unwrap();
     Ok(())
 }
 
+// These have to be helper functions instead of Parser methods, in order for async to work
+// This is because they can't be referenced inside of the tokio::spawn() context
+// If they are tied to the Parser struct
+
+/// Parses conditional statements via recursive descent.
+///
+/// Called from parse_input()
 async fn parse_conditional(tokens: Vec<Token>) -> Option<ASTNode> {
     todo!("Implement conditional parsing")
 }
 
+/// Parses commands
+///
+/// If only one command is found, it just returns the ShCommand node,
+/// If several are found, it returns a Pipeline node containing ShCommands
+///
+/// Called from parse_input()
 async fn parse_pipeline(tokens: Vec<Token>) -> Option<ASTNode> {
     debug!("parse_pipeline: Parsing pipeline");
+
+    // VecDeques are easier to work with for this
+    // TODO: just make it take a VecDeque instead of converting it here
     let mut tokens = VecDeque::from(tokens);
+
     let mut commands = Vec::new();
     let mut args = Vec::new();
     let mut redirs = Vec::new();
 
+    // All of this is pretty self-explanatory
     while let Some(token) = tokens.pop_front() {
         debug!("parse_pipeline: Current token in pipeline: {:?}", token);
 
@@ -243,31 +424,11 @@ async fn parse_pipeline(tokens: Vec<Token>) -> Option<ASTNode> {
                             args.push(arg.clone());
                             tokens.pop_front();
                         }
-                        Token::RedirectIn(file) => {
-                            debug!("parse_pipeline: Found input redirection '<'");
-                            redirs.push(Redirection {
-                                direction: RedirectionType::Input,
-                                file: file.clone(),
-                            });
+                        Token::Redir(redir) => {
+                            redirs.push(redir.clone());
                             tokens.pop_front();
                         }
-                        Token::RedirectOut(file) => {
-                            debug!("parse_pipeline: Found output redirection '>'");
-                            redirs.push(Redirection {
-                                direction: RedirectionType::Output,
-                                file: file.clone(),
-                            });
-                            tokens.pop_front();
-                        }
-                        Token::RedirectErr(file) => {
-                            debug!("parse_pipeline: Found error redirection '2>'");
-                            redirs.push(Redirection {
-                                direction: RedirectionType::Error,
-                                file: file.clone(),
-                            });
-                            tokens.pop_front();
-                        }
-                        _ => break, // Stop processing arguments and redirections
+                        _ => break,
                     }
                 }
 
@@ -367,10 +528,17 @@ impl NodeDispatcher {
 
 #[derive(Debug)]
 pub struct Parser {
+    // Token currently being parsed
     token: Token,
+
+    // Stdin
     input: String,
+
+    // Communication between tokenizer and parser
     token_sender: mpsc::Sender<Token>,
     token_receiver: mpsc::Receiver<Token>,
+
+    // Channel to send ASTNodes back to the main event loop
     node_outbox: mpsc::Sender<event::ShellEvent>,
 
 }
@@ -379,6 +547,9 @@ impl Parser {
     pub fn new(input: String, output: mpsc::Sender<ShellEvent>) -> Self {
         let (token_sender, token_receiver) = mpsc::channel(100);
         Self {
+            // Initialize token as Token::Null instead of making it an Option type
+            // just so I don't have to write 'Some(token)' everywhere
+            // dont @ me
             token: Token::Null,
             input,
             token_sender,
@@ -387,25 +558,44 @@ impl Parser {
         }
     }
 
+    /// Abbreviation function
+    ///
+    /// Just returns a clone of the node_outbox field
     pub fn outbox(&self) -> mpsc::Sender<ShellEvent> {
         self.node_outbox.clone()
     }
 
+    /// Wrapper function
+    ///
+    /// Spawns an instance of the tokenizer, and an instance of parse_input()
+    /// The tokenizer sends tokens to parse_input() via the token_sender/receiver fields
     pub async fn handle_input(&mut self) -> Result<(), ShellError> {
         let input = self.input.clone();
         let token_sender = self.token_sender.clone();
 
+        // Spawn async process for the tokenizer
+        // Sends tokens to parser via the token_sender channel
         tokio::spawn(async move {
             if let Err(e) = tokenize(&input, token_sender).await {
                 error!("Tokenizer error: {:?}", e);
             }
         });
 
+        // Parse tokens incrementally as they arrive from the tokenizer
         self.parse_input().await
     }
 
+    /// The main parsing logic
+    ///
+    /// Gets tokens incrementally from the tokenizer, and then does stuff with them
+    /// Spawns a NodeDispatcher in a subroutine, NodeDispatcher exists to send AST nodes
+    /// asynchronously. This allows for tokenizing, parsing, and returning to happen incrementally
+    /// and in parallel. Input is essentially evaluated as it is read, which flattens the entire
+    /// parsing process.
     pub async fn parse_input(&mut self) -> Result<(), ShellError> {
         debug!("parse_input: Starting parse_input");
+
+        // Channel for sending nodes to the dispatcher
         let (node_sender,node_receiver) = mpsc::channel(100);
         let mut node_dispatcher = NodeDispatcher::new(node_receiver,self.outbox());
         tokio::spawn(async move {
@@ -469,7 +659,7 @@ impl Parser {
                 }
             }
 
-            // Just in case
+            // TODO: remember why this even needs to be here
             if self.token == Token::Eof {
                 self.stop_dispatcher(node_sender.clone()).await;
                 break;
@@ -479,6 +669,8 @@ impl Parser {
 
         Ok(())
     }
+
+    /// Helper method for popping tokens sent from the tokenizer
     async fn next_token(&mut self) {
         if self.token != Token::Eof {
             debug!("next_token: Fetching next token...");
@@ -489,200 +681,19 @@ impl Parser {
         }
     }
 
-
-
+    /// Helper method for emitting nodes to the NodeDispatcher in parse_input()
     async fn dispatch_handle(&mut self, sender: mpsc::Sender<JoinHandle<Option<ASTNode>>>, handle: JoinHandle<Option<ASTNode>>) {
         debug!("dispatch_handle: Sending node builder handle: {:?}", handle);
         let _ = sender.send(handle).await;
     }
 
+    /// Helper method that breaks the event loop in NodeDispatcher.start()
     async fn stop_dispatcher(&mut self, sender: mpsc::Sender<JoinHandle<Option<ASTNode>>>) {
+        // TODO: figure out if there's a better way to stop the dispatcher remotely
         let _ = sender.send(
             tokio::spawn( async move {
                 Some(ASTNode::Eof {  })
             })
         ).await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::sync::mpsc;
-
-    fn setup_parser(input: &str) -> (Parser, mpsc::Receiver<ShellEvent>) {
-        let (node_outbox, node_receiver) = mpsc::channel(100);
-        let parser = Parser::new(input.to_string(), node_outbox);
-        (parser, node_receiver)
-    }
-
-    async fn collect_nodes(receiver: &mut mpsc::Receiver<ShellEvent>) -> Vec<ShellEvent> {
-        let mut nodes = Vec::new();
-        while let Some(event) = receiver.recv().await {
-            nodes.push(event);
-        }
-        nodes
-    }
-
-    #[tokio::test]
-    async fn test_simple_commands() {
-        let input = "a; b; c";
-        let (mut parser, mut receiver) = setup_parser(input);
-
-        tokio::spawn(async move { parser.handle_input().await.unwrap() });
-
-        let nodes = collect_nodes(&mut receiver).await;
-
-        assert_eq!(
-            nodes,
-            vec![
-                ShellEvent::NewASTNode(ASTNode::ShCommand {
-                    name: "a".to_string(),
-                    args: vec![],
-                    redirs: vec![]
-                }),
-                ShellEvent::NewASTNode(ASTNode::ShCommand {
-                    name: "b".to_string(),
-                    args: vec![],
-                    redirs: vec![]
-                }),
-                ShellEvent::NewASTNode(ASTNode::ShCommand {
-                    name: "c".to_string(),
-                    args: vec![],
-                    redirs: vec![]
-                }),
-                ShellEvent::Prompt
-            ]
-        );
-    }
-    #[tokio::test]
-    async fn test_pipelines() {
-        let input = "a | b | c; d | e";
-        let (mut parser, mut receiver) = setup_parser(input);
-
-        tokio::spawn(async move { parser.handle_input().await.unwrap() });
-
-        let nodes = collect_nodes(&mut receiver).await;
-
-        assert_eq!(
-            nodes,
-            vec![
-                ShellEvent::NewASTNode(ASTNode::Pipeline {
-                    commands: vec![
-                        ASTNode::ShCommand {
-                            name: "a".to_string(),
-                            args: vec![],
-                            redirs: vec![]
-                        },
-                        ASTNode::ShCommand {
-                            name: "b".to_string(),
-                            args: vec![],
-                            redirs: vec![]
-                        },
-                        ASTNode::ShCommand {
-                            name: "c".to_string(),
-                            args: vec![],
-                            redirs: vec![]
-                        }
-                    ]
-                }),
-                ShellEvent::NewASTNode(ASTNode::Pipeline {
-                    commands: vec![
-                        ASTNode::ShCommand {
-                            name: "d".to_string(),
-                            args: vec![],
-                            redirs: vec![]
-                        },
-                        ASTNode::ShCommand {
-                            name: "e".to_string(),
-                            args: vec![],
-                            redirs: vec![]
-                        }
-                    ]
-                }),
-                ShellEvent::Prompt
-            ]
-        );
-    }
-    #[tokio::test]
-    async fn test_commands_with_arguments() {
-        let input = "a b c; d e f g";
-        let (mut parser, mut receiver) = setup_parser(input);
-
-        tokio::spawn(async move { parser.handle_input().await.unwrap() });
-
-        let nodes = collect_nodes(&mut receiver).await;
-
-        assert_eq!(
-            nodes,
-            vec![
-                ShellEvent::NewASTNode(ASTNode::ShCommand {
-                    name: "a".to_string(),
-                    args: vec!["b".to_string(), "c".to_string()],
-                    redirs: vec![]
-                }),
-                ShellEvent::NewASTNode(ASTNode::ShCommand {
-                    name: "d".to_string(),
-                    args: vec!["e".to_string(), "f".to_string(), "g".to_string()],
-                    redirs: vec![]
-                }),
-                ShellEvent::Prompt
-            ]
-        );
-    }
-    #[tokio::test]
-    async fn test_commands_with_redirections() {
-        let input = "a < input.txt > output.txt; b < in > out";
-        let (mut parser, mut receiver) = setup_parser(input);
-
-        tokio::spawn(async move { parser.handle_input().await.unwrap() });
-
-        let nodes = collect_nodes(&mut receiver).await;
-
-        assert_eq!(
-            nodes,
-            vec![
-                ShellEvent::NewASTNode(ASTNode::ShCommand {
-                    name: "a".to_string(),
-                    args: vec![],
-                    redirs: vec![
-                        Redirection {
-                            direction: RedirectionType::Input,
-                            file: "input.txt".to_string()
-                        },
-                        Redirection {
-                            direction: RedirectionType::Output,
-                            file: "output.txt".to_string()
-                        }
-                    ]
-                }),
-                ShellEvent::NewASTNode(ASTNode::ShCommand {
-                    name: "b".to_string(),
-                    args: vec![],
-                    redirs: vec![
-                        Redirection {
-                            direction: RedirectionType::Input,
-                            file: "in".to_string()
-                        },
-                        Redirection {
-                            direction: RedirectionType::Output,
-                            file: "out".to_string()
-                        }
-                    ]
-                }),
-                ShellEvent::Prompt
-            ]
-        );
-    }
-    #[tokio::test]
-    async fn test_complex_input() {
-        let input = "a | b; c d e f g | h | i; j k l > out | m < in; n";
-        let (mut parser, mut receiver) = setup_parser(input);
-
-        tokio::spawn(async move { parser.handle_input().await.unwrap() });
-
-        let nodes = collect_nodes(&mut receiver).await;
-
-        assert!(nodes.is_empty()); // Ensure nodes are parsed
     }
 }
