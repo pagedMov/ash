@@ -4,7 +4,6 @@ use std::str::Chars;
 use std::iter::Peekable;
 use std::io::{stdout, stderr, Read, Write};
 
-use crate::environment::InternalError;
 use crate::parser::Redirection;
 
 pub fn increment_string(int_str: String) -> Result<String,InternalError> {

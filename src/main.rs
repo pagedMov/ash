@@ -1,37 +1,17 @@
-pub mod command;
+pub mod event;
 pub mod parser;
 pub mod prompt;
-pub mod environment;
-pub mod helper;
-pub mod builtins;
-use log::{info, debug};
 
-fn main() {
+use log::debug;
+
+use crate::event::EventLoop;
+
+#[tokio::main]
+async fn main() {
     env_logger::init();
-    let mut environ = environment::Environment::new(true);
-    loop {
-        let input = prompt::prompt();
-        let tokens = parser::tokenize(input.as_str(),&environ);
-        info!("Tokens: {:?}", tokens);
+    let mut event_loop = EventLoop::new();
 
-        let mut parser = parser::Parser::new(tokens);
-        let ast = parser.parse_input(&mut environ);
-        match ast {
-            Ok(ast) => {
-                debug!("AST: {:#?}", ast);
-                match command::node_walk(ast, &mut environ) {
-                    Ok(_) => {
-                        environ.export_var("?","0");
-                    }
-                    Err(e) => {
-                        environ.set_var("?", &e.0.to_string());
-                        println!("Error: {}",e.1);
-                    }
-                }
-            }
-            Err(e) => {
-                println!("Error: {}",e);
-            }
-        }
-    }
+    debug!("Starting event loop");
+    // TODO: use the value returned by this for something
+    let _ = event_loop.listen().await;
 }
