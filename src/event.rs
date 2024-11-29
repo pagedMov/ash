@@ -4,6 +4,7 @@ use tokio::signal::unix::{signal, Signal, SignalKind};
 use thiserror::Error;
 
 use crate::{parser::{ASTNode, Parser, Token}, prompt};
+use crate::execute::NodeWalker;
 
 #[derive(Debug,Error,PartialEq)]
 pub enum ShellError {
@@ -43,7 +44,7 @@ pub enum ShellEvent {
     Signal(Signals),
     SubprocessExited(u32,i32),
     NewASTNode(ASTNode),
-    CaughtError(ShellError),
+    CatchError(ShellError),
     Exit(i32)
 }
 
@@ -99,7 +100,7 @@ impl EventLoop {
         debug!("Event loop started.");
         let mut code: i32 = 0;
 
-        // TODO: Find a better way to initialize the prompt
+        // TODO: Find a better way to initialize the prompt? idk might be fine
         self.sender.send(ShellEvent::Prompt).await.unwrap();
         while let Some(event) = self.receiver.recv().await {
             match event {
@@ -116,6 +117,10 @@ impl EventLoop {
                 }
                 ShellEvent::NewASTNode(node) => {
                     info!("new node:\n {:#?}", node);
+                    let sender = self.inbox();
+                    tokio::spawn(async move {
+                        NodeWalker::new(sender, node).walk().await;
+                    });
                 }
                 ShellEvent::SubprocessExited(pid,exit_code) => {
                     // TODO: Handle subprocesses exiting
@@ -125,7 +130,7 @@ impl EventLoop {
                     // TODO: Handle signals
                     debug!("Received signal: {:?}", signal);
                 }
-                ShellEvent::CaughtError(err) => {
+                ShellEvent::CatchError(err) => {
                     // TODO: Figure out how to handle fatals properly
                     if err.is_fatal() {
                         error!("Fatal: {:?}",err);

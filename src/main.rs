@@ -1,6 +1,7 @@
 pub mod event;
 pub mod parser;
 pub mod prompt;
+pub mod execute;
 
 use log::debug;
 

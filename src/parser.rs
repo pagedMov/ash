@@ -8,7 +8,9 @@ use regex::Regex;
 use crate::event::{self,ShellEvent};
 use crate::event::ShellError;
 
-static _BUILTINS: [&str; 6] = ["cd", "echo", "exit", "export", "alias", "unset"];
+static BUILTINS: [&str; 6] = ["cd", "echo", "exit", "export", "alias", "unset"];
+
+// TODO: organize the functions and stuff in this file, stuff is kind of just thrown all over the place
 
 
 #[derive(Debug,Clone,PartialEq)]
@@ -499,11 +501,20 @@ async fn parse_pipeline(tokens: Vec<Token>) -> Option<ASTNode> {
                 }
 
                 debug!("parse_pipeline: Finished parsing command: {}", name);
-                stack.push(ASTNode::ShCommand {
-                    name,
-                    args: std::mem::take(&mut args),
-                    redirs: std::mem::take(&mut redirs),
-                });
+
+                if BUILTINS.contains(&name.as_str()) {
+                    stack.push(ASTNode::Builtin {
+                        name,
+                        args: std::mem::take(&mut args),
+                        redirs: std::mem::take(&mut redirs),
+                    });
+                } else {
+                    stack.push(ASTNode::ShCommand {
+                        name,
+                        args: std::mem::take(&mut args),
+                        redirs: std::mem::take(&mut redirs),
+                    });
+                }
             }
             Token::Pipe => {
                 debug!("parse_pipeline: Found pipe '|', starting new pipeline");
