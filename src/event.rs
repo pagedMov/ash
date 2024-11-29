@@ -14,6 +14,9 @@ pub enum ShellError {
     #[error("Invalid syntax: {0}")]
     InvalidSyntax(String),
 
+    #[error("Parsing failed: {0}")]
+    ParsingError(String),
+
     // TODO: implement line/column in output here
     #[error("Unexpected token: {0:?}")]
     UnexpectedToken(Token),
@@ -31,6 +34,7 @@ impl ShellError {
             ShellError::IoError(..) => true,
             ShellError::CommandNotFound(..) => false,
             ShellError::ExecFailed(..) => false,
+            ShellError::ParsingError(..) => false,
             ShellError::InvalidSyntax(..) => false,
             ShellError::UnexpectedToken(..) => false,
         }
@@ -112,15 +116,15 @@ impl EventLoop {
                     code = exit_code;
                 }
                 ShellEvent::UserInput(input) => {
-                    let mut parser = Parser::new(input,self.sender.clone());
-                    parser.handle_input().await?;
+                    let mut parser = Parser::new(self.sender.clone(),None);
+                    parser.handle_input(input).await;
                 }
                 ShellEvent::NewASTNode(node) => {
                     info!("new node:\n {:#?}", node);
-                    let sender = self.inbox();
-                    tokio::spawn(async move {
-                        NodeWalker::new(sender, node).walk().await;
-                    });
+                    //let sender = self.inbox();
+                    //tokio::spawn(async move {
+                        //let _ = NodeWalker::new(sender, node).walk().await;
+                    //});
                 }
                 ShellEvent::SubprocessExited(pid,exit_code) => {
                     // TODO: Handle subprocesses exiting

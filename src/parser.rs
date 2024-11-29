@@ -1,6 +1,6 @@
 use log::{info,trace,error,debug};
 use std::mem;
-use std::collections::VecDeque;
+use std::collections::{HashSet,VecDeque};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use regex::Regex;
@@ -11,6 +11,7 @@ use crate::event::ShellError;
 static BUILTINS: [&str; 6] = ["cd", "echo", "exit", "export", "alias", "unset"];
 
 // TODO: organize the functions and stuff in this file, stuff is kind of just thrown all over the place
+// TODO: verify syntax before executing nodes
 
 
 #[derive(Debug,Clone,PartialEq)]
@@ -48,8 +49,7 @@ pub enum ASTNode {
 #[derive(Debug,Clone,PartialEq)]
 pub enum ChainOp {
     And,
-    Or,
-    Null // Used for the first pipeline in a chain
+    Or
 }
 
 #[derive(Debug,Clone,PartialEq)]
@@ -65,6 +65,14 @@ impl ConditionalPath {
             condition,
             body: Box::new(body),
         }
+    }
+
+    pub fn get_cond(&self) -> &Option<Box<ASTNode>> {
+        &self.condition
+    }
+
+    pub fn get_body(&self) -> &ASTNode {
+        &self.body
     }
 }
 
@@ -106,9 +114,10 @@ pub enum RedirDestination {
     Output,         // > file
 }
 
-#[derive(Clone,Debug,PartialEq)]
+#[derive(Clone,Debug,PartialEq,Hash,Eq)]
 pub enum Token {
     Word(String),
+    AnyWord,
     Redir(String,String,String),
     Fd(String),
     RedirOperator(String),
@@ -132,469 +141,326 @@ pub enum Token {
     Null
 }
 
-
-fn build_word(
-    chars: &mut VecDeque<char>
-) -> String {
-    let mut singlequote = false;
-    let mut doublequote = false;
-    let mut word = String::new();
-
-    while let Some(&c) = chars.front() {
-        trace!(
-            "Processing character: '{}' | Singlequote: {} | Doublequote: {} | Current word: '{}'",
-            c, singlequote, doublequote, word
-        );
-
-        match c {
-            '"' if !singlequote => {
-                doublequote = !doublequote;
-                trace!(
-                    "Toggled doublequote to {}. Skipping character: '\"'",
-                    doublequote
-                );
-                chars.pop_front();
-            }
-            '\'' if !doublequote => {
-                singlequote = !singlequote;
-                trace!(
-                    "Toggled singlequote to {}. Skipping character: '\''",
-                    singlequote
-                );
-                chars.pop_front();
-            }
-            ';' | '|' | '\n' | ' ' | '\t' if !singlequote && !doublequote => {
-                trace!(
-                    "Encountered delimiter '{}' while not inside quotes. Returning word: '{}'",
-                    c, word
-                );
-                break;
-
-            }
-            _ => {
-                word.push(c);
-                trace!("Added '{}' to word. Current word: '{}'", c, word);
-                chars.pop_front();
-            }
-        }
-    }
-
-    word
-}
-
-pub fn skip_space(chars: &mut VecDeque<char>) {
-    while let Some(&ch) = chars.front() {
+impl Token {
+    pub fn from_char(ch: char) -> Token {
         match ch {
-            ' ' | '\t' => { chars.pop_front(); },
-            _ => { return; }
+            ' ' | '\t' => Token::Null,
+            '|' => Token::Pipe,
+            '\n' => Token::Newline,
+            ';' => Token::Semicolon,
+            _ => Token::Null,
         }
     }
 }
 
-/// Reads input one character at a time, creating tokens from words and symbols
-///
-/// Tokens are then used by the Parser to create ASTNodes to send back to the
-/// shell's main event loop
-pub async fn tokenize(input: &str, outbox: mpsc::Sender<Token>) -> Result<(), ShellError> {
 
-    // TODO: handle escaping with backslashes
 
-    let mut chars = VecDeque::from(input.chars().collect::<Vec<char>>());
-    let redirection_re = Regex::new(r"([\d&]*)(>>?|<|<&|>&)\s*([^\s;]*)").unwrap();
+pub struct Tokenizer {
+    chars: VecDeque<char>,
+    outbox: mpsc::Sender<Token>,
+    redir_regex: Regex,
+    expecting: HashSet<String>,         // Tracks unclosed delimiters
+    expecting_immediate: Option<HashSet<Token>>, // Tracks immediate expectations
+    col: i32,
+    row: i32
+}
 
-    while let Some(&ch) = chars.front() {
-        debug!("tokenizer: checking character: {:?}",ch);
-        let mut word = String::new();
+impl Tokenizer {
+    /// Creates a new Tokenizer instance
+    pub fn new(input: &str, outbox: mpsc::Sender<Token>) -> Self {
+        Self {
+            chars: VecDeque::from(input.chars().collect::<Vec<char>>()),
+            outbox,
+            redir_regex: Regex::new(r"([\d&]*)(>>?|<|<&|>&)\s*([^\s;]*)").unwrap(),
+            expecting: HashSet::new(),
+            expecting_immediate: None,
+            col: 1,
+            row: 1
+        }
+    }
+
+    fn get_pos(&self) -> String {
+        format!("{};{}",self.row,self.col)
+    }
+
+    fn step(&mut self) {
+        if let Some(char) = self.chars.pop_front() {
+            match char {
+                '\n' => {
+                    self.row += 1;
+                    self.col = 1;
+                }
+                _ => self.col += 1,
+            }
+        }
+    }
+
+    fn step_count(&mut self,steps: usize) {
+        for _ in 0..steps {
+            self.step()
+        }
+    }
+
+    fn expect_next(&mut self, expected_tokens: &[Token]) {
+        let new_set: HashSet<Token> = expected_tokens.iter().cloned().collect();
+        self.expecting_immediate = Some(new_set);
+    }
+
+    fn is_expected_token(&mut self, mut token: &Token) -> bool {
+        if matches!(&token, &Token::Word(_)) {
+            token = &Token::AnyWord;
+        }
+        if let Some(expected_tokens) = &self.expecting_immediate {
+            expected_tokens.contains(token)
+        } else {
+            false
+        }
+    }
+
+    /// Tokenizes the input and sends tokens to the parser
+    pub async fn tokenize(&mut self) -> Result<(), ShellError> {
         let mut tokens: VecDeque<Token> = VecDeque::new();
-        match ch {
-            ' ' | '\t' => {
-                chars.pop_front();
+        while let Some(&ch) = self.chars.front() {
+            let token: Token;
+            debug!("tokenizer: checking character: {:?}", ch);
+
+            if matches!(ch, ' ' | '\t') {
+                self.step();
                 continue;
             }
-            '|' => { // Handles both pipes and '||' chain operators
-                if chars[1] != '|' {
-                    tokens.push_back(Token::Pipe);
-                    chars.pop_front();
-                } else {
-                    tokens.push_back(Token::Or);
-                    chars.pop_front();
-                }
-            }
-            '\n' => {
-                tokens.push_back(Token::Newline);
-                chars.pop_front();
-            }
-            ';' => {
-                tokens.push_back(Token::Semicolon);
-                chars.pop_front();
-            }
-            _ => {
-                word = build_word(&mut chars);
 
-                // Reserved words
-                match word.as_str() {
-                    "if" => { tokens.push_back(Token::If); }
-                    "then" => { tokens.push_back(Token::Then); }
-                    "elif" => { tokens.push_back(Token::Elif); }
-                    "else" => { tokens.push_back(Token::Else); }
-                    "fi" => { tokens.push_back(Token::Fi); }
-                    "&&" => { tokens.push_back(Token::And); }
-                    "for" => { tokens.push_back(Token::For); }
-                    "while" => { tokens.push_back(Token::While); }
-                    "until" => { tokens.push_back(Token::Until); }
-                    "do" => { tokens.push_back(Token::Do); }
-                    "done" => { tokens.push_back(Token::Done); }
+
+            let word = self.build_word().map_err(|err| {
+                error!("Error building word at {}: {:?}", self.get_pos(), err);
+                err
+            })?;
+
+            // Check if the word is a reserved keyword
+            if let Some(keyword_token) = self.handle_reserved_word(&word)? {
+                token = keyword_token;
+                self.step_count(word.chars().count());
+            } else {
+                // Process based on single characters for symbols
+                match self.chars.front() {
+                    Some('|') => {
+                        self.step();
+                        token = Token::Pipe;
+                    }
+                    Some('\n') => {
+                        self.step();
+                        token = Token::Newline;
+                    }
+                    Some(';') => {
+                        self.step();
+                        token = Token::Semicolon;
+                    }
                     _ => {
-                        debug!("Checking word: {}",word.as_str());
-                        // Only run regex on stuff that looks like a redirection
-                        if word.contains(['<', '>', '&']) || word.parse::<u32>().is_ok() {
-                            if let Some(captures) = redirection_re.captures(word.as_str()) {
-                                debug!("Found redirection, parsing...");
-                                let mut fd = captures.get(1).map_or("1", |m| m.as_str());
-                                let operator = captures.get(2).map_or("", |m| m.as_str());
-                                let mut target: String = captures.get(3).map_or("".to_string(), |m| m.as_str().to_string());
-
-                                // TODO: handle unwrap
-                                if fd.is_empty() {
-                                    fd = "1";
-                                }
-
-                                // TODO: implement differentiation between >&1 and > &1
-                                if target.is_empty() {
-                                    skip_space(&mut chars);
-                                    target = build_word(&mut chars);
-                                    // TODO: handle this
-                                    if target.is_empty() { panic!("No target for redirection"); }
-                                }
-
-                                tokens.push_back(Token::Redir(operator.into(),fd.into(),target));
-
-                            }
-                        } else {
-                            debug!("No redirection regex match, pushing_back word");
-                            if word.is_empty() { break; }
-                            tokens.push_back(Token::Word(word.clone()));
-                        }
+                        // Handle other non-reserved words
+                        token = self.handle_non_reserved_word(word).unwrap();
                     }
                 }
             }
+            // Check immediate expectations
+            if self.expecting_immediate.is_some() && !self.is_expected_token(&token) {
+                let expected_tokens = self.expecting_immediate.clone().unwrap();
+                return Err(
+                    ShellError::InvalidSyntax(
+                        format!("Syntax error at {}: Expected one of {:?}, found {:?}"
+                            ,self.get_pos(),
+                            expected_tokens,
+                            token
+                        )
+                    )
+                );
+            }
+            self.handle_expectations(&token);
+            tokens.push_back(token);
         }
         if !tokens.is_empty() {
-            // send token from tokenizer to parser
-            while let Some(token) = tokens.pop_front() {
-                info!("tokenizer: Sending token: {:?}",token);
-                // TODO: handle errors here
-                outbox.send(token).await.unwrap();
-            }
+            self.send_tokens(tokens).await?;
         } else {
             error!("Tokens emptied before Eof");
-            return Err(ShellError::InvalidSyntax(word));
+            return Err(ShellError::InvalidSyntax(format!("Syntax error at {}: Unexpected end of input",self.get_pos())));
         }
+        // Final check for unclosed delimiters
+        if !self.expecting.is_empty() {
+            return Err(ShellError::InvalidSyntax(format!(
+                "Syntax error at {}: Finished parsing with unclosed delimiters: {:?}",
+                self.get_pos(),self.expecting
+            )));
+        }
+
+        // Send the Eof token once the input is exhausted
+        info!("tokenizer: Sending Eof token");
+        self.outbox.send(Token::Eof).await.unwrap();
+        Ok(())
     }
 
-    // Send the Eof token once the input is exhausted
-    info!("tokenizer: Sending Eof token");
-    outbox.send(Token::Eof).await.unwrap();
-    Ok(())
-}
-
-// These have to be helper functions instead of Parser methods, in order for async to work
-// This is because they can't be referenced inside of the tokio::spawn() context
-// If they are tied to the Parser struct
-
-/// Lord forgive me for what I am about to do
-async fn parse_conditional(tokens: Vec<Token>) -> Option<ASTNode> {
-    let mut tokens = VecDeque::from(tokens);
-    debug!("parse_conditional: Starting parsing with tokens: {:?}", tokens);
-
-    let mut paths = Vec::new();
-
-    while let Some(token) = tokens.front() {
-        debug!("parse_conditional: Processing token: {:?}", token);
-
-        match token {
-            Token::If | Token::Elif => {
-                debug!("parse_conditional: Detected conditional start: {:?}", token);
-
-                // Parse condition
-                let condition = conditional_helper(&mut tokens, "condition").await?;
-                debug!("parse_conditional: Parsed condition: {:?}", condition);
-
-                // Parse path for the condition
-                let path = conditional_helper(&mut tokens, "path").await?;
-                debug!("parse_conditional: Parsed path: {:?}", path);
-
-                paths.push(ConditionalPath::new(Some(condition), path));
-                debug!("parse_conditional: Added conditional path to paths: {:?}", paths);
-            }
-            Token::Else => {
-                debug!("parse_conditional: Detected 'Else' token. Parsing else path...");
-
-                // Parse else path
-                let else_path = conditional_helper(&mut tokens, "path").await?;
-                debug!("parse_conditional: Parsed else path: {:?}", else_path);
-
-                paths.push(ConditionalPath::new(None, else_path));
-                debug!("parse_conditional: Added else path to paths: {:?}", paths);
-            }
+    fn handle_expectations(&mut self, current_token: &Token) {
+        match current_token {
             Token::Fi => {
-                debug!("parse_conditional: Detected 'Fi' token. Ending conditional parsing.");
-                break;
+                self.expect_next(&[Token::Semicolon,Token::Newline,Token::Eof]);
             }
-            _ => {
-                error!("parse_conditional: Unexpected token in conditional: {:?}", token);
-                return None;
-            }
+            _ => self.expecting_immediate = None,
         }
     }
 
-    debug!("parse_conditional: Completed parsing. Paths: {:?}", paths);
-    Some(ASTNode::Conditional { paths })
-}
+    fn handle_reserved_word(&mut self, word: &str) -> Result<Option<Token>, ShellError> {
+        let mut token: Option<Token> = None;
+        debug!("Checking for reserved word with: {}",word);
+        match word.trim() {
+            "if" => {
+                token = Some(Token::If);
+                self.expecting.insert("fi".to_string());
+                Ok(token)
+            }
+            "then" => {
+                token = Some(Token::Then);
+                Ok(token)
+            }
+            "fi" => {
+                if !self.expecting.remove("fi") {
+                    return Err(ShellError::InvalidSyntax(
+                        format!("Syntax error at {}: Unexpected 'fi' without matching 'if'", self.get_pos()),
+                    ));
+                }
+                token = Some(Token::Fi);
+                Ok(token)
+            }
+            "elif" => {
+                if !self.expecting.contains("fi") {
+                    return Err(ShellError::InvalidSyntax(
+                        format!("Syntax error at {}: Unexpected 'elif' without matching 'if'", self.get_pos()),
+                    ));
+                }
+                token = Some(Token::Elif);
+                Ok(token)
+            }
+            "else" => {
+                if !self.expecting.contains("fi") {
+                    return Err(ShellError::InvalidSyntax(
+                        format!("Syntax error at {}: Unexpected 'else' without matching 'if'", self.get_pos()),
+                    ));
+                }
+                token = Some(Token::Else);
+                Ok(token)
+            }
+            "||" => {
+                token = Some(Token::Or);
+                Ok(token)
+            }
+            "&&" => {
+                token = Some(Token::And);
+                Ok(token)
+            }
+            "for" | "while" | "until" => {
+                token = Some(Token::For); // Use appropriate token
+                Ok(token)
+            }
+            "do" => {
+                token = Some(Token::Do);
+                Ok(token)
+            }
+            "done" => {
+                token = Some(Token::Done);
+                Ok(token)
+            }
+            _ => Ok(token), // Not a reserved word
+        }
+    }
 
-async fn conditional_helper(tokens: &mut VecDeque<Token>, body_type: &str) -> Option<ASTNode> {
-    let mut pipeline_tokens = Vec::new();
-    let mut chains = Vec::new();
-    debug!("parse_condition: Starting condition parsing with tokens: {:?}", tokens);
+    fn handle_non_reserved_word(
+        &mut self,
+        word: String
+    ) -> Option<Token> {
+        debug!("Checking word: {}", word);
 
-    match body_type {
-        "condition" => {
-            if let Some(keyword) = tokens.pop_front() {
-                if !matches!(keyword, Token::If | Token::Elif) {
-                    error!("Tried to parse if/elif block with unexpected keyword: {:?}",keyword);
-                    return None;
+        if word.contains(['<', '>', '&']) || word.parse::<u32>().is_ok() {
+            if let Some(captures) = self.redir_regex.captures(word.as_str()) {
+                debug!("Found redirection, parsing...");
+
+                let fd = if let Some(m) = captures.get(1) {
+                    let val = m.as_str();
+                    if val.is_empty() { "1" } else { val }
+                } else { "1" };
+                let operator = captures.get(2).map_or("", |m| m.as_str());
+                let mut target: String = captures.get(3).map_or("".to_string(), |m| m.as_str().to_string());
+
+                if target.is_empty() {
+                    self.skip_space();
+                    target = self.build_word().unwrap();
+                    self.step_count(target.chars().count());
+                }
+
+                Some(Token::Redir(operator.into(), fd.into(), target))
+            } else { unreachable!() };
+        }
+
+        if !word.is_empty() {
+            self.step();
+            Some(Token::Word(word))
+        } else { None }
+    }
+
+    fn in_double_quotes(&self) -> bool {
+        self.expecting.contains("\"")
+    }
+
+    fn in_single_quotes(&self) -> bool {
+        self.expecting.contains("'")
+    }
+
+    fn in_any_quotes(&self) -> bool {
+        self.in_single_quotes() || self.in_double_quotes()
+    }
+
+    fn build_word(&mut self) -> Result<String, ShellError> {
+        let mut chars = self.chars.iter().peekable();
+        let mut word = String::new();
+
+        while let Some(&c) = chars.peek() {
+            match c {
+                '"' if !self.in_single_quotes() => {
+                    self.expecting.insert("\"".into());
+                    chars.next();
+                }
+                '\'' if !self.in_double_quotes() => {
+                    self.expecting.insert("'".into());
+                    chars.next();
+                }
+                ';' | '|' | '\n' | ' ' | '\t' if !self.in_any_quotes() => {
+                    break;
+                }
+                _ => {
+                    word.push(*c);
+                    chars.next();
                 }
             }
         }
-        "path" => {
-            if let Some(keyword) = tokens.pop_front() {
-                if !matches!(keyword, Token::Then | Token::Else) {
-                    error!("Reached parse_path with an unexpected keyword: {:?}",keyword);
-                    return None;
+
+        Ok(word)
+    }
+
+    fn skip_space(&mut self) {
+        while let Some(&ch) = self.chars.front() {
+            match ch {
+                ' ' | '\t' => {
+                    self.step();
                 }
-            }
-        }
-        _ => unreachable!()
-    }
-
-    while let Some(token) = tokens.front() {
-        debug!("parse_condition: Inspecting token: {:?}", token);
-
-        match token {
-            Token::Semicolon | Token::Newline | Token::Eof => {
-                debug!("parse_condition: Detected delimiter token: {:?}", token);
-                tokens.pop_front();
-                break;
-            }
-            Token::And | Token::Or => {
-                debug!("parse_condition: Detected chain token: {:?}", token);
-                chains.push(std::mem::take(&mut pipeline_tokens));
-                chains.push(vec![token.clone()]);
-                tokens.pop_front();
-                debug!("parse_condition: Updated chains: {:?}", chains);
-            }
-            _ => {
-                debug!("parse_condition: Adding token to pipeline tokens: {:?}", token);
-                pipeline_tokens.push(token.clone());
-                tokens.pop_front();
+                _ => return,
             }
         }
     }
 
-    if chains.is_empty() {
-        debug!("parse_condition: Parsing single pipeline: {:?}", pipeline_tokens);
-        parse_pipeline(pipeline_tokens).await
-    } else {
-        debug!("parse_condition: Parsing chained pipelines: {:?}", chains);
-        chains.push(std::mem::take(&mut pipeline_tokens));
-        parse_chains(chains).await
-    }
-}
-
-/// Parses command chaining like cmd1 && cmd2 || cmd3
-///
-/// the `chains` vector looks like this:
-/// [[cmd1,cmd2],[And],[cmd1,cmd2,cmd3],[Or],[cmd1]]
-///
-/// The function steps through the chains vector grabbing elements two at a time
-/// With each iteration, the previous CmdChain is attached to the left side of the new one
-async fn parse_chains(chains: Vec<Vec<Token>>) -> Option<ASTNode> {
-    debug!("Parsing chains: {:?}",chains);
-    let mut left = parse_pipeline(chains[0].clone()).await?;
-    for i in (1..chains.len()).step_by(2) {
-        let operator = match chains[i].as_slice() {
-            [Token::And] => ChainOp::And,
-            [Token::Or] => ChainOp::Or,
-            _ => unreachable!()
-        };
-
-        let right = parse_pipeline(chains[i+1].clone()).await?;
-        left = ASTNode::CmdChain { left: Box::new(left), right: Box::new(right), operator }
-    }
-
-    Some(left)
-}
-
-async fn parse_one() {
-    // TODO: implement this
-    // This function will be used to quickly parse a single line and return the output
-    // Will be used for $(substitution) and subshells in general
-    todo!()
-}
-
-/// Parses commands
-///
-/// If only one command is found, it just returns the ShCommand node,
-/// If several are found, it returns a Pipeline node containing ShCommands
-///
-/// Called from parse_input()
-async fn parse_pipeline(tokens: Vec<Token>) -> Option<ASTNode> {
-    debug!("parse_pipeline: Parsing iteratively");
-
-    let mut tokens = VecDeque::from(tokens);
-    let mut stack: Vec<ASTNode> = Vec::new();
-
-    let mut args = Vec::new();
-    let mut redirs = Vec::new();
-
-    while let Some(token) = tokens.pop_front() {
-        match token {
-            Token::Word(name) => {
-                debug!("parse_pipeline: Found command: {}", name);
-
-                while let Some(token) = tokens.front() {
-                    match token {
-                        Token::Word(arg) => {
-                            debug!("parse_pipeline: Found argument: {}", arg);
-                            args.push(arg.clone());
-                            tokens.pop_front();
-                        }
-                        Token::Redir(operator, fd, target) => {
-                            debug!("parse_pipeline: Found redirection: {:?}", token);
-                            // Build redirection (similar logic to before)
-                            let mut redir = match operator.as_str() {
-                                "<" => Redirection::new(RedirDestination::Input, vec![]),
-                                ">" => Redirection::new(RedirDestination::Output, vec![]),
-                                ">>" => {
-                                    let mut r = Redirection::new(RedirDestination::Output, vec![]);
-                                    r.set_flag(RedirFlag::Append);
-                                    r
-                                }
-                                _ => unreachable!(),
-                            };
-
-                            if fd != "&" {
-                                redir.set_flag(RedirFlag::FdOut(fd.parse().unwrap()));
-                            }
-
-                            if target.starts_with('&') {
-                                redir.set_flag(RedirFlag::ToFd(target.strip_prefix('&')?.parse().unwrap()));
-                            } else {
-                                redir.set_flag(RedirFlag::File(target.into()));
-                            }
-
-                            redirs.push(redir);
-                            tokens.pop_front();
-                        }
-                        _ => break,
-                    }
-                }
-
-                debug!("parse_pipeline: Finished parsing command: {}", name);
-
-                if BUILTINS.contains(&name.as_str()) {
-                    stack.push(ASTNode::Builtin {
-                        name,
-                        args: std::mem::take(&mut args),
-                        redirs: std::mem::take(&mut redirs),
-                    });
-                } else {
-                    stack.push(ASTNode::ShCommand {
-                        name,
-                        args: std::mem::take(&mut args),
-                        redirs: std::mem::take(&mut redirs),
-                    });
-                }
-            }
-            Token::Pipe => {
-                debug!("parse_pipeline: Found pipe '|', starting new pipeline");
-            }
-            Token::Semicolon | Token::Newline | Token::Eof => {
-                debug!("parse_pipeline: End of pipeline detected");
-                break;
-            }
-            _ => {
-                debug!("parse_pipeline: Unexpected token: {:?}", token);
-                return None;
-            }
+    async fn send_tokens(&self, mut tokens: VecDeque<Token>) -> Result<(), ShellError> {
+        while let Some(token) = tokens.pop_front() {
+            info!("tokenizer: Sending token: {:?}", token);
+            self.outbox.send(token).await.map_err(|err| {
+                error!("Failed to send token: {:?}", err);
+                ShellError::InvalidSyntax(format!("Syntax error at {}: {}",self.get_pos(),err))
+            })?;
         }
-    }
-
-    if stack.len() == 1 {
-        Some(stack.pop().unwrap())
-    } else if !stack.is_empty() {
-        Some(ASTNode::Pipeline { commands: stack })
-    } else {
-        debug!("parse_pipeline: No commands found.");
-        None
-    }
-}
-
-#[derive(Debug)]
-pub struct NodeDispatcher {
-    inbox: mpsc::Receiver<JoinHandle<Option<ASTNode>>>,
-    outbox: mpsc::Sender<ShellEvent>,
-}
-
-impl NodeDispatcher {
-    /// Create a new NodeDispatcher.
-    pub fn new(inbox: mpsc::Receiver<JoinHandle<Option<ASTNode>>>, outbox: mpsc::Sender<ShellEvent>) -> Self {
-        Self {
-            inbox,
-            outbox,
-        }
-    }
-
-    /// Start processing tasks in the correct order.
-    pub async fn start(&mut self) {
-        debug!("node_dispatcher.start: Starting Node Dispatcher event loop");
-        loop {
-            if let Some(handle) = self.inbox.recv().await {
-                debug!("Awaiting handle: {:?}",handle);
-                let handle = handle.await;
-                debug!("Received from handle: '{:?}'",handle);
-                match handle {
-                    Ok(Some(node)) => {
-                        match node {
-                            ASTNode::Eof {} => {
-                                // Return to prompt
-                                let _ = self.outbox.send(ShellEvent::Prompt).await;
-                                break;
-                            }
-                            _ => {
-                                // Handle successful node creation
-                                debug!("node_dispatcher.start: Sending built AST node: {:?}",node);
-                                if let Err(err) = self
-                                    .outbox
-                                    .send(ShellEvent::NewASTNode(node)) // Send the created node
-                                    .await
-                                {
-                                    error!("node_dispatcher.start: Failed to send AST node: {:?}", err);
-                                }
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        // TODO: properly handle case where parser returns None
-                        error!("node_dispatcher.start: Node task failed");
-                    }
-                    Err(join_error) => {
-                        // Handle task panics
-                        error!("node_dispatcher.start: Task panicked: {:?}", join_error);
-                    }
-                }
-            }
-        }
+        Ok(())
     }
 }
 
@@ -603,29 +469,45 @@ pub struct Parser {
     // Token currently being parsed
     token: Token,
 
-    // Stdin
-    input: String,
+    // Use a VecDeque so I can easily send nodes in the order they were built
+    // VecDeque contains JoinHandles given from tokio::spawn() calls; better than awaiting each spawn() immediately
+    // and then pushing which might cause a race condition
 
     // Communication between tokenizer and parser
     token_sender: mpsc::Sender<Token>,
     token_receiver: mpsc::Receiver<Token>,
 
-    // Channel to send ASTNodes back to the main event loop
+    // Channel for internally communicating with sub-parsers
+    // Sub-parsers are spawned to handle individual ASTNodes concurrently
+    // external_node_sender is sent to sub-parsers to get nodes back from them
+    internal_node_receiver: Option<mpsc::Receiver<JoinHandle<Option<ASTNode>>>>,
+    internal_node_sender: mpsc::Sender<JoinHandle<Option<ASTNode>>>,
+    // Channel to send ASTNodeskback to the main event loop
     node_outbox: mpsc::Sender<event::ShellEvent>,
 
 }
 
 impl Parser {
-    pub fn new(input: String, output: mpsc::Sender<ShellEvent>) -> Self {
+    pub fn new(output: mpsc::Sender<ShellEvent>, super_parser_channel: Option<mpsc::Sender<JoinHandle<Option<ASTNode>>>>) -> Self {
         let (token_sender, token_receiver) = mpsc::channel(100);
+
+        // If a Sender is given, don't make a receiver
+        let (internal_node_receiver, internal_node_sender) = if let Some(sender) = super_parser_channel {
+            (None, sender)
+        } else {
+            let (new_sender, new_receiver) = mpsc::channel(100);
+            (Some(new_receiver), new_sender)
+        };
+
         Self {
             // Initialize token as Token::Null instead of making it an Option type
             // just so I don't have to write 'Some(token)' everywhere
             // dont @ me
             token: Token::Null,
-            input,
             token_sender,
             token_receiver,
+            internal_node_receiver,
+            internal_node_sender,
             node_outbox: output,
         }
     }
@@ -641,20 +523,42 @@ impl Parser {
     ///
     /// Spawns an instance of the tokenizer, and an instance of parse_input()
     /// The tokenizer sends tokens to parse_input() via the token_sender/receiver fields
-    pub async fn handle_input(&mut self) -> Result<(), ShellError> {
-        let input = self.input.clone();
+    pub async fn handle_input(&mut self, input: String) {
+        // Clone required fields
+        let input = input.clone();
         let token_sender = self.token_sender.clone();
 
-        // Spawn async process for the tokenizer
-        // Sends tokens to parser via the token_sender channel
-        tokio::spawn(async move {
-            if let Err(e) = tokenize(&input, token_sender).await {
-                error!("Tokenizer error: {:?}", e);
-            }
-        });
+        // Spawn the tokenizer
+        let tokenizer_result = tokio::spawn(async move {
+            let mut tokenizer = Tokenizer::new(&input, token_sender);
+            tokenizer.tokenize().await
+        })
+        .await;
 
-        // Parse tokens incrementally as they arrive from the tokenizer
-        self.parse_input().await
+        // Handle results
+        if let Err(join_error) = tokenizer_result {
+            self.report_error(ShellError::IoError(join_error.to_string())).await;
+            return;
+        }
+
+        match tokenizer_result.unwrap() {
+            Ok(_) => {
+                if let Err(parse_error) = self.parse_input().await {
+                    self.report_error(ShellError::ParsingError(parse_error.to_string())).await;
+                }
+            }
+            Err(tokenize_error) => {
+                self.report_error(ShellError::InvalidSyntax(tokenize_error.to_string())).await;
+            }
+        }
+        let _ = self.node_outbox.send(ShellEvent::Prompt).await;
+    }
+
+    /// Helper method to send errors to the node outbox
+    async fn report_error(&self, error: ShellError) {
+        if let Err(send_error) = self.node_outbox.send(ShellEvent::CatchError(error)).await {
+            error!("Failed to report error: {:?}", send_error);
+        }
     }
 
     /// The main parsing logic
@@ -667,13 +571,6 @@ impl Parser {
     pub async fn parse_input(&mut self) -> Result<(), ShellError> {
         debug!("parse_input: Starting parse_input");
 
-        // Channel for sending nodes to the dispatcher
-        let (node_sender,node_receiver) = mpsc::channel(100);
-        let mut node_dispatcher = NodeDispatcher::new(node_receiver,self.outbox());
-        tokio::spawn(async move {
-            node_dispatcher.start().await;
-        });
-
         loop {
             debug!("parse_input: Current token: {:?}", self.token);
 
@@ -681,38 +578,39 @@ impl Parser {
                 Token::Null => debug!("parse_input: Skipping Null token"),
                 Token::Eof => {
                     // Send Eof ASTNode to NodeDispatcher
-                    self.stop_dispatcher(node_sender.clone()).await;
                     break;
                 }
                 _ => match self.token {
-
+                    Token::Semicolon | Token::Newline => {
+                        debug!("Skipping orphaned delimiter: {:?}",self.token);
+                        self.next_token().await;
+                        continue; // Doesn't mean anything out here
+                    }
                     // CONDITIONALS
                     Token::If => {
                         debug!("parse_input: Detected 'If' token. Parsing conditional...");
-                        let mut conditional_tokens: Vec<Token> = vec![];
-                        while self.token != Token::Fi {
+                        let mut conditional_tokens: VecDeque<Token> = VecDeque::new();
+                        loop {
                             if self.token == Token::Eof {
                                 // TODO: make sure these errors are actually being handled
                                 // whereever they are being sent to
                                 return Err(ShellError::InvalidSyntax("'fi' token not found in conditional".into()));
                             }
-                            conditional_tokens.push(self.token.clone());
-                            self.next_token().await;
+                            conditional_tokens.push_back(self.token.clone());
+                            if self.token == Token::Fi {
+                                break;
+                            } else {
+                                self.next_token().await;
+                            }
                         }
 
-                        self.dispatch_handle(
-                            node_sender.clone(),
-                            tokio::spawn(async move {
-                                parse_conditional(conditional_tokens).await
-                            })
-                        ).await;
+                        self.delegate_conditional(conditional_tokens).await;
                     }
 
                     // PIPELINES
                     _ => {
-                        debug!("parse_input: Delegating to parse_pipeline for token: {:?}", self.token);
-                        let mut pipeline_tokens: Vec<Token> = vec![];
-                        let mut chains: Vec<Vec<Token>> = vec![];
+                        let mut pipeline_tokens: VecDeque<Token> = VecDeque::new();
+                        let mut chains: VecDeque<VecDeque<Token>> = VecDeque::new();
                         loop {
                             match self.token {
                                 Token::Eof | Token::Semicolon | Token::Newline => {
@@ -721,31 +619,26 @@ impl Parser {
                                 }
                                 Token::And | Token::Or => {
                                     debug!("Chain token found, moving tokens: {:?}",pipeline_tokens);
-                                    chains.push(mem::take(&mut pipeline_tokens));
-                                    chains.push(vec![self.token.clone()]);
+
+                                    // Push current pipeline, and then push the operator
+                                    // produces output like [[pipeline1],[And],[pipeline2]]
+                                    chains.push_back(mem::take(&mut pipeline_tokens));
+                                    chains.push_back(VecDeque::from(vec![self.token.clone()]));
                                     self.next_token().await;
                                 }
                                 _ => {
-                                    pipeline_tokens.push(self.token.clone());
+                                    pipeline_tokens.push_back(self.token.clone());
                                     self.next_token().await;
                                 }
                             }
                         }
                         if chains.is_empty() { // Parse single pipeline
-                            self.dispatch_handle(
-                                node_sender.clone(),
-                                tokio::spawn(async move {
-                                    parse_pipeline(pipeline_tokens).await
-                                })
-                            ).await;
+                            debug!("parse_input: Delegating to parse_pipeline for token: {:?}", self.token);
+                            self.delegate_pipeline(pipeline_tokens).await;
                         } else {
-                            chains.push(mem::take(&mut pipeline_tokens)); // Push final pipeline
-                            self.dispatch_handle(
-                                node_sender.clone(),
-                                tokio::spawn(async move {
-                                    parse_chains(chains).await
-                                })
-                            ).await;
+                            debug!("parse_input: Delegating to parse_pipeline for token: {:?}", self.token);
+                            chains.push_back(mem::take(&mut pipeline_tokens)); // Push final pipeline
+                            self.delegate_chains(chains).await;
                         }
                     }
                 }
@@ -753,12 +646,24 @@ impl Parser {
 
             // TODO: remember why this even needs to be here
             if self.token == Token::Eof {
-                self.stop_dispatcher(node_sender.clone()).await;
                 break;
             }
             self.next_token().await;
         }
 
+        // TODO: verify syntax before doing this
+        // TODO: handle errors instead of using `let _ =`
+        let outbox = self.outbox();
+        if let Some(ref mut rx) = self.internal_node_receiver {
+            while let Ok(task) = rx.try_recv() {
+                let node = task.await;
+                if let Err(e) = node {
+                    panic!("parse_input: Error while awaiting JoinHandle: {}",e)
+                } else {
+                    let _ = outbox.send(ShellEvent::NewASTNode(node.unwrap().unwrap())).await;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -773,19 +678,282 @@ impl Parser {
         }
     }
 
-    /// Helper method for emitting nodes to the NodeDispatcher in parse_input()
-    async fn dispatch_handle(&mut self, sender: mpsc::Sender<JoinHandle<Option<ASTNode>>>, handle: JoinHandle<Option<ASTNode>>) {
-        debug!("dispatch_handle: Sending node builder handle: {:?}", handle);
-        let _ = sender.send(handle).await;
-    }
-
-    /// Helper method that breaks the event loop in NodeDispatcher.start()
-    async fn stop_dispatcher(&mut self, sender: mpsc::Sender<JoinHandle<Option<ASTNode>>>) {
-        // TODO: figure out if there's a better way to stop the dispatcher remotely
-        let _ = sender.send(
-            tokio::spawn( async move {
-                Some(ASTNode::Eof {  })
+    // These three functions create sub-parsers that send ASTNodes back to this parser.
+    // Any sub-parsers created by these functions also send directly to this one
+    async fn delegate_pipeline(&mut self, tokens: VecDeque<Token>) {
+        let super_parser_channel = self.internal_node_sender.clone();
+        let super_parser_outbox = self.outbox();
+        let _ = self.internal_node_sender.send(
+            tokio::spawn(async move {
+                let mut sub_parser = Parser::new(super_parser_outbox,Some(super_parser_channel));
+                sub_parser.parse_pipeline(tokens).await
             })
         ).await;
+    }
+
+    async fn delegate_conditional(&mut self, tokens: VecDeque<Token>) {
+        let super_parser_channel = self.internal_node_sender.clone();
+        let super_parser_outbox = self.outbox();
+        let _ = self.internal_node_sender.send(
+            tokio::spawn(async move {
+                let mut sub_parser = Parser::new(super_parser_outbox,Some(super_parser_channel));
+                sub_parser.parse_conditional(tokens).await
+            })
+        ).await;
+    }
+
+    async fn delegate_chains(&mut self, tokens: VecDeque<VecDeque<Token>>) {
+        let super_parser_channel = self.internal_node_sender.clone();
+        let super_parser_outbox = self.outbox();
+        let _ = self.internal_node_sender.send(
+            tokio::spawn(async move {
+                let mut sub_parser = Parser::new(super_parser_outbox,Some(super_parser_channel));
+                sub_parser.parse_chains(tokens).await
+            })
+        ).await;
+    }
+
+    async fn parse_conditional(&mut self, mut tokens: VecDeque<Token>) -> Option<ASTNode> {
+        debug!("parse_conditional: Starting parsing with tokens: {:?}", tokens);
+
+        let mut paths = Vec::new();
+
+        while let Some(token) = tokens.front() {
+            debug!("parse_conditional: Processing token: {:?}", token);
+
+            match token {
+                Token::If | Token::Elif => {
+                    debug!("parse_conditional: Detected conditional start: {:?}", token);
+
+                    // Parse condition
+                    let condition = self.conditional_helper(&mut tokens, "condition").await?;
+                    debug!("parse_conditional: Parsed condition: {:?}", condition);
+
+                    // Parse path for the condition
+                    let path = self.conditional_helper(&mut tokens, "path").await?;
+                    debug!("parse_conditional: Parsed path: {:?}", path);
+
+                    paths.push(ConditionalPath::new(Some(condition), path));
+                    debug!("parse_conditional: Added conditional path to paths: {:?}", paths);
+                }
+                Token::Else => {
+                    debug!("parse_conditional: Detected 'Else' token. Parsing else path...");
+
+                    // Parse else path
+                    let else_path = self.conditional_helper(&mut tokens, "path").await?;
+                    debug!("parse_conditional: Parsed else path: {:?}", else_path);
+
+                    paths.push(ConditionalPath::new(None, else_path));
+                    debug!("parse_conditional: Added else path to paths: {:?}", paths);
+                }
+                Token::Fi => {
+                    debug!("parse_conditional: Detected 'Fi' token. Ending conditional parsing.");
+                    break;
+                }
+                _ => {
+                    error!("parse_conditional: Unexpected token in conditional: {:?}", token);
+                    return None;
+                }
+            }
+        }
+
+        debug!("parse_conditional: Completed parsing. Paths: {:?}", paths);
+        let node = Some(ASTNode::Conditional { paths });
+        debug!("Returning node: {:#?}",node);
+        node
+    }
+
+    async fn conditional_helper(&mut self, tokens: &mut VecDeque<Token>, body_type: &str) -> Option<ASTNode> {
+        let mut pipeline_tokens = VecDeque::new();
+        let mut chains: VecDeque<VecDeque<Token>> = VecDeque::new();
+        debug!("parse_condition: Starting condition parsing with tokens: {:?}", tokens);
+
+        match body_type {
+            "condition" => {
+                if let Some(keyword) = tokens.pop_front() {
+                    if !matches!(keyword, Token::If | Token::Elif) {
+                        error!("Tried to parse if/elif block with unexpected keyword: {:?}",keyword);
+                        return None;
+                    }
+                }
+            }
+            "path" => {
+                if let Some(keyword) = tokens.pop_front() {
+                    if !matches!(keyword, Token::Then | Token::Else) {
+                        error!("Reached parse_path with an unexpected keyword: {:?}",keyword);
+                        return None;
+                    }
+                }
+            }
+            _ => unreachable!()
+        }
+
+        while let Some(token) = tokens.front() {
+            debug!("parse_condition: Inspecting token: {:?}", token);
+
+            match token {
+                Token::Semicolon | Token::Newline | Token::Eof => {
+                    debug!("parse_condition: Detected delimiter token: {:?}", token);
+                    tokens.pop_front();
+                    break;
+                }
+                Token::And | Token::Or => {
+                    debug!("parse_condition: Detected chain token: {:?}", token);
+                    chains.push_back(std::mem::take(&mut pipeline_tokens));
+                    chains.push_back(VecDeque::from(vec![token.clone()]));
+                    tokens.pop_front();
+                    debug!("parse_condition: Updated chains: {:?}", chains);
+                }
+                _ => {
+                    debug!("parse_condition: Adding token to pipeline tokens: {:?}", token);
+                    pipeline_tokens.push_back(token.clone());
+                    tokens.pop_front();
+                }
+            }
+        }
+
+        if chains.is_empty() {
+            debug!("parse_condition: Parsing single pipeline: {:?}", pipeline_tokens);
+            self.parse_pipeline(pipeline_tokens).await
+        } else {
+            debug!("parse_condition: Parsing chained pipelines: {:?}", chains);
+            chains.push_back(std::mem::take(&mut pipeline_tokens));
+            self.parse_chains(chains).await
+        }
+    }
+
+    /// Parses command chaining like cmd1 && cmd2 || cmd3
+    ///
+    /// the `chains` vector looks like this:
+    /// [[cmd1,cmd2],[And],[cmd1,cmd2,cmd3],[Or],[cmd1]]
+    ///
+    /// The function steps through the chains vector grabbing elements two at a time
+    /// With each iteration, the previous CmdChain is attached to the left side of the new one
+    async fn parse_chains(&mut self, chains: VecDeque<VecDeque<Token>>) -> Option<ASTNode> {
+        debug!("Parsing chains: {:?}", chains);
+
+        let mut iter = chains.into_iter();
+        let mut left = self.parse_pipeline(iter.next()?).await?;
+
+        while let Some(operator_tokens) = iter.next() {
+            let operator = match operator_tokens.front()? {
+                Token::And => ChainOp::And,
+                Token::Or => ChainOp::Or,
+                _ => unreachable!(),
+            };
+
+            let right = self.parse_pipeline(iter.next()?).await?;
+            left = ASTNode::CmdChain {
+                left: Box::new(left),
+                right: Box::new(right),
+                operator,
+            };
+        }
+
+        Some(left)
+    }
+
+    async fn parse_one() {
+        // TODO: implement this
+        // This function will be used to quickly parse a single line and return the output
+        // Will be used for $(substitution) and subshells in general
+        todo!()
+    }
+
+    /// Parses commands
+    ///
+    /// If only one command is found, it just returns the ShCommand node,
+    /// If several are found, it returns a Pipeline node containing ShCommands
+    ///
+    /// Called from parse_input()
+    async fn parse_pipeline(&mut self, mut tokens: VecDeque<Token>) -> Option<ASTNode> {
+        debug!("parse_pipeline: Parsing iteratively");
+
+        let mut stack: Vec<ASTNode> = Vec::new();
+
+        let mut args = Vec::new();
+        let mut redirs = Vec::new();
+
+        while let Some(token) = tokens.pop_front() {
+            match token {
+                Token::Word(name) => {
+                    debug!("parse_pipeline: Found command: {}", name);
+
+                    while let Some(token) = tokens.front() {
+                        match token {
+                            Token::Word(arg) => {
+                                debug!("parse_pipeline: Found argument: {}", arg);
+                                args.push(arg.clone());
+                                tokens.pop_front();
+                            }
+                            Token::Redir(operator, fd, target) => {
+                                debug!("parse_pipeline: Found redirection: {:?}", token);
+                                // Build redirection (similar logic to before)
+                                let mut redir = match operator.as_str() {
+                                    "<" => Redirection::new(RedirDestination::Input, vec![]),
+                                    ">" => Redirection::new(RedirDestination::Output, vec![]),
+                                    ">>" => {
+                                        let mut r = Redirection::new(RedirDestination::Output, vec![]);
+                                        r.set_flag(RedirFlag::Append);
+                                        r
+                                    }
+                                    _ => unreachable!(),
+                                };
+
+                                if fd != "&" {
+                                    redir.set_flag(RedirFlag::FdOut(fd.parse().unwrap()));
+                                }
+
+                                if target.starts_with('&') {
+                                    redir.set_flag(RedirFlag::ToFd(target.strip_prefix('&')?.parse().unwrap()));
+                                } else {
+                                    redir.set_flag(RedirFlag::File(target.into()));
+                                }
+
+                                redirs.push(redir);
+                                tokens.pop_front();
+                            }
+                            _ => break,
+                        }
+                    }
+
+                    debug!("parse_pipeline: Finished parsing command: {}", name);
+
+                    if BUILTINS.contains(&name.as_str()) {
+                        stack.push(ASTNode::Builtin {
+                            name,
+                            args: std::mem::take(&mut args),
+                            redirs: std::mem::take(&mut redirs),
+                        });
+                    } else {
+                        stack.push(ASTNode::ShCommand {
+                            name,
+                            args: std::mem::take(&mut args),
+                            redirs: std::mem::take(&mut redirs),
+                        });
+                    }
+                }
+                Token::Pipe => {
+                    debug!("parse_pipeline: Found pipe '|', starting new pipeline");
+                }
+                Token::Semicolon | Token::Newline | Token::Eof => {
+                    debug!("parse_pipeline: End of pipeline detected");
+                    break;
+                }
+                _ => {
+                    debug!("parse_pipeline: Unexpected token: {:?}", token);
+                    return None;
+                }
+            }
+        }
+
+        if stack.len() == 1 {
+            Some(stack.pop().unwrap())
+        } else if !stack.is_empty() {
+            Some(ASTNode::Pipeline { commands: stack })
+        } else {
+            debug!("parse_pipeline: No commands found.");
+            None
+        }
     }
 }
