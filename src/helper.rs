@@ -1,54 +1,61 @@
 use regex::Regex;
 use std::fs::OpenOptions;
-use std::path::Path;
-use std::process::{Child, ChildStdin,ChildStdout};
 use std::str::Chars;
 use std::iter::Peekable;
 use std::io::{stdout, stderr, Read, Write};
 
 use crate::parser::Redirection;
 
-pub fn is_var_declaration(word: String) -> bool {
-    let regex = Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_-]*=[^=]+$").unwrap();
-    regex.is_match(&word)
+pub fn increment_string(int_str: String) -> Result<String,InternalError> {
+    if let Ok(mut int) = int_str.parse::<i32>() {
+        int += 1;
+        Ok(int.to_string())
+    } else {
+        Err(InternalError::new("Failed to parse integer string"))
+    }
 }
 
-pub fn extract_var(word: String) -> Result<(String, String), (i32,String)> {
+pub fn is_var_declaration(word: &str) -> bool {
+    let regex = Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*=.*$").unwrap();
+    regex.is_match(word)
+}
+
+pub fn extract_var(word: String) -> Result<(String, String), InternalError> {
     if let Some((key, value)) = word.split_once('=') {
         if !key.is_empty() {
             Ok((key.to_string(), value.to_string()))
         } else {
-            Err(fail("Error parsing key-value pair: key is empty"))
+            Err(InternalError::new("Error parsing key-value pair: key is empty"))
         }
     } else {
-        Err(fail("Error parsing key-value pair: no '=' found"))
+        Err(InternalError::new("Error parsing key-value pair: no '=' found"))
     }
 }
 
-pub fn redirect_input(redir: Redirection) -> Result<Vec<u8>,(i32,String)> {
+pub fn redirect_input(redir: Redirection) -> Result<Vec<u8>,InternalError> {
     let mut buffer: Vec<u8> = vec![];
     let mut file = OpenOptions::new()
         .read(true)
         .open(redir.get_filepath())
-        .map_err(|e| fail(&e.to_string()))?;
+        .map_err(|e| InternalError::new(&e.to_string()))?;
     let file_content = read_bytes(&mut file)?;
     write_bytes(&mut buffer, &file_content)?;
     Ok(buffer)
 }
 
-pub fn redirect_output(buffer: Vec<u8>, redir: Redirection) -> Result<(),(i32,String)> {
+pub fn redirect_output(buffer: Vec<u8>, redir: Redirection) -> Result<(),InternalError> {
     let mut file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .open(redir.get_filepath())
-        .map_err(|e| fail(&e.to_string()))?;
+        .map_err(|e| InternalError::new(&e.to_string()))?;
     write_bytes(&mut file, &buffer)?;
     Ok(())
 }
 
-pub fn fail(reason: &str) -> (i32,String) {
-    (1,reason.to_string())
+pub fn fail<'a>(reason: &'a str) -> (i32,&'a str) {
+    (1,reason)
 }
 pub fn succeed() -> i32 {
     0
@@ -81,34 +88,34 @@ pub fn build_word(chars: &mut Peekable<Chars<'_>>,mut singlequote: bool, mut dou
     word
 }
 
-pub fn read_bytes<R>(writer: &mut R) -> Result<Vec<u8>,(i32,String)> where R: Read  {
+pub fn read_bytes<R>(writer: &mut R) -> Result<Vec<u8>,InternalError> where R: Read  {
     let mut buffer: Vec<u8> = vec![];
     match writer.read_to_end(&mut buffer) {
         Ok(_) => { Ok(buffer) },
-        Err(e) => { Err(fail(&e.to_string())) }
+        Err(e) => { Err(InternalError::new(&e.to_string())) }
     }
 }
 
-pub fn write_bytes<W>(reader: &mut W, writer: &[u8]) -> Result<(),(i32,String)> where W: Write  {
+pub fn write_bytes<W>(reader: &mut W, writer: &[u8]) -> Result<(),InternalError> where W: Write  {
     match reader.write_all(writer) {
         Ok(_) => { Ok(()) },
-        Err(e) => { Err(fail(&e.to_string())) }
+        Err(e) => { Err(InternalError::new(&e.to_string())) }
     }
 }
 
-pub fn write_stdout(output: Vec<u8>) -> Result<(),(i32, String)> {
+pub fn write_stdout(output: Vec<u8>) -> Result<(),InternalError> {
     stdout().write_all(&output)
-        .map_err(|e| fail(&format!("Echo failed: {}",e)))?;
+        .map_err(|e| InternalError::new(&format!("Echo failed: {}",e)))?;
     stdout().flush()
-        .map_err(|e| fail(&format!("Echo failed: {}",e)))?;
+        .map_err(|e| InternalError::new(&format!("Echo failed: {}",e)))?;
     Ok(())
 }
 
-pub fn write_stderr(output: Vec<u8>) -> Result<(),(i32, String)> {
+pub fn write_stderr(output: Vec<u8>) -> Result<(),InternalError> {
     stderr().write_all(&output)
-        .map_err(|e| fail(&format!("Echo failed: {}",e)))?;
+        .map_err(|e| InternalError::new(&format!("Echo failed: {}",e)))?;
     stderr().flush()
-        .map_err(|e| fail(&format!("Echo failed: {}",e)))?;
+        .map_err(|e| InternalError::new(&format!("Echo failed: {}",e)))?;
     Ok(())
 }
 
@@ -119,12 +126,12 @@ mod tests {
 
     #[test]
     fn test_is_var_declaration() {
-        assert!(is_var_declaration("VAR=value".to_string()));
-        assert!(is_var_declaration("a1_b2=value".to_string()));
-        assert!(is_var_declaration("VAR1=value".to_string()));
-        assert!(!is_var_declaration("=value".to_string()));
-        assert!(!is_var_declaration("1VAR=value".to_string()));
-        assert!(!is_var_declaration("VAR==value".to_string()));
+        assert!(is_var_declaration("VAR=value"));
+        assert!(is_var_declaration("a1_b2=value"));
+        assert!(is_var_declaration("VAR1=value"));
+        assert!(!is_var_declaration("=value"));
+        assert!(!is_var_declaration("1VAR=value"));
+        assert!(!is_var_declaration("VAR==value"));
     }
 
     #[test]
