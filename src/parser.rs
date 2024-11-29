@@ -1,4 +1,5 @@
 use log::{info,trace,error,debug};
+use std::mem;
 use std::collections::VecDeque;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -17,6 +18,11 @@ pub enum ASTNode {
         args: Vec<String>,
         redirs: Vec<Redirection>,
     },
+    CmdChain {
+        left: Box<ASTNode>,
+        right: Box<ASTNode>,
+        operator: ChainOp
+    },
     ShCommand {
         name: String,
         args: Vec<String>,
@@ -26,9 +32,7 @@ pub enum ASTNode {
         commands: Vec<ASTNode>,
     },
     Conditional {
-        condition: Box<ASTNode>,
-        body1: Option<Box<ASTNode>>,
-        body2: Option<Box<ASTNode>>
+        paths: Vec<ConditionalPath>,
     },
     Loop {
         condition: Box<ASTNode>,
@@ -37,6 +41,29 @@ pub enum ASTNode {
         body: Vec<ASTNode>,
     },
     Eof {}
+}
+
+#[derive(Debug,Clone,PartialEq)]
+pub enum ChainOp {
+    And,
+    Or,
+    Null // Used for the first pipeline in a chain
+}
+
+#[derive(Debug,Clone,PartialEq)]
+pub struct ConditionalPath {
+    condition: Option<Box<ASTNode>>,
+    body: Box<ASTNode>,
+}
+
+impl ConditionalPath {
+    pub fn new(condition_optional: Option<ASTNode>, body: ASTNode) -> Self {
+        let condition = condition_optional.map(Box::new);
+        Self {
+            condition,
+            body: Box::new(body),
+        }
+    }
 }
 
 #[derive(Debug,Clone,PartialEq)]
@@ -87,8 +114,11 @@ pub enum Token {
     Semicolon,
     Newline,
     Pipe,
+    And,
+    Or,
     If,
     Then,
+    Elif,
     Else,
     Fi,
     For,
@@ -179,9 +209,14 @@ pub async fn tokenize(input: &str, outbox: mpsc::Sender<Token>) -> Result<(), Sh
                 chars.pop_front();
                 continue;
             }
-            '|' => {
-                tokens.push_back(Token::Pipe);
-                chars.pop_front();
+            '|' => { // Handles both pipes and '||' chain operators
+                if chars[1] != '|' {
+                    tokens.push_back(Token::Pipe);
+                    chars.pop_front();
+                } else {
+                    tokens.push_back(Token::Or);
+                    chars.pop_front();
+                }
             }
             '\n' => {
                 tokens.push_back(Token::Newline);
@@ -198,8 +233,10 @@ pub async fn tokenize(input: &str, outbox: mpsc::Sender<Token>) -> Result<(), Sh
                 match word.as_str() {
                     "if" => { tokens.push_back(Token::If); }
                     "then" => { tokens.push_back(Token::Then); }
+                    "elif" => { tokens.push_back(Token::Elif); }
                     "else" => { tokens.push_back(Token::Else); }
                     "fi" => { tokens.push_back(Token::Fi); }
+                    "&&" => { tokens.push_back(Token::And); }
                     "for" => { tokens.push_back(Token::For); }
                     "while" => { tokens.push_back(Token::While); }
                     "until" => { tokens.push_back(Token::Until); }
@@ -208,7 +245,7 @@ pub async fn tokenize(input: &str, outbox: mpsc::Sender<Token>) -> Result<(), Sh
                     _ => {
                         debug!("Checking word: {}",word.as_str());
                         // Only run regex on stuff that looks like a redirection
-                        if matches!(word.as_str(), "<" | ">" | "&") || word.parse::<u32>().is_ok() {
+                        if word.contains(['<', '>', '&']) || word.parse::<u32>().is_ok() {
                             if let Some(captures) = redirection_re.captures(word.as_str()) {
                                 debug!("Found redirection, parsing...");
                                 let mut fd = captures.get(1).map_or("1", |m| m.as_str());
@@ -248,6 +285,7 @@ pub async fn tokenize(input: &str, outbox: mpsc::Sender<Token>) -> Result<(), Sh
                 outbox.send(token).await.unwrap();
             }
         } else {
+            error!("Tokens emptied before Eof");
             return Err(ShellError::InvalidSyntax(word));
         }
     }
@@ -262,11 +300,144 @@ pub async fn tokenize(input: &str, outbox: mpsc::Sender<Token>) -> Result<(), Sh
 // This is because they can't be referenced inside of the tokio::spawn() context
 // If they are tied to the Parser struct
 
-/// Parses conditional statements via recursive descent.
-///
-/// Called from parse_input()
+/// Lord forgive me for what I am about to do
 async fn parse_conditional(tokens: Vec<Token>) -> Option<ASTNode> {
-    todo!("Implement conditional parsing")
+    let mut tokens = VecDeque::from(tokens);
+    debug!("parse_conditional: Starting parsing with tokens: {:?}", tokens);
+
+    let mut paths = Vec::new();
+
+    while let Some(token) = tokens.front() {
+        debug!("parse_conditional: Processing token: {:?}", token);
+
+        match token {
+            Token::If | Token::Elif => {
+                debug!("parse_conditional: Detected conditional start: {:?}", token);
+
+                // Parse condition
+                let condition = conditional_helper(&mut tokens, "condition").await?;
+                debug!("parse_conditional: Parsed condition: {:?}", condition);
+
+                // Parse path for the condition
+                let path = conditional_helper(&mut tokens, "path").await?;
+                debug!("parse_conditional: Parsed path: {:?}", path);
+
+                paths.push(ConditionalPath::new(Some(condition), path));
+                debug!("parse_conditional: Added conditional path to paths: {:?}", paths);
+            }
+            Token::Else => {
+                debug!("parse_conditional: Detected 'Else' token. Parsing else path...");
+
+                // Parse else path
+                let else_path = conditional_helper(&mut tokens, "path").await?;
+                debug!("parse_conditional: Parsed else path: {:?}", else_path);
+
+                paths.push(ConditionalPath::new(None, else_path));
+                debug!("parse_conditional: Added else path to paths: {:?}", paths);
+            }
+            Token::Fi => {
+                debug!("parse_conditional: Detected 'Fi' token. Ending conditional parsing.");
+                break;
+            }
+            _ => {
+                error!("parse_conditional: Unexpected token in conditional: {:?}", token);
+                return None;
+            }
+        }
+    }
+
+    debug!("parse_conditional: Completed parsing. Paths: {:?}", paths);
+    Some(ASTNode::Conditional { paths })
+}
+
+async fn conditional_helper(tokens: &mut VecDeque<Token>, body_type: &str) -> Option<ASTNode> {
+    let mut pipeline_tokens = Vec::new();
+    let mut chains = Vec::new();
+    debug!("parse_condition: Starting condition parsing with tokens: {:?}", tokens);
+
+    match body_type {
+        "condition" => {
+            if let Some(keyword) = tokens.pop_front() {
+                if !matches!(keyword, Token::If | Token::Elif) {
+                    error!("Tried to parse if/elif block with unexpected keyword: {:?}",keyword);
+                    return None;
+                }
+            }
+        }
+        "path" => {
+            if let Some(keyword) = tokens.pop_front() {
+                if !matches!(keyword, Token::Then | Token::Else) {
+                    error!("Reached parse_path with an unexpected keyword: {:?}",keyword);
+                    return None;
+                }
+            }
+        }
+        _ => unreachable!()
+    }
+
+    while let Some(token) = tokens.front() {
+        debug!("parse_condition: Inspecting token: {:?}", token);
+
+        match token {
+            Token::Semicolon | Token::Newline | Token::Eof => {
+                debug!("parse_condition: Detected delimiter token: {:?}", token);
+                tokens.pop_front();
+                break;
+            }
+            Token::And | Token::Or => {
+                debug!("parse_condition: Detected chain token: {:?}", token);
+                chains.push(std::mem::take(&mut pipeline_tokens));
+                chains.push(vec![token.clone()]);
+                tokens.pop_front();
+                debug!("parse_condition: Updated chains: {:?}", chains);
+            }
+            _ => {
+                debug!("parse_condition: Adding token to pipeline tokens: {:?}", token);
+                pipeline_tokens.push(token.clone());
+                tokens.pop_front();
+            }
+        }
+    }
+
+    if chains.is_empty() {
+        debug!("parse_condition: Parsing single pipeline: {:?}", pipeline_tokens);
+        parse_pipeline(pipeline_tokens).await
+    } else {
+        debug!("parse_condition: Parsing chained pipelines: {:?}", chains);
+        chains.push(std::mem::take(&mut pipeline_tokens));
+        parse_chains(chains).await
+    }
+}
+
+/// Parses command chaining like cmd1 && cmd2 || cmd3
+///
+/// the `chains` vector looks like this:
+/// [[cmd1,cmd2],[And],[cmd1,cmd2,cmd3],[Or],[cmd1]]
+///
+/// The function steps through the chains vector grabbing elements two at a time
+/// With each iteration, the previous CmdChain is attached to the left side of the new one
+async fn parse_chains(chains: Vec<Vec<Token>>) -> Option<ASTNode> {
+    debug!("Parsing chains: {:?}",chains);
+    let mut left = parse_pipeline(chains[0].clone()).await?;
+    for i in (1..chains.len()).step_by(2) {
+        let operator = match chains[i].as_slice() {
+            [Token::And] => ChainOp::And,
+            [Token::Or] => ChainOp::Or,
+            _ => unreachable!()
+        };
+
+        let right = parse_pipeline(chains[i+1].clone()).await?;
+        left = ASTNode::CmdChain { left: Box::new(left), right: Box::new(right), operator }
+    }
+
+    Some(left)
+}
+
+async fn parse_one() {
+    // TODO: implement this
+    // This function will be used to quickly parse a single line and return the output
+    // Will be used for $(substitution) and subshells in general
+    todo!()
 }
 
 /// Parses commands
@@ -276,20 +447,15 @@ async fn parse_conditional(tokens: Vec<Token>) -> Option<ASTNode> {
 ///
 /// Called from parse_input()
 async fn parse_pipeline(tokens: Vec<Token>) -> Option<ASTNode> {
-    debug!("parse_pipeline: Parsing pipeline");
+    debug!("parse_pipeline: Parsing iteratively");
 
-    // VecDeques are easier to work with for this
-    // TODO: just make it take a VecDeque instead of converting it here
     let mut tokens = VecDeque::from(tokens);
+    let mut stack: Vec<ASTNode> = Vec::new();
 
-    let mut commands = Vec::new();
     let mut args = Vec::new();
     let mut redirs = Vec::new();
 
-    // All of this is pretty self-explanatory
     while let Some(token) = tokens.pop_front() {
-        debug!("parse_pipeline: Current token in pipeline: {:?}", token);
-
         match token {
             Token::Word(name) => {
                 debug!("parse_pipeline: Found command: {}", name);
@@ -301,45 +467,30 @@ async fn parse_pipeline(tokens: Vec<Token>) -> Option<ASTNode> {
                             args.push(arg.clone());
                             tokens.pop_front();
                         }
-                        Token::Redir(operator,fd,target) => {
-                            debug!("Found redirection: {:?}",token);
-                            let mut redir: Redirection;
-                            let mut input: bool = false;
-
-                            match operator.as_str() {
-                                "<" => {
-                                    redir = Redirection::new(RedirDestination::Input, vec![]);
-                                    input = true;
-                                }
-                                ">" => {
-                                    redir = Redirection::new(RedirDestination::Output, vec![]);
-                                }
+                        Token::Redir(operator, fd, target) => {
+                            debug!("parse_pipeline: Found redirection: {:?}", token);
+                            // Build redirection (similar logic to before)
+                            let mut redir = match operator.as_str() {
+                                "<" => Redirection::new(RedirDestination::Input, vec![]),
+                                ">" => Redirection::new(RedirDestination::Output, vec![]),
                                 ">>" => {
-                                    redir = Redirection::new(RedirDestination::Output, vec![]);
-                                    redir.set_flag(RedirFlag::Append);
+                                    let mut r = Redirection::new(RedirDestination::Output, vec![]);
+                                    r.set_flag(RedirFlag::Append);
+                                    r
                                 }
-                                _ => unreachable!()
+                                _ => unreachable!(),
+                            };
+
+                            if fd != "&" {
+                                redir.set_flag(RedirFlag::FdOut(fd.parse().unwrap()));
                             }
-                            match fd.as_str() {
-                                "&" => redir.set_flag(RedirFlag::Both),
-                                _ => {
-                                    // Only set file descriptors on output
-                                    if !input {
-                                        redir.set_flag(RedirFlag::FdOut(fd.parse().unwrap()))
-                                    }
-                                },
+
+                            if target.starts_with('&') {
+                                redir.set_flag(RedirFlag::ToFd(target.strip_prefix('&')?.parse().unwrap()));
+                            } else {
+                                redir.set_flag(RedirFlag::File(target.into()));
                             }
-                            match target.as_str() {
-                                // TODO: clean this up
-                                // Looks for patterns like &1 or &5
-                                s if s.starts_with('&') && s.len() == 2 && s.chars().nth(1).unwrap().is_ascii_digit() => {
-                                    // TODO: SERIOUSLY clean this up, it's nauseating
-                                    redir.set_flag(RedirFlag::ToFd(s[1..].parse().unwrap()));
-                                }
-                                _ => {
-                                    redir.set_flag(RedirFlag::File(target.into()));
-                                }
-                            }
+
                             redirs.push(redir);
                             tokens.pop_front();
                         }
@@ -348,40 +499,35 @@ async fn parse_pipeline(tokens: Vec<Token>) -> Option<ASTNode> {
                 }
 
                 debug!("parse_pipeline: Finished parsing command: {}", name);
-                commands.push(ASTNode::ShCommand {
+                stack.push(ASTNode::ShCommand {
                     name,
                     args: std::mem::take(&mut args),
                     redirs: std::mem::take(&mut redirs),
                 });
             }
             Token::Pipe => {
-                debug!("parse_pipeline: Found pipe '|', continuing to next command");
+                debug!("parse_pipeline: Found pipe '|', starting new pipeline");
             }
             Token::Semicolon | Token::Newline | Token::Eof => {
-                debug!("parse_pipeline: End of pipeline detected: {:?}", token);
+                debug!("parse_pipeline: End of pipeline detected");
                 break;
             }
             _ => {
-                debug!("parse_pipeline: Unexpected token in pipeline: {:?}", token);
+                debug!("parse_pipeline: Unexpected token: {:?}", token);
                 return None;
             }
         }
     }
 
-    if commands.len() == 1 {
-        let command = commands.remove(0);
-        debug!("parse_pipeline: Returning single command: {:?}", command);
-        Some(command)
-    } else if !commands.is_empty() {
-        let pipeline = ASTNode::Pipeline { commands };
-        debug!("parse_pipeline: Returning pipeline: {:?}", pipeline);
-        Some(pipeline)
+    if stack.len() == 1 {
+        Some(stack.pop().unwrap())
+    } else if !stack.is_empty() {
+        Some(ASTNode::Pipeline { commands: stack })
     } else {
-        debug!("parse_pipeline: No commands found in pipeline.");
+        debug!("parse_pipeline: No commands found.");
         None
     }
 }
-
 
 #[derive(Debug)]
 pub struct NodeDispatcher {
@@ -528,6 +674,8 @@ impl Parser {
                     break;
                 }
                 _ => match self.token {
+
+                    // CONDITIONALS
                     Token::If => {
                         debug!("parse_input: Detected 'If' token. Parsing conditional...");
                         let mut conditional_tokens: Vec<Token> = vec![];
@@ -548,14 +696,23 @@ impl Parser {
                             })
                         ).await;
                     }
+
+                    // PIPELINES
                     _ => {
                         debug!("parse_input: Delegating to parse_pipeline for token: {:?}", self.token);
                         let mut pipeline_tokens: Vec<Token> = vec![];
+                        let mut chains: Vec<Vec<Token>> = vec![];
                         loop {
                             match self.token {
                                 Token::Eof | Token::Semicolon | Token::Newline => {
                                     debug!("parse_input: Reached delimiter in pipeline token parsing");
                                     break;
+                                }
+                                Token::And | Token::Or => {
+                                    debug!("Chain token found, moving tokens: {:?}",pipeline_tokens);
+                                    chains.push(mem::take(&mut pipeline_tokens));
+                                    chains.push(vec![self.token.clone()]);
+                                    self.next_token().await;
                                 }
                                 _ => {
                                     pipeline_tokens.push(self.token.clone());
@@ -563,13 +720,22 @@ impl Parser {
                                 }
                             }
                         }
-
-                        self.dispatch_handle(
-                            node_sender.clone(),
-                            tokio::spawn(async move {
-                                parse_pipeline(pipeline_tokens).await
-                            })
-                        ).await;
+                        if chains.is_empty() { // Parse single pipeline
+                            self.dispatch_handle(
+                                node_sender.clone(),
+                                tokio::spawn(async move {
+                                    parse_pipeline(pipeline_tokens).await
+                                })
+                            ).await;
+                        } else {
+                            chains.push(mem::take(&mut pipeline_tokens)); // Push final pipeline
+                            self.dispatch_handle(
+                                node_sender.clone(),
+                                tokio::spawn(async move {
+                                    parse_chains(chains).await
+                                })
+                            ).await;
+                        }
                     }
                 }
             }
