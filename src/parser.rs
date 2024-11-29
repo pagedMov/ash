@@ -2,6 +2,7 @@ use log::{info,trace,error,debug};
 use std::collections::VecDeque;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use regex::Regex;
 
 use crate::event::{self,ShellEvent};
 use crate::event::ShellError;
@@ -41,42 +42,48 @@ pub enum ASTNode {
 #[derive(Debug,Clone,PartialEq)]
 pub struct Redirection {
     direction: RedirDestination,
-    file: Option<String>
+    flags: Vec<RedirFlag>
 }
 
 impl Redirection {
 
-    pub fn new(direction: RedirDestination, file: Option<String>) -> Self {
-        Redirection { direction, file }
+    pub fn new(direction: RedirDestination, flags: Vec<RedirFlag>) -> Self {
+        Redirection { direction, flags }
     }
     pub fn get_direction(&self) -> RedirDestination {
         self.direction.clone()
     }
-    pub fn get_filepath(&self) -> Option<String> {
-        self.file.clone()
+    pub fn get_flags(&self) -> Vec<RedirFlag> {
+        self.flags.clone()
     }
+    pub fn set_flag(&mut self, flag: RedirFlag) {
+        self.flags.push(flag);
+    }
+}
+
+#[derive(Debug,Clone,PartialEq)]
+pub enum RedirFlag {
+    File(String),
+    Append,
+    Both,
+    CloseFd,
+    FdOut(u32),
+    ToFd(u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedirDestination {
     Input,          // < file
     Output,         // > file
-    Error,          // 2> file
-    Append(u32),         // >> file, 2>> file
-    AppendBoth,
-    Both,           // &> file
-    FdOut(u32),     // n> file
-    FdAppend(u32),     // n>> file
-    FdToFd(u32,u32),   // n>&m
-    OutToFd(u32),   // >&fd
-    DupToAll,         // >&
-    CloseFd(u32),   // n>&-
 }
 
 #[derive(Clone,Debug,PartialEq)]
 pub enum Token {
     Word(String),
-    Redir(Redirection),
+    Redir(String,String,String),
+    Fd(String),
+    RedirOperator(String),
+    RedirTarget(String),
     Semicolon,
     Newline,
     Pipe,
@@ -124,7 +131,7 @@ fn build_word(
                 );
                 chars.pop_front();
             }
-            ';' | '|' | '\n' | '<' | '>' | ' ' | '\t' if !singlequote && !doublequote => {
+            ';' | '|' | '\n' | ' ' | '\t' if !singlequote && !doublequote => {
                 trace!(
                     "Encountered delimiter '{}' while not inside quotes. Returning word: '{}'",
                     c, word
@@ -152,224 +159,94 @@ pub fn skip_space(chars: &mut VecDeque<char>) {
     }
 }
 
-/// Not even jesus christ would forgive me for this shit
-pub fn check_for_redirections(old_chars: &VecDeque<char>) -> Option<(VecDeque<char>, Token)> {
-    let mut chars: VecDeque<char>;
-
-    // Only clone the VecDeque if it makes sense to do so
-    if matches!(old_chars.front()?, '<' | '>' | '&' | '2'..='9') {
-        chars = old_chars.clone();
-    } else { return None; }
-    let ch = chars.pop_front()?;
-    match ch {
-        '<' => {
-            skip_space(&mut chars);
-            let file = build_word(&mut chars);
-            let token = Token::Redir(Redirection::new(
-                    RedirDestination::Input,
-                    Some(file)
-            ));
-            Some((chars,token))
-        }
-        '>' => match chars.front() {
-            Some('>') => { // Append (>>)
-                chars.pop_front();
-                skip_space(&mut chars);
-                let file = build_word(&mut chars);
-                let token = Token::Redir(Redirection::new(
-                        RedirDestination::Append(1),
-                        Some(file)
-                ));
-                Some((chars,token))
-            }
-            Some('&') => { // Duplicate descriptor (>&fd)
-                chars.pop_front();
-                if let Some(digit) = chars.front().and_then(|c| c.to_digit(10)) {
-                    chars.pop_front();
-                    let token = Token::Redir(Redirection::new(
-                            RedirDestination::OutToFd(digit),
-                            None
-                    ));
-                    Some((chars,token))
-                } else {
-                    let token = Token::Redir(Redirection::new(
-                            RedirDestination::DupToAll,
-                            None
-                    ));
-                    Some((chars,token)) // Redirect all (>&)
-                }
-            }
-            _ => { // Simple output (>)
-                skip_space(&mut chars);
-                let file = build_word(&mut chars);
-                let token = Token::Redir(Redirection::new(
-                        RedirDestination::Output,
-                        Some(file)
-                ));
-                Some((chars,token))
-            }
-        },
-        '&' => match chars.front() {
-            Some('>') => { // &>
-                chars.pop_front();
-                match chars.front()? {
-                    '>' => {
-                        chars.pop_front();
-                        skip_space(&mut chars);
-                        let file = build_word(&mut chars);
-                        let token = Token::Redir(Redirection::new(
-                                RedirDestination::AppendBoth,
-                                Some(file)
-                        ));
-                        Some((chars,token))
-                    }
-                    _ => {
-                        chars.pop_front();
-                        skip_space(&mut chars);
-                        let file = build_word(&mut chars);
-                        let token = Token::Redir(Redirection::new(
-                                RedirDestination::Both,
-                                Some(file)
-                        ));
-                        Some((chars,token))
-                    }
-                }
-            }
-            _ => None, // Invalid case
-        },
-        '2'..='9' => {
-            let fd = ch.to_digit(10).unwrap(); // Safe unwrap since we matched on '2'..='9'
-            if let Some('>') = chars.front() {
-                chars.pop_front();
-                match chars.front() {
-                    Some('&') => { // Duplicate to another fd (n>&m)
-                        chars.pop_front();
-                        if let Some(digit) = chars.front().and_then(|c| c.to_digit(10)) {
-                            chars.pop_front();
-                            let token = Token::Redir(Redirection::new(
-                                    RedirDestination::FdToFd(fd, digit),
-                                    None
-                            ));
-                            Some((chars,token))
-                        } else {
-                            let token = Token::Redir(Redirection::new(
-                                    RedirDestination::CloseFd(fd),
-                                    None
-                            ));
-                            Some((chars,token)) // n>&-
-                        }
-                    }
-                    Some('>') => {
-                        chars.pop_front();
-                        match chars.front() {
-                            Some('&') => { // Duplicate to another fd (n>&m)
-                                chars.pop_front();
-                                if let Some(digit) = chars.front().and_then(|c| c.to_digit(10)) {
-                                    chars.pop_front();
-                                    let token = Token::Redir(Redirection::new(
-                                            RedirDestination::FdToFd(fd, digit),
-                                            None
-                                    ));
-                                    Some((chars,token))
-                                } else {
-                                    let token = Token::Redir(Redirection::new(
-                                            RedirDestination::CloseFd(fd),
-                                            None
-                                    ));
-                                    Some((chars,token)) // n>&-
-                                }
-                            }
-                            _ => { // n> file
-                                skip_space(&mut chars);
-                                let file = build_word(&mut chars);
-                                let token = Token::Redir(Redirection::new(
-                                        RedirDestination::FdAppend(fd),
-                                        Some(file)
-                                ));
-                                Some((chars,token))
-                            }
-                        }
-                    }
-                    _ => { // n> file
-                        skip_space(&mut chars);
-                        let file = build_word(&mut chars);
-                        let token = Token::Redir(Redirection::new(
-                                RedirDestination::FdOut(fd),
-                                Some(file)
-                        ));
-                        Some((chars,token))
-                    }
-                }
-            } else {
-                None // Invalid syntax
-            }
-        }
-        _ => None, // No redirection found
-    }
-}
-
 /// Reads input one character at a time, creating tokens from words and symbols
 ///
 /// Tokens are then used by the Parser to create ASTNodes to send back to the
 /// shell's main event loop
 pub async fn tokenize(input: &str, outbox: mpsc::Sender<Token>) -> Result<(), ShellError> {
 
-    // TODO: implement more redirections, '<<<' etc.
     // TODO: handle escaping with backslashes
-    // TODO:
-    // TODO:
 
     let mut chars = VecDeque::from(input.chars().collect::<Vec<char>>());
+    let redirection_re = Regex::new(r"([\d&]*)(>>?|<|<&|>&)\s*([^\s;]*)").unwrap();
 
     while let Some(&ch) = chars.front() {
         debug!("tokenizer: checking character: {:?}",ch);
         let mut word = String::new();
-        let mut token: Option<Token> = None;
+        let mut tokens: VecDeque<Token> = VecDeque::new();
         match ch {
             ' ' | '\t' => {
                 chars.pop_front();
                 continue;
             }
             '|' => {
-                token = Some(Token::Pipe);
+                tokens.push_back(Token::Pipe);
                 chars.pop_front();
             }
             '\n' => {
-                token = Some(Token::Newline);
+                tokens.push_back(Token::Newline);
                 chars.pop_front();
             }
             ';' => {
-                token = Some(Token::Semicolon);
+                tokens.push_back(Token::Semicolon);
                 chars.pop_front();
             }
             _ => {
-                if let Some((new_chars,redir_token)) = check_for_redirections(&chars) {
-                    token = Some(redir_token);
-                    chars = new_chars;
-                } else {
-                    word = build_word(&mut chars);
+                word = build_word(&mut chars);
 
-                    // Reserved words
-                    match word.as_str() {
-                        "if" => { token = Some(Token::If); }
-                        "then" => { token = Some(Token::Then); }
-                        "else" => { token = Some(Token::Else); }
-                        "fi" => { token = Some(Token::Fi); }
-                        "for" => { token = Some(Token::For); }
-                        "while" => { token = Some(Token::While); }
-                        "until" => { token = Some(Token::Until); }
-                        "do" => { token = Some(Token::Do); }
-                        "done" => { token = Some(Token::Done); }
-                        _ => { token = Some(Token::Word(word.clone())); }
+                // Reserved words
+                match word.as_str() {
+                    "if" => { tokens.push_back(Token::If); }
+                    "then" => { tokens.push_back(Token::Then); }
+                    "else" => { tokens.push_back(Token::Else); }
+                    "fi" => { tokens.push_back(Token::Fi); }
+                    "for" => { tokens.push_back(Token::For); }
+                    "while" => { tokens.push_back(Token::While); }
+                    "until" => { tokens.push_back(Token::Until); }
+                    "do" => { tokens.push_back(Token::Do); }
+                    "done" => { tokens.push_back(Token::Done); }
+                    _ => {
+                        debug!("Checking word: {}",word.as_str());
+                        // Only run regex on stuff that looks like a redirection
+                        if matches!(word.as_str(), "<" | ">" | "&") || word.parse::<u32>().is_ok() {
+                            if let Some(captures) = redirection_re.captures(word.as_str()) {
+                                debug!("Found redirection, parsing...");
+                                let mut fd = captures.get(1).map_or("1", |m| m.as_str());
+                                let operator = captures.get(2).map_or("", |m| m.as_str());
+                                let mut target: String = captures.get(3).map_or("".to_string(), |m| m.as_str().to_string());
+
+                                // TODO: handle unwrap
+                                if fd.is_empty() {
+                                    fd = "1";
+                                }
+
+                                // TODO: implement differentiation between >&1 and > &1
+                                if target.is_empty() {
+                                    skip_space(&mut chars);
+                                    target = build_word(&mut chars);
+                                    // TODO: handle this
+                                    if target.is_empty() { panic!("No target for redirection"); }
+                                }
+
+                                tokens.push_back(Token::Redir(operator.into(),fd.into(),target));
+
+                            }
+                        } else {
+                            debug!("No redirection regex match, pushing_back word");
+                            if word.is_empty() { break; }
+                            tokens.push_back(Token::Word(word.clone()));
+                        }
                     }
                 }
             }
         }
-        if let Some(ref token) = token {
+        if !tokens.is_empty() {
             // send token from tokenizer to parser
-            info!("tokenizer: Sending token: {:?}",token);
-            // TODO: handle errors here
-            outbox.send(token.clone()).await.unwrap();
+            while let Some(token) = tokens.pop_front() {
+                info!("tokenizer: Sending token: {:?}",token);
+                // TODO: handle errors here
+                outbox.send(token).await.unwrap();
+            }
         } else {
             return Err(ShellError::InvalidSyntax(word));
         }
@@ -424,8 +301,46 @@ async fn parse_pipeline(tokens: Vec<Token>) -> Option<ASTNode> {
                             args.push(arg.clone());
                             tokens.pop_front();
                         }
-                        Token::Redir(redir) => {
-                            redirs.push(redir.clone());
+                        Token::Redir(operator,fd,target) => {
+                            debug!("Found redirection: {:?}",token);
+                            let mut redir: Redirection;
+                            let mut input: bool = false;
+
+                            match operator.as_str() {
+                                "<" => {
+                                    redir = Redirection::new(RedirDestination::Input, vec![]);
+                                    input = true;
+                                }
+                                ">" => {
+                                    redir = Redirection::new(RedirDestination::Output, vec![]);
+                                }
+                                ">>" => {
+                                    redir = Redirection::new(RedirDestination::Output, vec![]);
+                                    redir.set_flag(RedirFlag::Append);
+                                }
+                                _ => unreachable!()
+                            }
+                            match fd.as_str() {
+                                "&" => redir.set_flag(RedirFlag::Both),
+                                _ => {
+                                    // Only set file descriptors on output
+                                    if !input {
+                                        redir.set_flag(RedirFlag::FdOut(fd.parse().unwrap()))
+                                    }
+                                },
+                            }
+                            match target.as_str() {
+                                // TODO: clean this up
+                                // Looks for patterns like &1 or &5
+                                s if s.starts_with('&') && s.len() == 2 && s.chars().nth(1).unwrap().is_ascii_digit() => {
+                                    // TODO: SERIOUSLY clean this up, it's nauseating
+                                    redir.set_flag(RedirFlag::ToFd(s[1..].parse().unwrap()));
+                                }
+                                _ => {
+                                    redir.set_flag(RedirFlag::File(target.into()));
+                                }
+                            }
+                            redirs.push(redir);
                             tokens.pop_front();
                         }
                         _ => break,

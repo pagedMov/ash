@@ -115,7 +115,7 @@ impl EventLoop {
                     parser.handle_input().await?;
                 }
                 ShellEvent::NewASTNode(node) => {
-                    info!("new node: {:#?}", node);
+                    info!("new node:\n {:#?}", node);
                 }
                 ShellEvent::SubprocessExited(pid,exit_code) => {
                     // TODO: Handle subprocesses exiting
