@@ -22,3 +22,4 @@ devenv.local.nix
 template/flake.lock
 ideas.md
 roadmap.md
+README.md
