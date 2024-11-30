@@ -119,7 +119,9 @@ pub enum Token {
     Word(String),
     AnyWord,
     Redir(String,String,String),
+    AnyRedir,
     Fd(String),
+    AnyFd,
     RedirOperator(String),
     RedirTarget(String),
     Semicolon,
@@ -138,6 +140,18 @@ pub enum Token {
     Do,
     Done,
     Eof,
+    Case,
+    In,
+    Esac,
+    Select,
+    LeftParen,
+    RightParen,
+    LeftBrace,
+    RightBrace,
+    Break,
+    Continue,
+    Asterisk,
+    QuestionMark,
     Null
 }
 
@@ -150,6 +164,97 @@ impl Token {
             ';' => Token::Semicolon,
             _ => Token::Null,
         }
+    }
+    pub fn grouping_family() -> Vec<Token> {
+        vec![
+            Token::LeftParen,    // `(`
+            Token::RightParen,   // `)`
+            Token::LeftBrace,    // `{`
+            Token::RightBrace,   // `}`
+        ]
+    }
+    pub fn block_prefixes() -> Vec<Token> {
+        vec![
+            Token::If,
+            Token::For,
+            Token::While,
+            Token::Until,
+            Token::Case,
+            Token::Select,
+        ]
+    }
+    pub fn control_flow_family() -> Vec<Token> {
+        vec![
+            Token::Break,
+            Token::Continue
+        ]
+    }
+    pub fn glob_family() -> Vec<Token> {
+        vec![
+            Token::Asterisk,
+            Token::QuestionMark
+        ]
+    }
+    pub fn delimiter_family() -> Vec<Token> {
+        vec![
+            Token::Newline,
+            Token::Semicolon,
+            Token::Eof
+        ]
+    }
+    pub fn operator_family() -> Vec<Token> {
+        vec![
+            Token::AnyRedir,
+            Token::AnyFd,
+            Token::Pipe,
+            Token::And,
+            Token::Or,
+        ]
+    }
+    pub fn if_family() -> Vec<Token> {
+        // If is in block_prefixes
+        vec![
+            Token::Then,
+            Token::Elif,
+            Token::Else,
+            Token::Fi,
+        ]
+    }
+    pub fn case_family() -> Vec<Token> {
+        vec![
+            Token::In,
+            Token::Esac
+        ]
+    }
+    pub fn loop_family() -> Vec<Token> {
+        vec![
+            Token::Do,
+            Token::Done
+        ]
+    }
+    pub fn all_variants() -> Vec<Token> {
+        vec![
+            Token::AnyWord,
+            Token::AnyRedir,
+            Token::AnyFd,
+            Token::Semicolon,
+            Token::Newline,
+            Token::Pipe,
+            Token::And,
+            Token::Or,
+            Token::If,
+            Token::Then,
+            Token::Elif,
+            Token::Else,
+            Token::Fi,
+            Token::For,
+            Token::While,
+            Token::Until,
+            Token::Do,
+            Token::Done,
+            Token::Eof,
+            Token::Null
+        ]
     }
 }
 
@@ -172,8 +277,13 @@ impl Tokenizer {
             chars: VecDeque::from(input.chars().collect::<Vec<char>>()),
             outbox,
             redir_regex: Regex::new(r"([\d&]*)(>>?|<|<&|>&)\s*([^\s;]*)").unwrap(),
+
+            // Keeps track of delimiters
             expecting: HashSet::new(),
+            // Predicts which tokens are valid next
             expecting_immediate: None,
+
+            // Parsing position for detailed parse error output
             col: 1,
             row: 1
         }
@@ -185,6 +295,7 @@ impl Tokenizer {
 
     fn step(&mut self) {
         if let Some(char) = self.chars.pop_front() {
+            trace!("Popped character: {}",char);
             match char {
                 '\n' => {
                     self.row += 1;
@@ -201,79 +312,89 @@ impl Tokenizer {
         }
     }
 
-    fn expect_next(&mut self, expected_tokens: &[Token]) {
-        let new_set: HashSet<Token> = expected_tokens.iter().cloned().collect();
-        self.expecting_immediate = Some(new_set);
-    }
 
-    fn is_expected_token(&mut self, mut token: &Token) -> bool {
-        if matches!(&token, &Token::Word(_)) {
-            token = &Token::AnyWord;
-        }
-        if let Some(expected_tokens) = &self.expecting_immediate {
-            expected_tokens.contains(token)
-        } else {
-            false
-        }
-    }
 
     /// Tokenizes the input and sends tokens to the parser
     pub async fn tokenize(&mut self) -> Result<(), ShellError> {
         let mut tokens: VecDeque<Token> = VecDeque::new();
-        while let Some(&ch) = self.chars.front() {
-            let token: Token;
+        loop {
+            let ch: char = if self.chars.front().is_none() {
+                tokens.push_back(Token::Eof);
+                break;
+            } else {
+                *self.chars.front().unwrap()
+            };
             debug!("tokenizer: checking character: {:?}", ch);
 
+            // Skip whitespace
             if matches!(ch, ' ' | '\t') {
                 self.step();
                 continue;
             }
 
+            let mut token: Token = Token::Null;
 
-            let word = self.build_word().map_err(|err| {
-                error!("Error building word at {}: {:?}", self.get_pos(), err);
-                err
-            })?;
-
-            // Check if the word is a reserved keyword
-            if let Some(keyword_token) = self.handle_reserved_word(&word)? {
-                token = keyword_token;
-                self.step_count(word.chars().count());
-            } else {
-                // Process based on single characters for symbols
-                match self.chars.front() {
-                    Some('|') => {
-                        self.step();
-                        token = Token::Pipe;
+            // Build a word if the character isn't a single-character token
+            if matches!(ch, '|' | '\n' | ';') {
+                // Single-character tokens
+                match ch {
+                    '|' => {
+                        if self.chars[1] != '|' {
+                            self.step();
+                            token = Token::Pipe;
+                        } else {
+                            self.step_count(2);
+                            token = Token::Or;
+                        }
                     }
-                    Some('\n') => {
+                    '\n' => {
                         self.step();
                         token = Token::Newline;
                     }
-                    Some(';') => {
+                    ';' => {
                         self.step();
                         token = Token::Semicolon;
                     }
-                    _ => {
-                        // Handle other non-reserved words
-                        token = self.handle_non_reserved_word(word).unwrap();
-                    }
+                    _ => unreachable!(),
+                }
+            } else {
+                // Handle words
+                let word = self.build_word().map_err(|err| {
+                    error!("Error building word at {}: {:?}", self.get_pos(), err);
+                    err
+                })?;
+
+                // Check if the word is a reserved keyword
+                if let Some(keyword_token) = self.handle_reserved_word(&word)? {
+                    token = keyword_token;
+                } else {
+                    // TODO: handle unwrap (important!)
+                    token = self.handle_non_reserved_word(word).unwrap();
+                    debug!("tokenize: Received redirection: {:?}",token);
                 }
             }
-            // Check immediate expectations
-            if self.expecting_immediate.is_some() && !self.is_expected_token(&token) {
+
+            // Perform the expectation check on the token
+            let checked_token = match &token {
+                Token::Word(..) => Token::AnyWord,
+                Token::Redir(..) => Token::AnyRedir,
+                _ => token.clone(),
+            };
+
+            if self.expecting_immediate.is_some() && !self.is_expected_token(&checked_token) {
                 let expected_tokens = self.expecting_immediate.clone().unwrap();
-                return Err(
-                    ShellError::InvalidSyntax(
-                        format!("Syntax error at {}: Expected one of {:?}, found {:?}"
-                            ,self.get_pos(),
-                            expected_tokens,
-                            token
-                        )
-                    )
-                );
+                return Err(ShellError::InvalidSyntax(format!(
+                    "Syntax error at {}: Expected one of {:?}, found {:?}",
+                    self.get_pos(),
+                    expected_tokens,
+                    token
+                )));
             }
-            self.handle_expectations(&token);
+
+            // Handle expectations for the current token
+            self.handle_expectations(&checked_token);
+
+            // Push the token to the tokens queue
             tokens.push_back(token);
         }
         if !tokens.is_empty() {
@@ -291,15 +412,68 @@ impl Tokenizer {
         }
 
         // Send the Eof token once the input is exhausted
-        info!("tokenizer: Sending Eof token");
-        self.outbox.send(Token::Eof).await.unwrap();
         Ok(())
+    }
+
+    fn expect_next(&mut self, whitelist: bool, expected_tokens: &[Token]) {
+        let new_set: HashSet<Token> = if whitelist {
+            expected_tokens.iter().cloned().collect()
+        } else { // Invert
+            let all_variants: HashSet<Token> = Token::all_variants().iter().cloned().collect();
+            let not_expected_set: HashSet<Token> = expected_tokens.iter().cloned().collect();
+
+            all_variants.difference(&not_expected_set).cloned().collect()
+        };
+        self.expecting_immediate = Some(new_set);
+    }
+
+    fn is_expected_token(&mut self, mut token: &Token) -> bool {
+        debug!("Checking expectations with token: {:?}",token);
+        match token {
+            Token::Word(..) => {
+                token = &Token::AnyWord;
+            }
+            Token::Redir(..) => {
+                token = &Token::AnyRedir
+            }
+            _ => {}
+        }
+        if let Some(expected_tokens) = &self.expecting_immediate {
+            debug!("Current expectation: {:?}",expected_tokens);
+            expected_tokens.contains(token)
+        } else {
+            debug!("No current expectations");
+            false
+        }
     }
 
     fn handle_expectations(&mut self, current_token: &Token) {
         match current_token {
-            Token::Fi => {
-                self.expect_next(&[Token::Semicolon,Token::Newline,Token::Eof]);
+            Token::If | Token::Elif | Token::Then => {
+                self.expect_next(true,&[Token::AnyWord]);
+            }
+            Token::Fi | Token::Done | Token::Esac => {
+                self.expect_next(true,&Token::delimiter_family());
+            }
+            Token::Pipe => {
+                self.expect_next(true,&[Token::AnyWord]);
+            }
+            Token::AnyWord => {
+                let mut tokens: Vec<Token> = vec![Token::AnyWord];
+                tokens.extend(Token::operator_family());
+                tokens.extend(Token::delimiter_family());
+                self.expect_next(true,&tokens);
+            }
+            Token::Semicolon => {
+                let mut tokens: Vec<Token> = vec![];
+                tokens.extend(Token::operator_family());
+                tokens.extend(vec![Token::Semicolon]);
+                self.expect_next(false,&tokens);
+            }
+            Token::And | Token::Or  => {
+                let mut tokens: Vec<Token> = vec![Token::AnyWord];
+                tokens.extend(Token::block_prefixes());
+                self.expect_next(true, &tokens);
             }
             _ => self.expecting_immediate = None,
         }
@@ -392,12 +566,11 @@ impl Tokenizer {
                     self.step_count(target.chars().count());
                 }
 
-                Some(Token::Redir(operator.into(), fd.into(), target))
-            } else { unreachable!() };
-        }
-
-        if !word.is_empty() {
-            self.step();
+                let redir = Some(Token::Redir(operator.into(), fd.into(), target));
+                debug!("Returning redirection: {:?}",redir);
+                redir
+            } else { unreachable!() }
+        } else if !word.is_empty() {
             Some(Token::Word(word))
         } else { None }
     }
@@ -415,25 +588,32 @@ impl Tokenizer {
     }
 
     fn build_word(&mut self) -> Result<String, ShellError> {
-        let mut chars = self.chars.iter().peekable();
         let mut word = String::new();
 
-        while let Some(&c) = chars.peek() {
+        while let Some(&c) = self.chars.front() {
             match c {
                 '"' if !self.in_single_quotes() => {
-                    self.expecting.insert("\"".into());
-                    chars.next();
+                    if self.in_double_quotes() {
+                        self.expecting.remove("\"");
+                    } else {
+                        self.expecting.insert("\"".into());
+                    }
+                    self.step()
                 }
                 '\'' if !self.in_double_quotes() => {
-                    self.expecting.insert("'".into());
-                    chars.next();
+                    if self.in_single_quotes() {
+                        self.expecting.remove("'");
+                    } else {
+                        self.expecting.insert("'".into());
+                    }
+                    self.step()
                 }
                 ';' | '|' | '\n' | ' ' | '\t' if !self.in_any_quotes() => {
                     break;
                 }
                 _ => {
-                    word.push(*c);
-                    chars.next();
+                    word.push(c);
+                    self.step()
                 }
             }
         }
@@ -759,7 +939,7 @@ impl Parser {
 
         debug!("parse_conditional: Completed parsing. Paths: {:?}", paths);
         let node = Some(ASTNode::Conditional { paths });
-        debug!("Returning node: {:#?}",node);
+        trace!("parse_conditional: Returning node: {:#?}",node);
         node
     }
 
