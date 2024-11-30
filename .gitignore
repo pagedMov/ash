@@ -20,3 +20,5 @@ devenv.local.nix
 .pre-commit-config.yaml
 
 template/flake.lock
+ideas.md
+roadmap.md

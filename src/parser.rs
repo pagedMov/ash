@@ -124,6 +124,9 @@ pub enum Token {
     AnyFd,
     RedirOperator(String),
     RedirTarget(String),
+    Macro(String),
+    AnyMacro,
+    Shebang,
     Semicolon,
     Newline,
     Pipe,
@@ -212,7 +215,7 @@ impl Token {
         ]
     }
     pub fn if_family() -> Vec<Token> {
-        // If is in block_prefixes
+        // `If` is in block_prefixes
         vec![
             Token::Then,
             Token::Elif,
