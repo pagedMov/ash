@@ -14,6 +14,8 @@ static BUILTINS: [&str; 6] = ["cd", "echo", "exit", "export", "alias", "unset"];
 // TODO: verify syntax before executing nodes
 
 
+pub enum ASTNode
+
 #[derive(Debug,Clone,PartialEq)]
 pub enum ASTNode {
     Builtin {

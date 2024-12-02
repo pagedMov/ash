@@ -1,0 +1,161 @@
+WHITESPACE = _{ " " | "\t" }
+COMMENT = _{ "#" ~ ANY* }
+SH_NEWLINE = _{ "\\" ~ NEWLINE } // Allows for breaking lines using '\'
+
+
+cmdsep = _{ ";"? ~ NEWLINE* }
+word_bound = _{ (WHITESPACE | SH_NEWLINE)+ | !(ASCII_ALPHANUMERIC | "_" | "-" | "$" | "/") }
+shebang = @{ SOI ~ "#!" ~ shebang_path ~ (WHITESPACE+ ~ shebang_arg)* }
+shebang_raw = @{ "#!" ~ shebang_path ~ (WHITESPACE+ ~ shebang_arg)* }
+shebang_arg = { ident }
+shebang_path = { ident }
+
+filename = { (quoted_filename|unquoted_filename) }
+	quoted_filename = @{ "\"" ~ (!"\"" ~ (ASCII_ALPHANUMERIC|WHITESPACE))* ~ "\"" | "'" ~ (!"'" ~ (ASCII_ALPHANUMERIC|WHITESPACE))* ~ "'" }
+    unquoted_filename = @{ (!WHITESPACE ~ !operator ~ !"\"" ~ !"'" ~ ANY)+ }
+filepath = { absolute_path | relative_path }
+absolute_path = @{ ("/" ~ (!"/" ~ filename)+)+ ~ (!"/")? }
+relative_path = @{ ("../" | "./")? ~ (!"/" ~ filename)+ ~ ("/" ~ (!"/" ~ filename)+)* }
+directory = { (absolute_path | relative_path) ~ "/" }
+
+or = { "||" }
+fork = { "&" } // must appear after a full statement
+and = { "&&" }
+not = { "!" }
+pipe = { "|" }
+redir = { simple_redir ~ (substitution|string|filepath) | fd_redir }
+	output = !{ ">" }
+    input = !{ "<" }
+    append = !{ ">>" }
+	simple_redir = { input | append | output }
+    fd_out = !{ ASCII_DIGIT? }
+    fd_target = !{ ASCII_DIGIT }
+	fd_operator = { fd_out ~ (">" | ">>") }
+	fd_redir = @{ fd_out ~ (input | append | output) ~ (("&" ~ fd_target) | filepath) }
+operator = { or | and | pipe | fork | not | redir }
+
+content = @{ (nested | non_paren)+ }
+nested = _{ "(" ~ content* ~ ")"? }
+non_paren = _{ (!"(" ~ !")" ~ ANY)+ }
+subshell = @{ "(" ~ content ~ ")" }
+
+string = { (double_quoted|single_quoted) }
+double_quoted = { "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+single_quoted = { "'" ~ (!"'" ~ ANY)* ~ "'" }
+
+
+otherval = @{ string | ("$" | ASCII_ALPHANUMERIC | "_" | "-" | "/" | "^")+ }
+value = !{ substitution | ((otherval) | "") }
+assignment = ${ ident ~ "=" ~ value }
+substitution = @{ "$" ~ ident | "${" ~ ident ~ "}" | "$" ~ subshell }
+
+ident = @{ (WHITESPACE|NEWLINE)* ~ ("$" | ASCII_ALPHANUMERIC | "_" | "-" | "/" | ".")+ }
+
+delimiter = { open_paren | close_paren | dquote | squote | open_brace | close_brace }
+open_paren = { "(" }
+close_paren = { ")" }
+test_start = { "[" }
+test_end = { "]" }
+test = { ("[["|"[") ~ (!("]]"|"]") ~ ANY)* ~ (!"\\" ~ ("]]"|"]")) }
+dquote = { "\"" }
+squote = { "'" }
+open_brace = { "{" }
+close_brace = { "}" }
+range = @{ "{" ~ ASCII_DIGIT+ ~ ".." ~ ASCII_DIGIT+ ~ "}" }
+keyword = {
+	(if
+	| then
+	| elif
+	| else
+	| fi
+	| for
+	| in
+	| while
+	| until
+	| do
+	| done
+	| case
+	| esac)
+}
+
+
+cmd = { (!keyword ~ ident) ~ (!keyword ~ arg ~ (WHITESPACE | SH_NEWLINE)*)* }
+arg = { !NEWLINE ~ (string | ident) }
+
+cmdtest = { eval+ }
+
+left = { cmd }
+right = { eval }
+chain = { left ~ (and|or) ~ right }
+
+pipeline = { left ~ pipe ~ right }
+
+eval = _{
+	( chain
+		| conditional
+		| loop
+		| substitution
+		| subshell
+		| test
+		| range
+    | pipeline
+    | assignment
+    | cmd) ~ redir* ~ cmdsep
+}
+
+// Logical Structures
+
+func_name = { ident ~ "()" }
+func_body = { "{" ~ NEWLINE* ~ eval* ~ NEWLINE* ~ "}" }
+function = { func_name ~ func_body }
+
+condition = { eval }
+body = { eval+ }
+path = { condition ~ then ~ body }
+
+if = ${ WHITESPACE* ~ "if" ~ word_bound }
+then = ${ WHITESPACE* ~ "then" ~ word_bound }
+elif = ${ WHITESPACE* ~ "elif" ~ word_bound }
+else = ${ WHITESPACE* ~ "else" ~ word_bound }
+fi = ${ WHITESPACE* ~ "fi" ~ word_bound }
+
+if_block = { if ~ path}
+elif_block = { elif ~ path}
+else_block = { else ~ body }
+conditional = { if_block ~ elif_block* ~ else_block? ~ fi }
+
+for = ${ WHITESPACE* ~ "for" ~ word_bound }
+in = ${ WHITESPACE* ~ "in" ~ word_bound }
+while = ${ WHITESPACE* ~ "while" ~ word_bound }
+until = ${ WHITESPACE* ~ "until" ~ word_bound }
+do = ${ WHITESPACE* ~ "do" ~ word_bound }
+done = ${ WHITESPACE* ~ "done" ~ word_bound }
+do_or_done = { (do|done)+ }
+
+loop = { while_block | for_block | until_block }
+loop_var = { ident }
+loop_array = { eval }
+while_block = { while ~ condition ~ do ~ body ~ done }
+for_block = { for ~ loop_var ~ in ~ loop_array ~ do ~ body ~ done }
+until_block = { until ~ condition ~ do ~ body ~ done }
+
+case_var = { ident }
+case = ${ "case" ~ word_bound }
+esac = ${ "esac" ~ word_bound }
+case_element = @{ WHITESPACE* ~ ident ~ ")" }
+case_body = { (case_element ~ (WHITESPACE|NEWLINE)* ~ eval+ ~ ";;")+ }
+case_in = { case ~ case_var ~ in ~ case_body ~ esac }
+
+
+unit = { ( operator
+    | string
+		| dquote
+    | squote
+    | shebang
+    | subshell
+    | delimiter
+    | test
+    | ident
+    | cmdsep) }
+
+main = { shebang? ~ eval+ ~ EOI }
