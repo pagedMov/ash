@@ -1,67 +1,90 @@
 WHITESPACE = _{ " " | "\t" }
-COMMENT = _{ "#" ~ ANY* }
+COMMENT = _{ !SOI ~ &NEWLINE* ~ "#" ~ (!NEWLINE ~ ANY)* ~ NEWLINE* }
 SH_NEWLINE = _{ "\\" ~ NEWLINE } // Allows for breaking lines using '\'
 
 
 cmdsep = _{ ";"? ~ NEWLINE* }
-word_bound = _{ (WHITESPACE | SH_NEWLINE)+ | !(ASCII_ALPHANUMERIC | "_" | "-" | "$" | "/") }
-shebang = @{ SOI ~ "#!" ~ shebang_path ~ (WHITESPACE+ ~ shebang_arg)* }
-shebang_raw = @{ "#!" ~ shebang_path ~ (WHITESPACE+ ~ shebang_arg)* }
-shebang_arg = { ident }
-shebang_path = { ident }
+word_bound = _{ (WHITESPACE | (NEWLINE|SH_NEWLINE))+ | !(ASCII_ALPHANUMERIC | "_" | "-" | "$" | "/") }
+shebang = { "#!" ~ shebang_path ~ interpreter_arg ~ rsh_arg* ~ NEWLINE* }
+shebang_raw = @{ "#!" ~ shebang_path ~ (WHITESPACE+ ~ interpreter_arg)* }
+interpreter_arg = { !NEWLINE ~ ident }
+rsh_arg = { !NEWLINE ~ "arg:" ~ ident }
+shebang_path = { absolute_path }
 
 filename = { (quoted_filename|unquoted_filename) }
 	quoted_filename = @{ "\"" ~ (!"\"" ~ (ASCII_ALPHANUMERIC|WHITESPACE))* ~ "\"" | "'" ~ (!"'" ~ (ASCII_ALPHANUMERIC|WHITESPACE))* ~ "'" }
-    unquoted_filename = @{ (!WHITESPACE ~ !operator ~ !"\"" ~ !"'" ~ ANY)+ }
+    unquoted_filename = @{ (!(WHITESPACE|NEWLINE) ~ !operator ~ !"\"" ~ !"'" ~ ANY)+ }
 filepath = { absolute_path | relative_path }
 absolute_path = @{ ("/" ~ (!"/" ~ filename)+)+ ~ (!"/")? }
 relative_path = @{ ("../" | "./")? ~ (!"/" ~ filename)+ ~ ("/" ~ (!"/" ~ filename)+)* }
 directory = { (absolute_path | relative_path) ~ "/" }
+
+process_sub = { (process_sub_in|process_sub_out) }
+process_sub_in = { ">" ~ subshell_cmd }
+process_sub_out = { "<" ~ subshell_cmd }
 
 or = { "||" }
 fork = { "&" } // must appear after a full statement
 and = { "&&" }
 not = { "!" }
 pipe = { "|" }
-redir = { simple_redir ~ (substitution|string|filepath) | fd_redir }
+file_redir = { (simple_redir|fd_redir) }
+redir = { heredoc | simple_redir | fd_redir }
 	output = !{ ">" }
     input = !{ "<" }
     append = !{ ">>" }
-	simple_redir = { input | append | output }
+		heredoc = { heredoc_string | heredoc_strip | heredoc_simple }
+		heredoc_simple = { "<<" ~ heredoc_start ~ heredoc_inner ~ POP }
+		heredoc_strip = { "<<-" ~ heredoc_start ~ heredoc_inner ~ POP }
+		heredoc_string = { "<<<" ~ string }
+			heredoc_inner = !{ (!(PEEK[..]|file_redir) ~ ANY)* }
+			heredoc_start = { PUSH(ident) ~ file_redir* }
+			heredoc_test = { heredoc_start ~ heredoc_inner }
+	simple_redir = { (input | append | output) ~ (filepath|process_sub|substitution|string) }
     fd_out = !{ ASCII_DIGIT? }
     fd_target = !{ ASCII_DIGIT }
 	fd_operator = { fd_out ~ (">" | ">>") }
-	fd_redir = @{ fd_out ~ (input | append | output) ~ (("&" ~ fd_target) | filepath) }
+	fd_redir = @{ fd_out ~ (input | append | output) ~ (("&" ~ fd_target) | filepath | process_sub) }
 operator = { or | and | pipe | fork | not | redir }
+
 
 content = @{ (nested | non_paren)+ }
 nested = _{ "(" ~ content* ~ ")"? }
 non_paren = _{ (!"(" ~ !")" ~ ANY)+ }
-subshell = @{ "(" ~ content ~ ")" }
+subshell_cmd = @{ "(" ~ content ~ ")" }
+subshell_math = @{ "((" ~ content ~ "))" }
+subshell = { (subshell_math|subshell_cmd) }
 
 string = { (double_quoted|single_quoted) }
 double_quoted = { "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
 single_quoted = { "'" ~ (!"'" ~ ANY)* ~ "'" }
 
 
-otherval = @{ string | ("$" | ASCII_ALPHANUMERIC | "_" | "-" | "/" | "^")+ }
-value = !{ substitution | ((otherval) | "") }
-assignment = ${ ident ~ "=" ~ value }
-substitution = @{ "$" ~ ident | "${" ~ ident ~ "}" | "$" ~ subshell }
+reserved_parameter = { "#" | ASCII_DIGIT+ | "@" | "*" | "?" | "$" | "!" | "_" | "-" }
+otherval = @{ string | (ASCII_ALPHANUMERIC | "_" | "-" | "/" | "^")+ }
+value = !{ array_value | substitution | ((otherval) | "") }
+array_value = { "(" ~ array_element* ~ ")" }
+array_element = { string | ident }
+var_ident = @{ (WHITESPACE|NEWLINE)* ~ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
+array_ident = @{ (WHITESPACE|NEWLINE)* ~ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "-")* ~ ("[" ~ ("@"|"*"|ASCII_DIGIT+) ~ "]") }
+assignment = ${ var_ident ~ "=" ~ value }
+substitution = { (WHITESPACE|NEWLINE)* ~ "$" ~ (reserved_parameter|var_ident) | "${" ~ (array_ident|var_ident) ~ "}" | "$" ~ subshell }
 
-ident = @{ (WHITESPACE|NEWLINE)* ~ ("$" | ASCII_ALPHANUMERIC | "_" | "-" | "/" | ".")+ }
+ident = @{ (WHITESPACE|NEWLINE)* ~ ("$" | ASCII_ALPHANUMERIC | "=" | "_" | "-" | "/" | ".")+ }
 
 delimiter = { open_paren | close_paren | dquote | squote | open_brace | close_brace }
 open_paren = { "(" }
 close_paren = { ")" }
 test_start = { "[" }
 test_end = { "]" }
-test = { ("[["|"[") ~ (!("]]"|"]") ~ ANY)* ~ (!"\\" ~ ("]]"|"]")) }
+test = @{ ("[["|"[") ~ (!("]]"|"]") ~ ANY)* ~ (!"\\" ~ ("]]"|"]")) }
 dquote = { "\"" }
 squote = { "'" }
 open_brace = { "{" }
 close_brace = { "}" }
-range = @{ "{" ~ ASCII_DIGIT+ ~ ".." ~ ASCII_DIGIT+ ~ "}" }
+range_numeric = @{ "{" ~ ASCII_DIGIT+ ~ ".." ~ ASCII_DIGIT+ ~ "}" }
+range_alpha = @{ "{" ~ ASCII_ALPHA ~ ".." ~ ASCII_ALPHA ~ "}" }
+range = { (range_alpha|range_numeric) }
 keyword = {
 	(if
 	| then
@@ -80,7 +103,7 @@ keyword = {
 
 
 cmd = { (!keyword ~ ident) ~ (!keyword ~ arg ~ (WHITESPACE | SH_NEWLINE)*)* }
-arg = { !NEWLINE ~ (string | ident) }
+arg = { !NEWLINE ~ (string|ident|process_sub) }
 
 cmdtest = { eval+ }
 
@@ -94,12 +117,14 @@ eval = _{
 	( chain
 		| conditional
 		| loop
+		| case_in
 		| substitution
 		| subshell
 		| test
 		| range
     | pipeline
     | assignment
+		| function
     | cmd) ~ redir* ~ cmdsep
 }
 
@@ -134,7 +159,7 @@ do_or_done = { (do|done)+ }
 
 loop = { while_block | for_block | until_block }
 loop_var = { ident }
-loop_array = { eval }
+loop_array = { eval | string ~ cmdsep | substitution ~ cmdsep }
 while_block = { while ~ condition ~ do ~ body ~ done }
 for_block = { for ~ loop_var ~ in ~ loop_array ~ do ~ body ~ done }
 until_block = { until ~ condition ~ do ~ body ~ done }
@@ -142,12 +167,17 @@ until_block = { until ~ condition ~ do ~ body ~ done }
 case_var = { ident }
 case = ${ "case" ~ word_bound }
 esac = ${ "esac" ~ word_bound }
-case_element = @{ WHITESPACE* ~ ident ~ ")" }
-case_body = { (case_element ~ (WHITESPACE|NEWLINE)* ~ eval+ ~ ";;")+ }
-case_in = { case ~ case_var ~ in ~ case_body ~ esac }
+case_arg = @{ ("*" | ident) }
+case_element = { WHITESPACE* ~ case_arg ~ ")" }
+case_cond = { (case_element ~ (WHITESPACE|NEWLINE)* ~ case_body ~ ";;" ~ NEWLINE*)+ }
+case_body = { eval+ }
+case_in = { case ~ case_var ~ in ~ case_cond ~ esac }
 
 
 unit = { ( operator
+		| filepath
+		| process_sub
+		| substitution
     | string
 		| dquote
     | squote
@@ -158,4 +188,4 @@ unit = { ( operator
     | ident
     | cmdsep) }
 
-main = { shebang? ~ eval+ ~ EOI }
+main = { shebang ~ eval+ ~ EOI }
