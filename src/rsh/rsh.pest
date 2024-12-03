@@ -5,7 +5,7 @@ SH_NEWLINE = _{ "\\" ~ NEWLINE } // Allows for breaking lines using '\'
 
 cmdsep = _{ ";"? ~ NEWLINE* }
 word_bound = _{ (WHITESPACE | (NEWLINE|SH_NEWLINE))+ | !(ASCII_ALPHANUMERIC | "_" | "-" | "$" | "/") }
-shebang = { "#!" ~ shebang_path ~ interpreter_arg ~ rsh_arg* ~ NEWLINE* }
+shebang = { "#!" ~ shebang_path ~ interpreter_arg? ~ rsh_arg* ~ NEWLINE* }
 shebang_raw = @{ "#!" ~ shebang_path ~ (WHITESPACE+ ~ interpreter_arg)* }
 interpreter_arg = { !NEWLINE ~ ident }
 rsh_arg = { !NEWLINE ~ "arg:" ~ ident }
@@ -13,7 +13,7 @@ shebang_path = { absolute_path }
 
 filename = { (quoted_filename|unquoted_filename) }
 	quoted_filename = @{ "\"" ~ (!"\"" ~ (ASCII_ALPHANUMERIC|WHITESPACE))* ~ "\"" | "'" ~ (!"'" ~ (ASCII_ALPHANUMERIC|WHITESPACE))* ~ "'" }
-    unquoted_filename = @{ (!(WHITESPACE|NEWLINE) ~ !operator ~ !"\"" ~ !"'" ~ ANY)+ }
+    unquoted_filename = @{ (!(WHITESPACE|NEWLINE) ~ !operator ~ !"\"" ~ !"'" ~ ASCII_ALPHANUMERIC)+ }
 filepath = { absolute_path | relative_path }
 absolute_path = @{ ("/" ~ (!"/" ~ filename)+)+ ~ (!"/")? }
 relative_path = @{ ("../" | "./")? ~ (!"/" ~ filename)+ ~ ("/" ~ (!"/" ~ filename)+)* }
@@ -107,13 +107,13 @@ arg = { !NEWLINE ~ (string|ident|process_sub) }
 
 cmdtest = { eval+ }
 
-left = { pipeline | cmd }
+left = { cmd }
 right = { eval }
 chain = { left ~ (and|or) ~ right }
 
-pipeline = { cmd ~ (pipe ~ cmd)+ }
+pipeline = { left ~ pipe ~ right }
 
-eval = _{
+eval = {
 	( chain
 		| conditional
 		| loop
@@ -163,14 +163,30 @@ while_block = { while ~ condition ~ do ~ body ~ done }
 for_block = { for ~ loop_var ~ in ~ loop_array ~ do ~ body ~ done }
 until_block = { until ~ condition ~ do ~ body ~ done }
 
-case_var = { ident }
-case = ${ "case" ~ word_bound }
-esac = ${ "esac" ~ word_bound }
-case_arg = @{ ("*" | ident) }
-case_element = { WHITESPACE* ~ case_arg ~ ")" }
-case_cond = { (case_element ~ (WHITESPACE|NEWLINE)* ~ case_body ~ ";;" ~ NEWLINE*)+ }
-case_body = { eval+ }
-case_in = { case ~ case_var ~ in ~ case_cond ~ esac }
+// TODO: find a better way to do this
+case_eval = {
+	!(NEWLINE* ~ ";;") ~
+	( chain
+		| conditional
+		| loop
+		| case_in
+		| substitution
+		| subshell
+		| test
+		| range
+    | pipeline
+    | assignment
+		| function
+    | cmd) ~ redir* ~ NEWLINE*
+}
+case_var = { unit }
+case = ${ WHITESPACE* ~ "case" ~ word_bound }
+esac = ${ WHITESPACE* ~ "esac" ~ word_bound }
+case_arg = { "*" | ident }
+case_element = { case_arg ~ ")" }
+case_body = { (!";;" ~ case_eval)+ }  // Matches until the `;;` delimiter
+cases = { (case_element ~ case_body ~ ";;" ~ NEWLINE*)+ }  // Handles multiple cases, each ending with `;;`
+case_in = { case ~ case_var ~ in ~ NEWLINE* ~ cases ~ esac }
 
 
 unit = { ( operator
@@ -187,4 +203,4 @@ unit = { ( operator
     | ident
     | cmdsep) }
 
-main = _{ (shebang|SOI) ~ eval* ~ EOI }
+main = _{ (shebang|SOI) ~ eval* }

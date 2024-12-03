@@ -43,6 +43,29 @@ pub fn pair_director(pair: Pair<'_, Rule>) -> ASTNode {
     //| assignment
 		//| function
 
+pub fn build_case(pair: Pair<'_,Rule>) -> ASTNode {
+    let parts = pair.into_inner();
+    let case_var: String;
+    let mut body: Vec<ASTNode> = vec![];
+
+    for part in parts {
+        match part {
+            Rule::case | Rule::esac | Rule::r#in => continue,
+            Rule::case_var => {
+                // TODO: find a better way to unwrap the inner ident
+                case_var = part.into_inner().next().unwrap().as_str().into();
+            }
+            Rule::cases => {
+
+            }
+        }
+    }
+}
+
+pub fn build_case_element(pair: Pair<'_, Rule>) -> {
+
+}
+
 pub fn build_loop(pair: Pair<'_, Rule>) -> ASTNode {
     let block = pair.into_inner().next().unwrap();
     match block.as_rule() {
