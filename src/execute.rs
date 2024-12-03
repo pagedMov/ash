@@ -10,7 +10,7 @@ use tokio::process::{self, Command};
 use tokio::sync::mpsc;
 
 use crate::event::{ShellError, ShellEvent};
-use crate::parser::{ASTNode, ChainOp, Redirection};
+use crate::rsh::parse::{ast::ASTNode,ast::ChainLogic,redir::Redir};
 
 pub struct NodeWalker {
     event_outbox: mpsc::Sender<ShellEvent>,
@@ -51,11 +51,11 @@ impl NodeWalker {
                     let left_result = left_walker.walk().await?;
 
                     match operator {
-                        ChainOp::And if left_result.success() => {
+                        ChainLogic::And if left_result.success() => {
                             let right_walker = NodeWalker::new(outbox, *right);
                             right_walker.walk().await
                         }
-                        ChainOp::Or if !left_result.success() => {
+                        ChainLogic::Or if !left_result.success() => {
                             let right_walker = NodeWalker::new(outbox, *right);
                             right_walker.walk().await
                         }

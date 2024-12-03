@@ -3,8 +3,8 @@ use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};
 use thiserror::Error;
 
-use crate::{parser::{ASTNode, Parser, Token}, prompt};
-use crate::execute::NodeWalker;
+use crate::{rsh::parse::{ast,redir,case},interpret, prompt};
+//use crate::execute::NodeWalker;
 
 #[derive(Debug,Error,PartialEq)]
 pub enum ShellError {
@@ -16,10 +16,6 @@ pub enum ShellError {
 
     #[error("Parsing failed: {0}")]
     ParsingError(String),
-
-    // TODO: implement line/column in output here
-    #[error("Unexpected token: {0:?}")]
-    UnexpectedToken(Token),
 
     #[error("Execution faiiled for command '{0}' with exit code {1}")]
     ExecFailed(String,i32),
@@ -36,7 +32,6 @@ impl ShellError {
             ShellError::ExecFailed(..) => false,
             ShellError::ParsingError(..) => false,
             ShellError::InvalidSyntax(..) => false,
-            ShellError::UnexpectedToken(..) => false,
         }
     }
 }
@@ -47,7 +42,7 @@ pub enum ShellEvent {
     UserInput(String),
     Signal(Signals),
     SubprocessExited(u32,i32),
-    NewASTNode(ASTNode),
+    NewASTNode(ast::ASTNode),
     CatchError(ShellError),
     Exit(i32)
 }
@@ -116,8 +111,7 @@ impl EventLoop {
                     code = exit_code;
                 }
                 ShellEvent::UserInput(input) => {
-                    let mut parser = Parser::new(self.sender.clone(),None);
-                    parser.handle_input(input).await;
+                    interpret::interpret(input, self.inbox()).await;
                 }
                 ShellEvent::NewASTNode(node) => {
                     info!("new node:\n {:#?}", node);

@@ -1,5 +1,5 @@
 [package]
-name = "rush"
+name = "rsh"
 description = "A linux shell written in rust"
 publish = false
 version = "0.1.0"
@@ -14,3 +14,6 @@ env_logger = "0.11.5"
 thiserror = "2.0.3"
 pest = "2.7.14"
 pest_derive = "2.7.14"
+tokio-stream = { version = "0.1.16", features = ["full"] }
+futures = "0.3.31"
+async-recursion = "1.1.1"

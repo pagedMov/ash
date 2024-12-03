@@ -102,16 +102,16 @@ keyword = {
 }
 
 
-cmd = { (!keyword ~ ident) ~ (!keyword ~ arg ~ (WHITESPACE | SH_NEWLINE)*)* }
+cmd = { (!keyword ~ (ident|filepath)) ~ (!keyword ~ arg ~ (WHITESPACE | SH_NEWLINE)*)* }
 arg = { !NEWLINE ~ (string|ident|process_sub) }
 
 cmdtest = { eval+ }
 
-left = { cmd }
+left = { pipeline | cmd }
 right = { eval }
 chain = { left ~ (and|or) ~ right }
 
-pipeline = { left ~ pipe ~ right }
+pipeline = { cmd ~ (pipe ~ cmd)+ }
 
 eval = _{
 	( chain
@@ -136,7 +136,6 @@ function = { func_name ~ func_body }
 
 condition = { eval }
 body = { eval+ }
-path = { condition ~ then ~ body }
 
 if = ${ WHITESPACE* ~ "if" ~ word_bound }
 then = ${ WHITESPACE* ~ "then" ~ word_bound }
@@ -144,8 +143,8 @@ elif = ${ WHITESPACE* ~ "elif" ~ word_bound }
 else = ${ WHITESPACE* ~ "else" ~ word_bound }
 fi = ${ WHITESPACE* ~ "fi" ~ word_bound }
 
-if_block = { if ~ path}
-elif_block = { elif ~ path}
+if_block = { if ~ condition ~ then ~ body}
+elif_block = { elif ~ condition ~ then ~ body}
 else_block = { else ~ body }
 conditional = { if_block ~ elif_block* ~ else_block? ~ fi }
 
@@ -188,4 +187,4 @@ unit = { ( operator
     | ident
     | cmdsep) }
 
-main = { shebang ~ eval+ ~ EOI }
+main = _{ (shebang|SOI) ~ eval* ~ EOI }
