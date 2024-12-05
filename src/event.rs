@@ -3,7 +3,7 @@ use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};
 use thiserror::Error;
 
-use crate::{rsh::parse::{ast,redir,case},interpret, prompt};
+use crate::{rsh::parse::{ast,redir,case},parser, prompt};
 //use crate::execute::NodeWalker;
 
 #[derive(Debug,Error,PartialEq)]
@@ -111,7 +111,7 @@ impl EventLoop {
                     code = exit_code;
                 }
                 ShellEvent::UserInput(input) => {
-                    interpret::interpret(input, self.inbox()).await;
+                    //interpret::interpret(input, self.inbox()).await;
                 }
                 ShellEvent::NewASTNode(node) => {
                     info!("new node:\n {:#?}", node);

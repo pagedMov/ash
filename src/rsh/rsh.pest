@@ -113,7 +113,7 @@ chain = { left ~ (and|or) ~ right }
 
 pipeline = { left ~ pipe ~ right }
 
-eval = {
+eval = _{
 	( chain
 		| conditional
 		| loop
@@ -164,7 +164,7 @@ for_block = { for ~ loop_var ~ in ~ loop_array ~ do ~ body ~ done }
 until_block = { until ~ condition ~ do ~ body ~ done }
 
 // TODO: find a better way to do this
-case_eval = {
+case_eval = _{
 	!(NEWLINE* ~ ";;") ~
 	( chain
 		| conditional
@@ -180,13 +180,14 @@ case_eval = {
     | cmd) ~ redir* ~ NEWLINE*
 }
 case_var = { unit }
-case = ${ WHITESPACE* ~ "case" ~ word_bound }
+case_keyword = ${ WHITESPACE* ~ "case" ~ word_bound }
 esac = ${ WHITESPACE* ~ "esac" ~ word_bound }
 case_arg = { "*" | ident }
 case_element = { case_arg ~ ")" }
 case_body = { (!";;" ~ case_eval)+ }  // Matches until the `;;` delimiter
-cases = { (case_element ~ case_body ~ ";;" ~ NEWLINE*)+ }  // Handles multiple cases, each ending with `;;`
-case_in = { case ~ case_var ~ in ~ NEWLINE* ~ cases ~ esac }
+case = { (case_element ~ case_body ~ ";;" ~ NEWLINE*) }
+cases = { case+ }  // Handles multiple cases, each ending with `;;`
+case_in = { case_keyword ~ case_var ~ in ~ NEWLINE* ~ cases ~ esac }
 
 
 unit = { ( operator

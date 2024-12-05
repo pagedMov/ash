@@ -36,7 +36,7 @@ pub mod ast {
             body: Vec<ASTNode>,
         },
         Case {
-            case_var: Box<Unit>,
+            case_var: String,
             elements: Vec<CaseInfo>,
         },
         Pipeline {
@@ -143,7 +143,7 @@ pub mod case {
 
     #[derive(Debug, PartialEq)]
     pub struct CaseInfo {
-        pub check_ident: Unit,
+        pub case_arg: String,
         pub body: Vec<ASTNode>,
     }
 }
