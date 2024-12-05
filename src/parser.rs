@@ -15,6 +15,7 @@ lazy_static! {
         m.insert("redirection".into(), Regex::new(r"^([0-9]+)?(>{1,2}|<{1,3})([&]?[0-9]+)?$").unwrap());
         m.insert("path".into(), Regex::new(r"^(\/(?:[^\/]+\/)*[^\/]*|(?:\.[\/\w\-]+\/?))$").unwrap());
         m.insert("range_num".into(), Regex::new(r"^\{\d+\.\.\d+\}$").unwrap());
+        m.insert("rsh_shebang".into(), Regex::new(r"^#!((?:/[^\s]+)+)((?:\s+arg:[a-zA-Z][a-zA-Z0-9_\-]*)*)$").unwrap());
         m.insert("range_alpha".into(), Regex::new(r"^\{[a-zA-Z]\.\.[a-zA-Z]\}$").unwrap());
         m.insert("process_sub".into(), Regex::new(r"^>\(.*\)$").unwrap());
         m.insert("command_sub".into(), Regex::new(r"^\$\([^\)]+\)$").unwrap());
@@ -31,8 +32,9 @@ lazy_static! {
     };
 }
 
-const BUILTINS: [&str;12] =
+const BUILTINS: [&str;13] =
     [
+        "echo",
         "set",
         "shift",
         "export",
@@ -77,38 +79,41 @@ pub struct WordDesc {
 }
 
 #[derive(Debug,Clone)]
-pub struct ParseError {
+pub struct RshParseError {
     abs_pos: usize,
     span: (usize,usize),
     msg: String,
     input: String,
 }
 
-impl ParseError {
-    fn calc_error_data(&self) -> (usize,usize,usize, usize, VecDeque<char>, usize) {
+impl RshParseError {
+    fn calc_error_data(&self) -> (usize,usize,usize,usize,VecDeque<char>) {
+
         // Not sorry for this
+
         let mut chars = VecDeque::from(self.input.chars().collect::<Vec<char>>());
         let mut index = 0;
         let mut column = 1;
         let mut line = 1;
         let mut window = VecDeque::new();
-        let mut window_start_col = 1;
         let mut this_line = String::new();
         let mut prev_line = String::new();
         let mut the_line_before_that = String::new();
         let mut target_column = 1;
-        let mut error_length = self.span.1 - self.span.0;
+        let error_length = self.span.1 - self.span.0;
 
+        let mut found = false;
         while let Some(next_char) = chars.pop_front() {
             if index == self.abs_pos {
                 target_column = column - 1;
             }
             if index > self.abs_pos && next_char == '\n' {
                 debug!("breaking at newline");
-                let both_lines = prev_line + &this_line;
-                let all_the_lines = the_line_before_that + &both_lines;
+                let both_lines = prev_line.clone() + &this_line;
+                let all_the_lines = the_line_before_that.clone() + &both_lines;
                 debug!("concatenating these lines: {}",all_the_lines);
                 window = VecDeque::from(all_the_lines.chars().collect::<Vec<char>>());
+                found = true;
                 break
             }
             if next_char == '\n' {
@@ -123,10 +128,16 @@ impl ParseError {
             }
             if window.len() == 50 {
                 window.pop_front();
-                window_start_col = column - 48;
             }
             this_line.push(next_char);
             index += 1;
+        }
+        if !found {
+            debug!("breaking at newline");
+            let both_lines = prev_line + &this_line;
+            let all_the_lines = the_line_before_that + &both_lines;
+            debug!("concatenating these lines: {}",all_the_lines);
+            window = VecDeque::from(all_the_lines.chars().collect::<Vec<char>>());
         }
 
         debug!("Chars after calculation: {:?}", chars);
@@ -135,27 +146,23 @@ impl ParseError {
                 window.push_front('.');
             }
         }
-        (line,column,target_column, error_length, window, window_start_col)
+        (line,column,target_column, error_length, window)
     }
 }
 
-impl fmt::Display for ParseError {
+impl fmt::Display for RshParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 
-        let (line,column,target_column, error_length, window, window_start_col) = self.calc_error_data();
-        let window_end_col = window_start_col + window.len();
+        let (line,column,target_column, error_length, window) = self.calc_error_data();
 
-        let mut window_slice: String = window.clone().into_iter().collect();
+        let window_slice: String = window.clone().into_iter().collect();
         let error_line = window_slice.split("\n").last().unwrap();
         debug!("target_column, error_length: {},{}",target_column,error_length);
         debug!("error_line: {}",error_line);
         writeln!(f, "\t")?;
-        writeln!(f, "{}:{} - Parse Error: {}", line, column, self.msg)?;
+        writeln!(f, "{};{} - Parse Error: {}", line, column, self.msg)?;
         writeln!(f, "-----------------------------------------------")?;
-        writeln!(f, "\t{}", window_slice)?;
-
-        let mut caret_pos_start = self.span.0.saturating_sub(window_start_col).saturating_sub(0) + 1;
-        let mut caret_pos_end = self.span.1.saturating_sub(window_start_col).saturating_sub(0) + 1;
+        writeln!(f, "{}", window_slice)?;
 
         let mut error_pointer = String::new();
         for i in 0..error_line.len() {
@@ -187,10 +194,13 @@ impl fmt::Display for ParseError {
 #[derive(Clone,Debug)]
 pub enum Eval {
     Command {
-        words: VecDeque<WordDesc>,
+        words: VecDeque<Unit>,
+    },
+    Builtin {
+        words: VecDeque<Unit>,
     },
     Function {
-        words: VecDeque<WordDesc>,
+        words: VecDeque<Unit>,
     },
     Chain {
         left: Box<Eval>,
@@ -198,7 +208,7 @@ pub enum Eval {
         operator: ChainOp
     },
     Pipeline {
-        left: Box<Eval>,
+        commands: VecDeque<Eval>,
     },
     IfThen {
         if_block: Conditional,
@@ -219,77 +229,163 @@ pub enum Eval {
         var: WordDesc,
         body: Vec<Conditional>
     },
-    FuncDev {
+    FuncDef {
         func_name: WordDesc,
         func_body: Vec<Eval>
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum Unit {
-    RangeNum {
-        word_desc: WordDesc,
-    },
-    RangeAlpha {
-        word_desc: WordDesc,
-    },
-    ProcessSub {
-        word_desc: WordDesc,
-    },
-    CommandSub {
-        word_desc: WordDesc,
-    },
-    Arithmetic {
-        word_desc: WordDesc,
-    },
-    Subshell {
-        word_desc: WordDesc,
-    },
-    Test {
-        word_desc: WordDesc,
-    },
-    Block {
-        word_desc: WordDesc,
-    },
+impl Eval {
+    pub fn infer_from(block: VecDeque<Unit>,parser: &RshParser) -> Result<Eval,RshParseError> {
+        if let Some(unit) = block.front() {
+            match unit.unit_type {
+                UnitType::Ident => Ok(Eval::infer_command(block,parser)?),
+                _ => Err(RshParseError {
+                    abs_pos: unit.word_desc.abs_pos,
+                    span: unit.word_desc.span,
+                    msg: "Failed to infer context from unit".into(),
+                    input: parser.input.clone()
+                }),
+            }
+        } else { panic!("Tried to infer from an empty block") }
+    }
+
+    fn expect_next_unit(unit_type: UnitType) -> Vec<UnitType> {
+        match unit_type {
+            UnitType::And | UnitType::Or | UnitType::Pipe | UnitType::Redir {..} => {
+                vec![
+                    UnitType::Ident
+                ]
+            },
+            _ => { panic!("Unhandled unit type passed to expect_next_unit") }
+        }
+    }
+
+    fn infer_command(mut block: VecDeque<Unit>,parser: &RshParser) -> Result<Eval, RshParseError> {
+        let mut cur_part = VecDeque::new();
+        while let Some(unit) = block.pop_front() {
+            match unit.unit_type {
+                UnitType::And => {
+                    let expected_units = Eval::expect_next_unit(UnitType::And);
+                    if block.front().is_none() || !expected_units.contains(&block.front().unwrap().unit_type) {
+                        return Err(RshParseError {
+                            abs_pos: unit.word_desc.abs_pos,
+                            span: unit.word_desc.span,
+                            msg: "Unexpected token following `&&` operator".into(),
+                            input: parser.input.clone()
+                        });
+                    }
+                    return Ok(Eval::Chain {
+                        left: Box::new(Eval::infer_command(cur_part,parser)?),
+                        right: Box::new(Eval::infer_command(block,parser)?),
+                        operator: ChainOp::And,
+                    });
+                }
+                UnitType::Or => {
+                    let expected_units = Eval::expect_next_unit(UnitType::Or);
+                    if block.front().is_none() || !expected_units.contains(&block.front().unwrap().unit_type) {
+                        return Err(RshParseError {
+                            abs_pos: unit.word_desc.abs_pos,
+                            span: unit.word_desc.span,
+                            msg: "Unexpected token following `||` operator".into(),
+                            input: parser.input.clone()
+                        });
+                    }
+                    return Ok(Eval::Chain {
+                        left: Box::new(Eval::infer_command(cur_part,parser)?),
+                        right: Box::new(Eval::infer_command(block,parser)?),
+                        operator: ChainOp::Or,
+                    });
+                }
+                _ => cur_part.push_back(unit),
+            }
+        }
+
+        // If we have made it here then we are not in a chain, so put the units back into `block`
+        block.extend(cur_part.drain(..));
+
+        let mut pipeline_cmds: VecDeque<Eval> = VecDeque::new();
+        while let Some(unit) = block.pop_front() {
+            match unit.unit_type {
+                UnitType::Pipe => {
+                    let expected_units = Eval::expect_next_unit(UnitType::And);
+                    if block.front().is_none() || !expected_units.contains(&block.front().unwrap().unit_type) {
+                        return Err(RshParseError {
+                            abs_pos: unit.word_desc.abs_pos,
+                            span: unit.word_desc.span,
+                            msg: "Unexpected token following `|` operator".into(),
+                            input: parser.input.clone()
+                        });
+                    }
+                    pipeline_cmds.push_back(Eval::infer_command(cur_part.clone(),parser)?);
+                    pipeline_cmds.push_back(Eval::infer_command(block.clone(),parser)?);
+                    cur_part.clear();
+                }
+                _ => cur_part.push_back(unit),
+            }
+        }
+        if !pipeline_cmds.is_empty() {
+            return Ok(Eval::Pipeline { commands: pipeline_cmds });
+        }
+
+        // We are not in a pipeline, so put the units back into `block`
+        block.extend(cur_part.drain(..));
+        let mut args: VecDeque<Unit> = VecDeque::new();
+        let cmd_name = block.front().unwrap().clone().word_desc.text;
+
+        for unit in block {
+            args.push_back(unit);
+        }
+
+        if BUILTINS.contains(&cmd_name.as_str()) {
+            Ok(Eval::Builtin { words: args })
+        } else {
+            Ok(Eval::Command { words: args })
+        }
+    }
+}
+
+#[derive(Debug,Clone)]
+pub struct Unit {
+    pub unit_type: UnitType,
+    pub word_desc: WordDesc,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum UnitType {
+    Shebang,
+    RangeNum,
+    RangeAlpha,
+    ProcessSub,
+    CommandSub,
+    Arithmetic,
+    Subshell,
+    Test,
+    Block,
     String {
         single_quote: bool,
-        word_desc: WordDesc,
     },
-    VarSub {
-        word_desc: WordDesc,
-    },
+    VarSub,
     Assignment {
         var: String,
         value: String,
     },
     Path {
-        word_desc: WordDesc,
         relative: bool,
     },
-    Keyword {
-        word_desc: WordDesc,
-    },
-    And {
-        word_desc: WordDesc,
-    },
-    Or {
-        word_desc: WordDesc,
-    },
-    Pipe {
-        word_desc: WordDesc,
-    },
+    Keyword,
+    And,
+    Or,
+    Pipe,
     Redir {
         redir_type: RedirType,
-        word_desc: WordDesc,
         fd_out: i32,
         fd_target: i32,
     },
-    Ident {
-        word_desc: WordDesc,
-    },
+    Ident,
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,PartialEq)]
 pub enum RedirType {
     Output,
     Append,
@@ -299,31 +395,31 @@ pub enum RedirType {
 }
 
 impl Unit {
+    pub fn new(unit_type: UnitType, word_desc: WordDesc) -> Self {
+        Self { unit_type, word_desc }
+    }
     // The function that creates a Unit from a WordDesc
-    pub fn from(word_desc: WordDesc, parser: &RshParser) -> Result<Unit,ParseError> {
+    pub fn from(word_desc: WordDesc, parser: &RshParser) -> Result<Unit,RshParseError> {
         let string = word_desc.text.clone();
         debug!("Evaluating unit type for: {}",string);
         match string.as_str() {
             _ if REGEX["path"].is_match(&string) => {
                 let relative = !string.starts_with('/');
-                Ok(Unit::Path { word_desc, relative })
+                Ok(Unit::new(UnitType::Path { relative }, word_desc))
             }
             _ if REGEX["assignment"].is_match(&string) => {
                 let parts: Vec<&str> = string.split('=').collect();
                 let (var, value) = (parts[0].into(), parts[1].to_string());
-                Ok(Unit::Assignment { var, value })
+                Ok(Unit::new(UnitType::Assignment { var, value }, word_desc))
             }
             _ if REGEX["redirection"].is_match(&string) => {
-                // REGEX: Any digits immediately followed by 1-3 < or 1-2 >, optional '&' followed by digits
-
                 if let Some(captures) = REGEX["redirection"].captures(&string) {
-                    // Unwrap is safe here
                     let fd_out = captures.get(1).map_or("1", |m| m.as_str()).to_string().parse::<i32>().unwrap_or(1);
                     let operator = captures.get(2).map_or("none", |m| m.as_str()).to_string();
                     let fd_target = captures.get(4).map_or("1", |m| m.as_str()).to_string().parse::<i32>().unwrap_or(1);
                     debug!("redir operator: {}",operator);
                     if string.matches('<').count() > 3 || string.matches('>').count() > 2 {
-                        return Err(ParseError {
+                        return Err(RshParseError {
                             abs_pos: word_desc.abs_pos,
                             span: word_desc.span,
                             msg: "Invalid redirection operator".into(),
@@ -336,32 +432,33 @@ impl Unit {
                         "<" => RedirType::Input,
                         "<<" => RedirType::Heredoc,
                         "<<<" => RedirType::Herestring,
-                        _ => return Err(ParseError {
+                        _ => return Err(RshParseError {
                             abs_pos: word_desc.abs_pos,
                             span: word_desc.span,
                             msg: "Invalid redirection operator".into(),
                             input: parser.input.clone()
                         }),
                     };
-                    Ok(Unit::Redir { redir_type, word_desc, fd_out, fd_target, })
+                    Ok(Unit::new(UnitType::Redir { redir_type, fd_out, fd_target, }, word_desc))
                 } else { panic!("Redirection somehow succeeded and then failed on the same regex check?") }
             }
-            _ if REGEX["range_num"].is_match(&string) => Ok(Unit::RangeNum { word_desc }),
-            _ if REGEX["range_alpha"].is_match(&string) => Ok(Unit::RangeAlpha { word_desc }),
-            _ if REGEX["process_sub"].is_match(&string) => Ok(Unit::ProcessSub { word_desc }),
-            _ if REGEX["command_sub"].is_match(&string) => Ok(Unit::CommandSub { word_desc }),
-            _ if REGEX["arithmetic"].is_match(&string) => Ok(Unit::Arithmetic { word_desc }),
-            _ if REGEX["subshell"].is_match(&string) => Ok(Unit::Subshell { word_desc }),
-            _ if REGEX["test"].is_match(&string) => Ok(Unit::Test { word_desc }),
-            _ if REGEX["block"].is_match(&string) => Ok(Unit::Block { word_desc }),
-            _ if REGEX["string"].is_match(&string) => Ok(Unit::String { single_quote: string.starts_with('\''), word_desc }),
-            _ if REGEX["var_sub"].is_match(&string) => Ok(Unit::VarSub { word_desc }),
+            _ if REGEX["rsh_shebang"].is_match(&string) => Ok(Unit::new(UnitType::Shebang, word_desc)),
+            _ if REGEX["range_num"].is_match(&string) => Ok(Unit::new(UnitType::RangeNum, word_desc)),
+            _ if REGEX["range_alpha"].is_match(&string) => Ok(Unit::new(UnitType::RangeAlpha, word_desc)),
+            _ if REGEX["process_sub"].is_match(&string) => Ok(Unit::new(UnitType::ProcessSub, word_desc)),
+            _ if REGEX["command_sub"].is_match(&string) => Ok(Unit::new(UnitType::CommandSub, word_desc)),
+            _ if REGEX["arithmetic"].is_match(&string) => Ok(Unit::new(UnitType::Arithmetic, word_desc)),
+            _ if REGEX["subshell"].is_match(&string) => Ok(Unit::new(UnitType::Subshell, word_desc)),
+            _ if REGEX["test"].is_match(&string) => Ok(Unit::new(UnitType::Test, word_desc)),
+            _ if REGEX["block"].is_match(&string) => Ok(Unit::new(UnitType::Block, word_desc)),
+            _ if REGEX["string"].is_match(&string) => Ok(Unit::new(UnitType::String { single_quote: string.starts_with('\'') }, word_desc)),
+            _ if REGEX["var_sub"].is_match(&string) => Ok(Unit::new(UnitType::VarSub, word_desc)),
             _ if REGEX["operator"].is_match(&string) => {
                 match string.as_str() {
-                    "||" => Ok(Unit::Or { word_desc }),
-                    "&&" => Ok(Unit::And { word_desc }),
-                    "|" => Ok(Unit::Pipe { word_desc }),
-                    _ => Err(ParseError {
+                    "||" => Ok(Unit::new(UnitType::Or, word_desc)),
+                    "&&" => Ok(Unit::new(UnitType::And, word_desc)),
+                    "|" => Ok(Unit::new(UnitType::Pipe, word_desc)),
+                    _ => Err(RshParseError {
                             abs_pos: word_desc.abs_pos,
                             span: word_desc.span,
                             msg: "Invalid operator".into(),
@@ -369,11 +466,11 @@ impl Unit {
                         }),
                 }
             }
-            _ if REGEX["ident"].is_match(&string) => Ok(Unit::Ident { word_desc }),
-            _ => Err(ParseError {
+            _ if REGEX["ident"].is_match(&string) => Ok(Unit::new(UnitType::Ident, word_desc)),
+            _ => Err(RshParseError {
                     abs_pos: word_desc.abs_pos,
                     span: word_desc.span,
-                    msg: "Failed to classify unit".into(),
+                    msg: "Failed to classify word".into(),
                     input: parser.input.clone()
                 }),
         }
@@ -444,7 +541,7 @@ impl RshParser {
             Some(next_char)
         } else { None }
     }
-    pub fn tokenize(&mut self) -> Result<(),ParseError> {
+    pub fn tokenize(&mut self) -> Result<(),RshParseError> {
         let push_word = | // Closure for pushing words
             cur_blk: &mut VecDeque<WordDesc>,
             span_start: &mut usize,
@@ -471,7 +568,7 @@ impl RshParser {
                         let open_delim = self.delim_stack.pop_back();
                         if open_delim.is_some() && open_delim.unwrap().1 != '(' {
                             let delim = open_delim.unwrap();
-                            return Err(ParseError {
+                            return Err(RshParseError {
                                 abs_pos: delim.0,
                                 span: (delim.0,self.pos),
                                 msg: "Mismatched open bracket".into(),
@@ -487,7 +584,7 @@ impl RshParser {
                         let open_delim = self.delim_stack.pop_back();
                         if open_delim.is_some() && open_delim.unwrap().1 != '[' {
                             let delim = open_delim.unwrap();
-                            return Err(ParseError {
+                            return Err(RshParseError {
                                 abs_pos: delim.0,
                                 span: (delim.0,self.pos),
                                 msg: "Mismatched open bracket".into(),
@@ -506,7 +603,7 @@ impl RshParser {
                         let open_delim = self.delim_stack.pop_back();
                         if open_delim.is_some() && open_delim.unwrap().1 != '{' {
                             let delim = open_delim.unwrap();
-                            return Err(ParseError {
+                            return Err(RshParseError {
                                 abs_pos: delim.0,
                                 span: (delim.0,self.pos),
                                 msg: "Mismatched open bracket".into(),
@@ -535,9 +632,10 @@ impl RshParser {
                     }
                     self.advance(); // Skip the next character after escaping
                 }
-                '#' => { // Comment
+                '#' if self.chars.front() != Some(&'!') => { // Comment
                     while let Some(&next_char) = self.chars.front() {
-                        if next_char == '\'' {
+                        if next_char == '\n' {
+                            self.advance();
                             break;
                         } else {
                             self.advance();
@@ -589,13 +687,14 @@ impl RshParser {
                     if !self.delim_stack.is_empty() {
                         if let Some(&(pos, stack_char)) = self.delim_stack.front() {
                             if stack_char == c {
-                                return Err(ParseError {
+                                return Err(RshParseError {
                                     abs_pos: self.pos,
                                     span: (pos,self.pos),
                                     msg: "Mismatched quotation mark".to_string(),
                                     input: self.input.clone()
                                 })
                             }
+                            current_word.push(c);
                         }
                     } else if self.delim_stack.is_empty() {
                             current_word.push(c);
@@ -643,6 +742,7 @@ impl RshParser {
                     }
                 }
                 '&' if matches!(*self.chars.front().unwrap(),'&') => {
+                    debug!("found && operator");
                     // Handle '&' for background execution or '&&' for logical AND
                     if !current_word.is_empty() {
                         debug!("Pushing word to block: {}",current_word);
@@ -650,22 +750,10 @@ impl RshParser {
                         span_start = self.pos + 1;
                         current_word.clear();
                     }
-
-                    if let Some(next_char) = self.advance() {
-                        match next_char {
-                            '&' => {
-                                // Handle '&&'
-                                push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
-                                span_start = self.pos + 1;
-                                self.advance(); // Consume the next '&'
-                            }
-                            _ => {
-                                // Handle single '&'
-                                push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
-                                span_start = self.pos + 1;
-                            }
-                        }
-                    }
+                    current_word = "&&".into();
+                    self.advance();
+                    push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
+                    span_start = self.pos + 1;
                 }
                 '&' | '0'..='9' | '>' | '<' => {
                     debug!("Maybe found redirection?");
@@ -711,7 +799,7 @@ impl RshParser {
             let open_delim = self.delim_stack.pop_back();
             if let Some(delim) = open_delim {
                 debug!("Returning parse error");
-                return Err(ParseError {
+                return Err(RshParseError {
                     abs_pos: delim.0,
                     span: (delim.0,self.pos),
                     msg: "Mismatched delimiter".into(),
@@ -730,13 +818,13 @@ impl RshParser {
     }
 
 
-    pub fn parse_blocks(&mut self) -> Result<(),ParseError> {
+    pub fn parse_blocks(&mut self) -> Result<(),RshParseError> {
         let mut unit_block = VecDeque::new();
         while let Some(mut block) = self.blocks.pop_front() {  // Take the current node and move it
             // Push the Unit created from the current node's word into `self.units`
             while let Some(word) = block.pop_front() {
                 let string = word.clone();
-                let unit = Unit::from(word,&self)?;
+                let unit = Unit::from(word,self)?;
                 debug!("Produced unit: {:?} from word {:?}",unit,string);
                 unit_block.push_back(unit);
                 // Move to the next node
@@ -747,9 +835,11 @@ impl RshParser {
         Ok(())
     }
 
-    fn parse_unitlist(&mut self, list: Vec<Unit>) -> Vec<Eval> {
-        // Go through the Unit vector
-        // Match the contained structure to a member of the Eval enum
-        todo!()
+    pub fn parse_unitlist(&mut self) -> Result<VecDeque<Eval>,RshParseError> {
+        let mut evals = VecDeque::new();
+        while let Some(block) = self.units.pop_front() {
+            evals.push_back(Eval::infer_from(block, self)?);
+        }
+        Ok(evals)
     }
 }

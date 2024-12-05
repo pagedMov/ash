@@ -30,16 +30,21 @@ use std::fs;
 
 fn main() {
     env_logger::init();
-    let input = "name=\"world\"\ncount=5\necho \"Hello, $name!\"\ncurrent_time=$(date +%H:%M:%S)\n\necho \"The current time is $current_time.\"\nresult=$((count * 2))\necho \"Twice the count is $result.\"\n";
-    let test_script = "./test_script.sh";
-    let test_string = "current_time=$(date +%H:%M:%S)";
+    let input = "echo ||| && echo";
+    let test_script = "test_script.sh";
     let script_input = &fs::read_to_string(test_script).unwrap();
-    let mut parser = parser::RshParser::new(script_input);
+    let mut parser = parser::RshParser::new(input);
     match parser.tokenize() {
         Ok(_) => {
             parser.print_tokens();
             match parser.parse_blocks() {
-                Ok(_) => parser.print_units(),
+                Ok(_) => {
+                    parser.print_units();
+                    match parser.parse_unitlist() {
+                        Ok(evals) => println!("final evaluations: {:#?}",evals),
+                        Err(e) => println!("{}",e)
+                    }
+                }
                 Err(e) => println!("{}",e),
             }
         }
