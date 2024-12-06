@@ -170,6 +170,10 @@ impl RshParseError {
 }
 
 impl fmt::Display for RshParseError {
+
+    /// This display function returns a window of the offending code. Under the specific part of
+    /// the line where the error occured, a line is drawn blaming the specific token which caused
+    /// the error
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 
         let (line,column,ref mut target_column, error_length, window) = self.calc_error_data();
@@ -264,7 +268,7 @@ pub struct Conditional {
 
 impl Eval {
 
-    /// This function creates evaluable ASTNodes from a 2-dimenional vector of Unit structs.
+    /// This function creates evaluable abstract syntax tree nodes from a 2-dimenional vector of Unit structs.
     /// Simple commands are constructed using a helper function
     /// Logical structures are constructed using an interative, stack-based approach
     /// The keyword_stack variable maintains context by stacking keywords.
@@ -281,12 +285,11 @@ impl Eval {
         let mut evals: VecDeque<Eval> = VecDeque::new();
         let mut expecting: VecDeque<VecDeque<String>> = VecDeque::new();
         let mut keyword_stack: VecDeque<String> = VecDeque::new();
-        let mut bodies: VecDeque<VecDeque<Eval>> = VecDeque::new();
-        let mut conditions: VecDeque<VecDeque<Eval>> = VecDeque::new();
+        let mut body_stack: VecDeque<VecDeque<Eval>> = VecDeque::new();
+        let mut condition_stack: VecDeque<VecDeque<Eval>> = VecDeque::new();
 
-        let mut if_block: Option<Conditional> = None;
-        let mut elif_blocks: VecDeque<Conditional> = VecDeque::new();
-        let mut else_block: Option<Conditional> = None;
+        // Intermediate values for building logical constructs like "if then" and "while do"
+        let mut process_conditionals: VecDeque<Conditional> = VecDeque::new();
 
         while let Some(mut block) = blocks.pop_front() {
             debug!("Popped block: {:?}", block);
@@ -296,101 +299,106 @@ impl Eval {
                 match unit.utype() {
                     UnitType::Keyword => {
                         debug!("Detected keyword: {}", unit.text());
-                        let mut keyword_matched = false;
-                        let mut push_keyword = false;
 
                         // Check if the keyword matches expectations
                         if let Some(keyword_list) = expecting.back() {
                             debug!("Current expectations: {:?}", keyword_list);
-                            if keyword_list.contains(&unit.text().to_string()) {
-                                debug!("Expectation met: {}", unit.text());
+                            if !keyword_list.contains(&unit.text().to_string()) {
+                                panic!("unexpected token: {}",unit.text());
                             }
                         }
 
                         match unit.text() {
-                            "if" => {
-                                debug!("Starting new 'if' block");
+                            "while" | "until" | "if" => {
+                                debug!("Starting new {} block",unit.text());
                                 keyword_stack.push_back(unit.text().into());
                                 expecting.push_back(Eval::handle_expectation(unit.text()).into());
-                                debug!("pushing new condition onto stack, current stack: {:?}",conditions);
-                                conditions.push_back(VecDeque::new());
+                                condition_stack.push_back(VecDeque::new());
+                                debug!("pushing new condition onto stack, current stack: {:?}",condition_stack);
+                                block.pop_front();
+                            }
+                            "then" | "do" => {
+                                debug!("Processing '{}' block",unit.text());
+                                if let Some(keyword) = keyword_stack.back() {
+                                    match unit.text() {
+                                        "then" => if !matches!(keyword.as_str(), "if" | "elif") {
+                                            panic!("then matched with incorrect keyword: {}",keyword)
+                                        }
+                                        "do" => if !matches!(keyword.as_str(), "while" | "until" | "for") {
+                                            panic!("do matched with incorrect keyword: {}",keyword)
+                                        }
+                                        _ => unreachable!()
+                                    }
+                                }
+                                expecting.push_back(Eval::handle_expectation(unit.text()).into());
+                                body_stack.push_back(VecDeque::new()); // Start a new body
+                                keyword_stack.push_back(unit.text().into());
                                 block.pop_front();
                             }
                             "elif" => {
                                 keyword_stack.push_back(unit.text().into());
                                 expecting.push_back(Eval::handle_expectation(unit.text()).into());
-                                debug!("checking for bodies");
-                                if if_block.is_none() && bodies.back().is_some() && conditions.back().is_some() {
-                                    let body = bodies.pop_back().unwrap();
-                                    let condition = conditions.pop_back().unwrap();
+                                debug!("checking for body_stack");
+                                if process_conditionals.is_empty() && body_stack.back().is_some() && condition_stack.back().is_some() {
+                                    let body = body_stack.pop_back().unwrap();
+                                    let condition = condition_stack.pop_back().unwrap();
                                     debug!("body and condition found: {:?},{:?}",body,condition);
-                                    if_block = Some(Conditional {
+                                    process_conditionals.push_back(Conditional {
                                         condition,
                                         body
                                     });
                                 }
-                                conditions.push_back(VecDeque::new());
-                                block.pop_front();
-                            }
-                            "then" => {
-                                debug!("Processing 'then' block");
-                                if let Some(keyword) = keyword_stack.back() {
-                                    if !matches!(keyword.as_str(), "if" | "elif") {
-                                        panic!("then matched with incorrect keyword: {}",keyword)
-                                    }
-                                }
-                                bodies.push_back(VecDeque::new()); // Start a new body
-                                keyword_stack.push_back(unit.text().into());
+                                condition_stack.push_back(VecDeque::new());
                                 block.pop_front();
                             }
                             "else" => {
                                 debug!("Processing 'else' block");
                                 expecting.push_back(Eval::handle_expectation("else").into());
-                                bodies.push_back(VecDeque::new());
+                                body_stack.push_back(VecDeque::new());
                                 keyword_stack.push_back(unit.text().into());
                                 block.pop_front();
                             }
-                            "fi" => {
+                            "fi" | "done" | "esac" => {
+                                let block_delim = unit.text();
+                                let mut block_type = String::new();
                                 debug!("Closing 'if' block");
                                 while let Some(keyword) = keyword_stack.back() {
                                     debug!("Keyword stack before processing: {:?}", keyword_stack);
                                     match keyword.as_str() {
-                                        "else" => {
+                                        "else" if block_delim == "fi" => {
                                             debug!("Processing 'else' block during 'fi' closure");
-                                            if bodies.back().is_some() {
-                                                else_block = Some(Conditional {
+                                            if body_stack.back().is_some() {
+                                                process_conditionals.push_back(Conditional {
                                                     condition: VecDeque::from(vec![Eval::NoOp]),
-                                                    body: bodies.pop_back().unwrap(),
+                                                    body: body_stack.pop_back().unwrap(),
                                                 });
-                                                debug!("Constructed 'else' block: {:#?}", else_block);
                                                 keyword_stack.pop_back();
                                             }
                                         }
-                                        "elif" => {
+                                        "elif" if block_delim == "fi" => {
                                             debug!("Processing 'elif' block during 'fi' closure");
-                                            if bodies.back().is_some() && conditions.back().is_some() {
-                                                elif_blocks.push_back(Conditional {
-                                                    condition: conditions.pop_back().unwrap(),
-                                                    body: bodies.pop_back().unwrap(),
+                                            if body_stack.back().is_some() && condition_stack.back().is_some() {
+                                                process_conditionals.push_back(Conditional {
+                                                    condition: condition_stack.pop_back().unwrap(),
+                                                    body: body_stack.pop_back().unwrap(),
                                                 });
-                                                debug!("Added 'elif' block: {:#?}", elif_blocks.back());
                                             }
                                             keyword_stack.pop_back();
                                         }
-                                        "if" => {
-                                            debug!("Processing 'if' block during 'fi' closure");
-                                            if bodies.back().is_some() && conditions.back().is_some() {
-                                                if_block = Some(Conditional {
-                                                    condition: conditions.pop_back().unwrap(),
-                                                    body: bodies.pop_back().unwrap(),
+                                        "if" | "while" | "until" => {
+                                            debug!("Processing '{}' block during '{}' closure",keyword,block_delim);
+                                            if body_stack.back().is_some() && condition_stack.back().is_some() {
+                                                process_conditionals.push_back(Conditional {
+                                                    condition: condition_stack.pop_back().unwrap(),
+                                                    body: body_stack.pop_back().unwrap(),
                                                 });
-                                                debug!("Constructed 'if' block: {:#?}", if_block);
                                             }
+                                            block_type = keyword.into();
                                             keyword_stack.pop_back();
                                             break; // Exit loop once the matching 'if' is processed
                                         }
-                                        "then" => {
-                                            debug!("Encountered 'then', popping from keyword stack");
+                                        "then" | "do" => {
+                                            debug!("Encountered '{}', popping from keyword stack",keyword);
                                             keyword_stack.pop_back();
                                         }
                                         _ => panic!("Unexpected keyword while unwinding conditional: {}", keyword),
@@ -398,49 +406,98 @@ impl Eval {
                                 }
 
                                 debug!("After unwinding, keyword stack: {:?}", keyword_stack);
-                                debug!("if_block: {:#?}", if_block);
-                                debug!("elif_blocks: {:#?}", elif_blocks);
-                                debug!("else_block: {:#?}", else_block);
 
-                                if let Some(if_block) = if_block.take() {
-                                    debug!("Finalizing 'if' block");
+                                if !process_conditionals.is_empty() {
+                                    debug!("Finalizing block");
                                     if keyword_stack.is_empty() {
-                                        debug!("Keyword stack is empty, pushing completed 'if' block to evals");
-                                        evals.push_back(Eval::IfThen {
-                                            if_block,
-                                            elif_blocks: elif_blocks.clone(),
-                                            else_block: else_block.clone(),
-                                        });
+                                        debug!("Keyword stack is empty, pushing completed block to evals");
+                                        match block_type.as_str() {
+                                            "if" => {
+                                                let if_block = process_conditionals.pop_front().unwrap();
+                                                let else_block = process_conditionals.pop_back();
+                                                let elif_blocks = process_conditionals.clone();
+                                                evals.push_back(Eval::IfThen {
+                                                    if_block,
+                                                    elif_blocks,
+                                                    else_block,
+                                                });
+                                            },
+                                            "while" => evals.push_back(Eval::WhileDo {
+                                                body: process_conditionals.pop_front().unwrap(),
+                                            }),
+                                            "until" => evals.push_back(Eval::UntilDo {
+                                                body: process_conditionals.pop_front().unwrap(),
+                                            }),
+                                            _ => unreachable!()
+                                        }
                                     } else {
                                         let keyword = keyword_stack.back().unwrap();
                                         debug!("Keyword stack is not empty, handling context for '{:?}'", keyword);
                                         debug!("Keyword stack: {:?}",keyword_stack);
                                         match keyword.as_str() {
                                             "do" | "then" | "else" => {
-                                                debug!("Pushing 'if' block to bodies");
-                                                bodies.push_back(VecDeque::from(vec![Eval::IfThen {
-                                                    if_block,
-                                                    elif_blocks: elif_blocks.clone(),
-                                                    else_block: else_block.clone(),
-                                                }]));
+                                                debug!("closure found outer keyword: {}",keyword);
+                                                debug!("Pushing block to body_stack");
+                                                match block_type.as_str() {
+                                                    "if" => {
+                                                        let if_block = process_conditionals.pop_front().unwrap();
+                                                        let else_block = process_conditionals.pop_back();
+                                                        let elif_blocks = process_conditionals.clone();
+                                                        body_stack.push_back(VecDeque::from(vec![Eval::IfThen {
+                                                            if_block,
+                                                            elif_blocks,
+                                                            else_block,
+                                                        }]));
+                                                    },
+                                                    "while" => body_stack.push_back(VecDeque::from(vec![Eval::WhileDo {
+                                                        body: process_conditionals.pop_front().unwrap(),
+                                                    }])),
+                                                    "until" => body_stack.push_back(VecDeque::from(vec![Eval::UntilDo {
+                                                        body: process_conditionals.pop_front().unwrap(),
+                                                    }])),
+                                                    _ => unreachable!()
+                                                }
                                             }
                                             "if" | "while" | "until" | "elif" => {
-                                                debug!("Pushing 'if' block to conditions");
-                                                conditions.push_back(VecDeque::from(vec![Eval::IfThen {
-                                                    if_block,
-                                                    elif_blocks: elif_blocks.clone(),
-                                                    else_block: else_block.clone(),
-                                                }]));
+                                                debug!("closure found outer keyword: {}",keyword);
+                                                match block_type.as_str() {
+                                                    "if" => {
+                                                        debug!("Pushing if block to body_stack");
+                                                        let if_block = process_conditionals.pop_front().unwrap();
+                                                        let else_block = process_conditionals.pop_back();
+                                                        let elif_blocks = process_conditionals.clone();
+                                                        condition_stack.push_back(VecDeque::from(vec![Eval::IfThen {
+                                                            if_block,
+                                                            elif_blocks,
+                                                            else_block,
+                                                        }]));
+                                                    },
+                                                    "while" => {
+                                                        debug!("Pushing while block to body_stack");
+                                                        condition_stack.push_back(VecDeque::from(vec![Eval::WhileDo {
+                                                            body: process_conditionals.pop_front().unwrap(),
+                                                        }]));
+                                                    }
+                                                    "until" => condition_stack.push_back(VecDeque::from(vec![Eval::UntilDo {
+                                                        body: process_conditionals.pop_front().unwrap(),
+                                                    }])),
+                                                    _ => unreachable!()
+                                                }
                                             }
                                             _ => panic!("Unexpected keyword context while finalizing 'if': {}", keyword),
                                         }
                                     }
                                 }
 
-                                debug!("Clearing 'elif' and 'else' blocks");
-                                elif_blocks.clear();
-                                else_block = None;
-                                debug!("Popping 'fi' block from front of the current block");
+                                debug!("Cleaning up intermediate values");
+                                if let Some(keyword) = keyword_stack.back() {
+                                    debug!("Setting expectations for keyword: {}",keyword);
+                                    expecting.push_back(Self::handle_expectation(keyword).into());
+                                }
+                                process_conditionals.clear();
+                                debug!("Popping '{}' block from front of the current block",block_delim);
+                                debug!("Current body_stack state: {:#?}",body_stack);
+                                debug!("Current condition_stack state: {:#?}",condition_stack);
                                 block.pop_front();
                             }
                             _ => {
@@ -458,18 +515,18 @@ impl Eval {
                             match keyword.as_str() {
                                 "then" | "else" | "do" => {
                                     debug!("Adding to body under context '{}'", keyword);
-                                    if let Some(body) = bodies.back_mut() {
+                                    if let Some(body) = body_stack.back_mut() {
                                         body.push_back(Eval::infer_command(block.clone(), parser)?);
                                         debug!("New body state: {:?}",body);
-                                        debug!("Body stack state: {:?}",body);
+                                        debug!("Body stack state: {:?}",body_stack);
                                     }
                                 }
                                 "if" | "elif" | "while" | "until" => {
                                     debug!("Adding to condition under context '{}'", keyword);
-                                    if let Some(condition) = conditions.back_mut() {
+                                    if let Some(condition) = condition_stack.back_mut() {
                                         condition.push_back(Eval::infer_command(block.clone(), parser)?);
                                         debug!("New condition state: {:?}",condition);
-                                        debug!("Condition stack state: {:?}",condition);
+                                        debug!("Condition stack state: {:?}",condition_stack);
                                     }
                                 }
                                 _ => {
@@ -1177,6 +1234,6 @@ impl RshParser {
     }
 
     pub fn parse_unitlist(&mut self) -> Result<VecDeque<Eval>,RshParseError> {
-        Ok(Eval::infer_from_blocks(self.units.clone(), self)?)
+        Eval::infer_from_blocks(self.units.clone(), self)
     }
 }
