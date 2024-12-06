@@ -32,6 +32,20 @@ lazy_static! {
     };
 }
 
+const FUNCTIONS: [&str;1] =
+    [
+        // Will replace this with an actual functions implementation later
+        // Used for now for word flags
+        "PLACEHOLDER_TEXT"
+    ];
+
+const ALIASES: [&str;1] =
+    [
+        // Will replace this with an actual aliases implementation later
+        // Used for now for word flags
+        "PLACEHOLDER_TEXT"
+    ];
+
 const BUILTINS: [&str;13] =
     [
         "echo",
@@ -49,7 +63,7 @@ const BUILTINS: [&str;13] =
         "wait",
     ];
 
-const KEYWORDS: [&str; 18] =
+const KEYWORDS: [&str; 14] =
     [
         "if",
         "then",
@@ -65,17 +79,22 @@ const KEYWORDS: [&str; 18] =
         "case",
         "esac",
         "in",
-        "function",
-        "return",
-        "continue",
-        "break",
     ];
+
+fn check_flag(flag_name: &str, flags: u32) -> bool {
+    match flag_name {
+        "keyword" => (flags & 1 << 1) != 0,
+        "builtin" => (flags & 1 << 2) != 0,
+        _ => unreachable!()
+    }
+}
 
 #[derive(Debug,Clone)]
 pub struct WordDesc {
     text: String,
     abs_pos: usize, // Where the word starts in the input string
-    span: (usize,usize)
+    span: (usize,usize),
+    flags: u32
 }
 
 #[derive(Debug,Clone)]
@@ -153,7 +172,7 @@ impl RshParseError {
 impl fmt::Display for RshParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 
-        let (line,column,target_column, error_length, window) = self.calc_error_data();
+        let (line,column,ref mut target_column, error_length, window) = self.calc_error_data();
 
         let window_slice: String = window.clone().into_iter().collect();
         let error_line = window_slice.split("\n").last().unwrap();
@@ -162,11 +181,13 @@ impl fmt::Display for RshParseError {
         writeln!(f, "\t")?;
         writeln!(f, "{};{} - Parse Error: {}", line, column, self.msg)?;
         writeln!(f, "-----------------------------------------------")?;
+        writeln!(f, "\t")?;
         writeln!(f, "{}", window_slice)?;
 
         let mut error_pointer = String::new();
+        if *target_column != 0 { *target_column -= 1 }
         for i in 0..error_line.len() {
-            if i == target_column - 1 {
+            if i == *target_column {
                 error_pointer.push('^'); // Start of the span
                 break;
             } else {
@@ -185,7 +206,6 @@ impl fmt::Display for RshParseError {
         }
 
         writeln!(f, "{}", error_pointer)?;
-        writeln!(f, "\t")?;
         writeln!(f, "-----------------------------------------------")
     }
 }
@@ -212,7 +232,7 @@ pub enum Eval {
     },
     IfThen {
         if_block: Conditional,
-        elif_blocks: Vec<Conditional>,
+        elif_blocks: VecDeque<Conditional>,
         else_block: Option<Conditional>
     },
     WhileDo {
@@ -232,106 +252,392 @@ pub enum Eval {
     FuncDef {
         func_name: WordDesc,
         func_body: Vec<Eval>
-    }
+    },
+    NoOp
+}
+
+#[derive(Clone,Debug)]
+pub struct Conditional {
+    condition: VecDeque<Eval>,
+    body: VecDeque<Eval>,
 }
 
 impl Eval {
-    pub fn infer_from(block: VecDeque<Unit>,parser: &RshParser) -> Result<Eval,RshParseError> {
-        if let Some(unit) = block.front() {
-            match unit.unit_type {
-                UnitType::Ident => Ok(Eval::infer_command(block,parser)?),
-                _ => Err(RshParseError {
-                    abs_pos: unit.word_desc.abs_pos,
-                    span: unit.word_desc.span,
-                    msg: "Failed to infer context from unit".into(),
-                    input: parser.input.clone()
-                }),
+
+    /// This function creates evaluable ASTNodes from a 2-dimenional vector of Unit structs.
+    /// Simple commands are constructed using a helper function
+    /// Logical structures are constructed using an interative, stack-based approach
+    /// The keyword_stack variable maintains context by stacking keywords.
+    /// Keywords are popped from the stack when their associated delimiter is found. (e.g. if -> fi)
+    /// Conditions and bodies are also kept in a stack. When the delimiter such as `fi` or `done` is found,
+    /// the function "unwinds" until it finds the first keyword in the structure. Along the way, it
+    /// populates each component of the structure with the relevant bodies and conditions.
+    pub fn infer_from_blocks(
+        mut blocks: VecDeque<VecDeque<Unit>>,
+        parser: &RshParser,
+    ) -> Result<VecDeque<Eval>, RshParseError> {
+        debug!("Beginning inference from blocks: {:?}", blocks);
+
+        let mut evals: VecDeque<Eval> = VecDeque::new();
+        let mut expecting: VecDeque<VecDeque<String>> = VecDeque::new();
+        let mut keyword_stack: VecDeque<String> = VecDeque::new();
+        let mut bodies: VecDeque<VecDeque<Eval>> = VecDeque::new();
+        let mut conditions: VecDeque<VecDeque<Eval>> = VecDeque::new();
+
+        let mut if_block: Option<Conditional> = None;
+        let mut elif_blocks: VecDeque<Conditional> = VecDeque::new();
+        let mut else_block: Option<Conditional> = None;
+
+        while let Some(mut block) = blocks.pop_front() {
+            debug!("Popped block: {:?}", block);
+            while let Some(unit) = block.front() {
+                debug!("Processing unit: {:?}", unit);
+
+                match unit.utype() {
+                    UnitType::Keyword => {
+                        debug!("Detected keyword: {}", unit.text());
+                        let mut keyword_matched = false;
+                        let mut push_keyword = false;
+
+                        // Check if the keyword matches expectations
+                        if let Some(keyword_list) = expecting.back() {
+                            debug!("Current expectations: {:?}", keyword_list);
+                            if keyword_list.contains(&unit.text().to_string()) {
+                                debug!("Expectation met: {}", unit.text());
+                            }
+                        }
+
+                        match unit.text() {
+                            "if" => {
+                                debug!("Starting new 'if' block");
+                                keyword_stack.push_back(unit.text().into());
+                                expecting.push_back(Eval::handle_expectation(unit.text()).into());
+                                debug!("pushing new condition onto stack, current stack: {:?}",conditions);
+                                conditions.push_back(VecDeque::new());
+                                block.pop_front();
+                            }
+                            "elif" => {
+                                keyword_stack.push_back(unit.text().into());
+                                expecting.push_back(Eval::handle_expectation(unit.text()).into());
+                                debug!("checking for bodies");
+                                if if_block.is_none() && bodies.back().is_some() && conditions.back().is_some() {
+                                    let body = bodies.pop_back().unwrap();
+                                    let condition = conditions.pop_back().unwrap();
+                                    debug!("body and condition found: {:?},{:?}",body,condition);
+                                    if_block = Some(Conditional {
+                                        condition,
+                                        body
+                                    });
+                                }
+                                conditions.push_back(VecDeque::new());
+                                block.pop_front();
+                            }
+                            "then" => {
+                                debug!("Processing 'then' block");
+                                if let Some(keyword) = keyword_stack.back() {
+                                    if !matches!(keyword.as_str(), "if" | "elif") {
+                                        panic!("then matched with incorrect keyword: {}",keyword)
+                                    }
+                                }
+                                bodies.push_back(VecDeque::new()); // Start a new body
+                                keyword_stack.push_back(unit.text().into());
+                                block.pop_front();
+                            }
+                            "else" => {
+                                debug!("Processing 'else' block");
+                                expecting.push_back(Eval::handle_expectation("else").into());
+                                bodies.push_back(VecDeque::new());
+                                keyword_stack.push_back(unit.text().into());
+                                block.pop_front();
+                            }
+                            "fi" => {
+                                debug!("Closing 'if' block");
+                                while let Some(keyword) = keyword_stack.back() {
+                                    debug!("Keyword stack before processing: {:?}", keyword_stack);
+                                    match keyword.as_str() {
+                                        "else" => {
+                                            debug!("Processing 'else' block during 'fi' closure");
+                                            if bodies.back().is_some() {
+                                                else_block = Some(Conditional {
+                                                    condition: VecDeque::from(vec![Eval::NoOp]),
+                                                    body: bodies.pop_back().unwrap(),
+                                                });
+                                                debug!("Constructed 'else' block: {:#?}", else_block);
+                                                keyword_stack.pop_back();
+                                            }
+                                        }
+                                        "elif" => {
+                                            debug!("Processing 'elif' block during 'fi' closure");
+                                            if bodies.back().is_some() && conditions.back().is_some() {
+                                                elif_blocks.push_back(Conditional {
+                                                    condition: conditions.pop_back().unwrap(),
+                                                    body: bodies.pop_back().unwrap(),
+                                                });
+                                                debug!("Added 'elif' block: {:#?}", elif_blocks.back());
+                                            }
+                                            keyword_stack.pop_back();
+                                        }
+                                        "if" => {
+                                            debug!("Processing 'if' block during 'fi' closure");
+                                            if bodies.back().is_some() && conditions.back().is_some() {
+                                                if_block = Some(Conditional {
+                                                    condition: conditions.pop_back().unwrap(),
+                                                    body: bodies.pop_back().unwrap(),
+                                                });
+                                                debug!("Constructed 'if' block: {:#?}", if_block);
+                                            }
+                                            keyword_stack.pop_back();
+                                            break; // Exit loop once the matching 'if' is processed
+                                        }
+                                        "then" => {
+                                            debug!("Encountered 'then', popping from keyword stack");
+                                            keyword_stack.pop_back();
+                                        }
+                                        _ => panic!("Unexpected keyword while unwinding conditional: {}", keyword),
+                                    }
+                                }
+
+                                debug!("After unwinding, keyword stack: {:?}", keyword_stack);
+                                debug!("if_block: {:#?}", if_block);
+                                debug!("elif_blocks: {:#?}", elif_blocks);
+                                debug!("else_block: {:#?}", else_block);
+
+                                if let Some(if_block) = if_block.take() {
+                                    debug!("Finalizing 'if' block");
+                                    if keyword_stack.is_empty() {
+                                        debug!("Keyword stack is empty, pushing completed 'if' block to evals");
+                                        evals.push_back(Eval::IfThen {
+                                            if_block,
+                                            elif_blocks: elif_blocks.clone(),
+                                            else_block: else_block.clone(),
+                                        });
+                                    } else {
+                                        let keyword = keyword_stack.back().unwrap();
+                                        debug!("Keyword stack is not empty, handling context for '{:?}'", keyword);
+                                        debug!("Keyword stack: {:?}",keyword_stack);
+                                        match keyword.as_str() {
+                                            "do" | "then" | "else" => {
+                                                debug!("Pushing 'if' block to bodies");
+                                                bodies.push_back(VecDeque::from(vec![Eval::IfThen {
+                                                    if_block,
+                                                    elif_blocks: elif_blocks.clone(),
+                                                    else_block: else_block.clone(),
+                                                }]));
+                                            }
+                                            "if" | "while" | "until" | "elif" => {
+                                                debug!("Pushing 'if' block to conditions");
+                                                conditions.push_back(VecDeque::from(vec![Eval::IfThen {
+                                                    if_block,
+                                                    elif_blocks: elif_blocks.clone(),
+                                                    else_block: else_block.clone(),
+                                                }]));
+                                            }
+                                            _ => panic!("Unexpected keyword context while finalizing 'if': {}", keyword),
+                                        }
+                                    }
+                                }
+
+                                debug!("Clearing 'elif' and 'else' blocks");
+                                elif_blocks.clear();
+                                else_block = None;
+                                debug!("Popping 'fi' block from front of the current block");
+                                block.pop_front();
+                            }
+                            _ => {
+                                let keyword = unit.text().to_string();
+                                debug!("Unhandled keyword: {}", keyword);
+                                keyword_stack.push_back(keyword.clone());
+                                expecting.push_back(Eval::handle_expectation(keyword.as_str()).into());
+                                block.pop_front();
+                            }
+                        }
+                    }
+                    UnitType::Ident => {
+                        debug!("Processing identifier: {}", unit.text());
+                        if let Some(keyword) = keyword_stack.back() {
+                            match keyword.as_str() {
+                                "then" | "else" | "do" => {
+                                    debug!("Adding to body under context '{}'", keyword);
+                                    if let Some(body) = bodies.back_mut() {
+                                        body.push_back(Eval::infer_command(block.clone(), parser)?);
+                                        debug!("New body state: {:?}",body);
+                                        debug!("Body stack state: {:?}",body);
+                                    }
+                                }
+                                "if" | "elif" | "while" | "until" => {
+                                    debug!("Adding to condition under context '{}'", keyword);
+                                    if let Some(condition) = conditions.back_mut() {
+                                        condition.push_back(Eval::infer_command(block.clone(), parser)?);
+                                        debug!("New condition state: {:?}",condition);
+                                        debug!("Condition stack state: {:?}",condition);
+                                    }
+                                }
+                                _ => {
+                                    debug!("Unexpected keyword context: {}", keyword);
+                                }
+                            }
+                        } else {
+                            debug!("No keyword context, treating as standalone command");
+                            evals.push_back(Eval::infer_command(block.clone(), parser)?);
+                        }
+
+                        block.clear();
+                    }
+                    _ => {
+                        debug!("Encountered unexpected unit type: {:?}", unit.utype());
+                        return Err(RshParseError {
+                            abs_pos: unit.pos(),
+                            span: unit.span(),
+                            msg: "Failed to infer evaluation from unit".into(),
+                            input: parser.input.clone(),
+                        });
+                    }
+                }
             }
-        } else { panic!("Tried to infer from an empty block") }
+        }
+
+        debug!("Final evals: {:?}", evals);
+        Ok(evals)
     }
 
-    fn expect_next_unit(unit_type: UnitType) -> Vec<UnitType> {
-        match unit_type {
+    fn handle_expectation(input: &str) -> Vec<String> {
+        let openers = ["if", "while", "for", "until", "select", "case"];
+        let mut expecting: Vec<&str> = match input {
+            "if" | "elif" => vec!["then"],
+            "then" => vec!["elif", "else", "fi"],
+            "else" => vec!["fi"],
+            "in" | "while" | "until" => vec!["do"],
+            "for" | "select" | "case" => vec!["in"],
+            "do" => vec!["done"],
+            _ => vec![], // Handle unrecognized keywords gracefully
+        };
+
+        if matches!(input, "if" | "elif" | "then" | "while" | "until") {
+            expecting.extend(&openers);
+        }
+
+        expecting.into_iter().map(|s| s.to_string()).collect()
+    }
+
+    fn match_expectation(left: &UnitType, right: &UnitType) -> bool {
+        match left {
             UnitType::And | UnitType::Or | UnitType::Pipe | UnitType::Redir {..} => {
-                vec![
+                [
                     UnitType::Ident
-                ]
+                ].contains(right)
             },
             _ => { panic!("Unhandled unit type passed to expect_next_unit") }
         }
     }
 
-    fn infer_command(mut block: VecDeque<Unit>,parser: &RshParser) -> Result<Eval, RshParseError> {
+    fn infer_command(mut block: VecDeque<Unit>, parser: &RshParser) -> Result<Eval, RshParseError> {
+
         let mut cur_part = VecDeque::new();
+
         while let Some(unit) = block.pop_front() {
-            match unit.unit_type {
+
+            match unit.utype() {
                 UnitType::And => {
-                    let expected_units = Eval::expect_next_unit(UnitType::And);
-                    if block.front().is_none() || !expected_units.contains(&block.front().unwrap().unit_type) {
+                    if block.front().is_none() {
                         return Err(RshParseError {
-                            abs_pos: unit.word_desc.abs_pos,
-                            span: unit.word_desc.span,
+                            abs_pos: unit.pos(),
+                            span: unit.span(),
                             msg: "Unexpected token following `&&` operator".into(),
-                            input: parser.input.clone()
+                            input: parser.input.clone(),
+                        });
+                    }
+                    let next_unit_type = block.front().unwrap().utype();
+                    if !Eval::match_expectation(unit.utype(), next_unit_type) {
+                        return Err(RshParseError {
+                            abs_pos: unit.pos(),
+                            span: unit.span(),
+                            msg: "Expected identifier after `&&`".into(),
+                            input: parser.input.clone(),
                         });
                     }
                     return Ok(Eval::Chain {
-                        left: Box::new(Eval::infer_command(cur_part,parser)?),
-                        right: Box::new(Eval::infer_command(block,parser)?),
+                        left: Box::new(Eval::infer_command(cur_part, parser)?),
+                        right: Box::new(Eval::infer_command(block, parser)?),
                         operator: ChainOp::And,
                     });
                 }
                 UnitType::Or => {
-                    let expected_units = Eval::expect_next_unit(UnitType::Or);
-                    if block.front().is_none() || !expected_units.contains(&block.front().unwrap().unit_type) {
+                    if block.front().is_none() {
                         return Err(RshParseError {
-                            abs_pos: unit.word_desc.abs_pos,
-                            span: unit.word_desc.span,
+                            abs_pos: unit.pos(),
+                            span: unit.span(),
                             msg: "Unexpected token following `||` operator".into(),
-                            input: parser.input.clone()
+                            input: parser.input.clone(),
+                        });
+                    }
+                    let next_unit_type = block.front().unwrap().utype();
+                    if !Eval::match_expectation(unit.utype(), next_unit_type) {
+                        return Err(RshParseError {
+                            abs_pos: unit.pos(),
+                            span: unit.span(),
+                            msg: "Expected identifier after `||`".into(),
+                            input: parser.input.clone(),
                         });
                     }
                     return Ok(Eval::Chain {
-                        left: Box::new(Eval::infer_command(cur_part,parser)?),
-                        right: Box::new(Eval::infer_command(block,parser)?),
+                        left: Box::new(Eval::infer_command(cur_part, parser)?),
+                        right: Box::new(Eval::infer_command(block, parser)?),
                         operator: ChainOp::Or,
                     });
                 }
-                _ => cur_part.push_back(unit),
+                _ => {
+                    cur_part.push_back(unit);
+                }
             }
         }
 
-        // If we have made it here then we are not in a chain, so put the units back into `block`
         block.extend(cur_part.drain(..));
 
         let mut pipeline_cmds: VecDeque<Eval> = VecDeque::new();
         while let Some(unit) = block.pop_front() {
-            match unit.unit_type {
+
+            match unit.utype() {
                 UnitType::Pipe => {
-                    let expected_units = Eval::expect_next_unit(UnitType::And);
-                    if block.front().is_none() || !expected_units.contains(&block.front().unwrap().unit_type) {
+                    if block.front().is_none() {
                         return Err(RshParseError {
-                            abs_pos: unit.word_desc.abs_pos,
-                            span: unit.word_desc.span,
+                            abs_pos: unit.pos(),
+                            span: unit.span(),
                             msg: "Unexpected token following `|` operator".into(),
-                            input: parser.input.clone()
+                            input: parser.input.clone(),
                         });
                     }
-                    pipeline_cmds.push_back(Eval::infer_command(cur_part.clone(),parser)?);
-                    pipeline_cmds.push_back(Eval::infer_command(block.clone(),parser)?);
+                    let next_unit_type = block.front().unwrap().utype();
+                    if !Eval::match_expectation(unit.utype(), next_unit_type) {
+                        return Err(RshParseError {
+                            abs_pos: unit.pos(),
+                            span: unit.span(),
+                            msg: "Expected identifier after `|`".into(),
+                            input: parser.input.clone(),
+                        });
+                    }
+                    pipeline_cmds.push_back(Eval::infer_command(cur_part.clone(), parser)?);
+                    pipeline_cmds.push_back(Eval::infer_command(block.clone(), parser)?);
                     cur_part.clear();
                 }
-                _ => cur_part.push_back(unit),
+                _ => {
+                    cur_part.push_back(unit);
+                }
             }
         }
+
         if !pipeline_cmds.is_empty() {
             return Ok(Eval::Pipeline { commands: pipeline_cmds });
         }
 
-        // We are not in a pipeline, so put the units back into `block`
         block.extend(cur_part.drain(..));
+
         let mut args: VecDeque<Unit> = VecDeque::new();
-        let cmd_name = block.front().unwrap().clone().word_desc.text;
+        let cmd_name = block
+            .front()
+            .expect("Expected at least one unit in block")
+            .clone()
+            .word_desc
+            .text;
 
         for unit in block {
             args.push_back(unit);
@@ -373,7 +679,6 @@ pub enum UnitType {
     Path {
         relative: bool,
     },
-    Keyword,
     And,
     Or,
     Pipe,
@@ -382,6 +687,7 @@ pub enum UnitType {
         fd_out: i32,
         fd_target: i32,
     },
+    Keyword,
     Ident,
 }
 
@@ -466,6 +772,7 @@ impl Unit {
                         }),
                 }
             }
+            _ if KEYWORDS.contains(&string.as_str()) => Ok(Unit::new(UnitType::Keyword, word_desc)),
             _ if REGEX["ident"].is_match(&string) => Ok(Unit::new(UnitType::Ident, word_desc)),
             _ => Err(RshParseError {
                     abs_pos: word_desc.abs_pos,
@@ -475,13 +782,29 @@ impl Unit {
                 }),
         }
     }
+    pub fn text(&self) -> &str {
+        self.word_desc.text.as_str()
+    }
+    pub fn utype(&self) -> &UnitType {
+        &self.unit_type
+    }
+    pub fn pos(&self) -> usize {
+        self.word_desc.abs_pos
+    }
+    pub fn span(&self) -> (usize,usize) {
+        self.word_desc.span
+    }
+    pub fn start_span(&self) -> usize {
+        self.word_desc.span.0
+    }
+    pub fn end_span(&self) -> usize {
+        self.word_desc.span.1
+    }
+    pub fn flags(&self) -> u32 {
+        self.word_desc.flags
+    }
 }
 
-#[derive(Clone,Debug)]
-pub struct Conditional {
-    condition: Box<Eval>,
-    body: Vec<Eval>,
-}
 
 #[derive(Clone,Debug)]
 pub enum ChainOp {
@@ -541,20 +864,36 @@ impl RshParser {
             Some(next_char)
         } else { None }
     }
-    pub fn tokenize(&mut self) -> Result<(),RshParseError> {
-        let push_word = | // Closure for pushing words
-            cur_blk: &mut VecDeque<WordDesc>,
-            span_start: &mut usize,
-            cur_wd: &mut String,
-            pos: usize|
-            {
-                if !cur_wd.is_empty() {
-                    cur_blk.push_back(WordDesc { text: cur_wd.clone(), abs_pos: *span_start, span: (*span_start, pos) });
-                    *span_start = pos + 1;
-                    cur_wd.clear();
-                }
+    pub fn push_word(
+        cur_blk: &mut VecDeque<WordDesc>,
+        span_start: &mut usize,
+        cur_wd: &mut String,
+        pos: usize)
+        {
+            let get_flags = |word: &String| -> u32 {
+                let mut keyword_flag: u32 = 0;
+                let mut builtin_flag: u32 = 0;
+                let mut function_flag: u32 = 0;
+                let mut alias_flag: u32 = 0;
+                if KEYWORDS.contains(&word.as_str()) { keyword_flag += 1 }
+                if BUILTINS.contains(&word.as_str()) { builtin_flag += 1 }
+                if FUNCTIONS.contains(&word.as_str()) { function_flag += 1 }
+                if ALIASES.contains(&word.as_str()) { alias_flag += 1 }
+                // Shift values to proper bit position
+                builtin_flag  <<= 1;
+                function_flag <<= 2;
+                alias_flag    <<= 3;
+                // Squash flags together
+                keyword_flag | builtin_flag | function_flag | alias_flag
             };
+            if !cur_wd.is_empty() {
+                cur_blk.push_back(WordDesc { text: cur_wd.clone(), abs_pos: *span_start, span: (*span_start, pos), flags: get_flags(cur_wd) });
+                *span_start = pos + 1;
+                cur_wd.clear();
+            }
 
+        }
+    pub fn tokenize(&mut self) -> Result<(),RshParseError> {
         let mut current_word = String::new();
         let mut current_block: VecDeque<WordDesc> = VecDeque::new();
         let mut span_start = self.pos;
@@ -576,7 +915,7 @@ impl RshParser {
                             });
                         } else if self.delim_stack.is_empty() {
                             current_word.push(c);
-                            push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
+                            Self::push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
                             continue;
                         }
                     }
@@ -593,7 +932,7 @@ impl RshParser {
                         } else if self.delim_stack.is_empty() {
                             current_word.push(c);
                             debug!("Pushing word to block: {}",current_word);
-                            push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
+                            Self::push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
                             span_start = self.pos + 1;
                             current_word.clear();
                             continue;
@@ -612,7 +951,7 @@ impl RshParser {
                         } else if self.delim_stack.is_empty() {
                             current_word.push(c);
                             debug!("Pushing word to block: {}",current_word);
-                            push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
+                            Self::push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
                             span_start = self.pos + 1;
                             current_word.clear();
                             continue;
@@ -646,7 +985,7 @@ impl RshParser {
                     debug!("found block delimiter: {}",c);
                     if self.delim_stack.is_empty() {
                         debug!("pushing new block");
-                        push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
+                        Self::push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
                         debug!("current_word: {}",current_word);
                         debug!("current block: {:?}",current_block);
                         span_start = self.pos + 1;
@@ -658,7 +997,7 @@ impl RshParser {
                 ' ' | '\t' if self.delim_stack.is_empty() => {
                     if !current_word.is_empty() {
                         debug!("Pushing word to block: {}",current_word);
-                        push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
+                        Self::push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
                         span_start = self.pos + 1;
                         current_word.clear();
                     }
@@ -699,7 +1038,7 @@ impl RshParser {
                     } else if self.delim_stack.is_empty() {
                             current_word.push(c);
                             debug!("Pushing word to block: {}",current_word);
-                            push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
+                            Self::push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
                             span_start = self.pos + 1;
                             current_word.clear();
                     }
@@ -709,7 +1048,7 @@ impl RshParser {
                     // Pipe handling (|)
                     if !current_word.is_empty() {
                         debug!("Pushing word to block: {}",current_word);
-                        push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
+                        Self::push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
                         span_start = self.pos + 1;
                         current_word.clear();
                     }
@@ -724,7 +1063,7 @@ impl RshParser {
                                 current_word.push(self.advance().unwrap());
                                 debug!("Found other pipe, pushing onto current word, it's now: {}",current_word);
                                 debug!("Pushing word to block: {}",current_word);
-                                push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
+                                Self::push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
                                 debug!("Current blocks: {:#?}",current_block);
                                 current_word.clear();
                                 span_start = self.pos + 1;
@@ -733,7 +1072,7 @@ impl RshParser {
                                 debug!("Returning single pipe: {}",current_word);
                                 // Handle single pipe '|'
                                 debug!("Pushing word to block: {}",current_word);
-                                push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
+                                Self::push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
                                 span_start = self.pos + 1;
                                 current_word.clear();
                                 self.advance();
@@ -746,13 +1085,13 @@ impl RshParser {
                     // Handle '&' for background execution or '&&' for logical AND
                     if !current_word.is_empty() {
                         debug!("Pushing word to block: {}",current_word);
-                        push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
+                        Self::push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
                         span_start = self.pos + 1;
                         current_word.clear();
                     }
                     current_word = "&&".into();
                     self.advance();
-                    push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
+                    Self::push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
                     span_start = self.pos + 1;
                 }
                 '&' | '0'..='9' | '>' | '<' => {
@@ -782,7 +1121,7 @@ impl RshParser {
                             current_word.push(redir_char);
                             count -= 1
                         }
-                        push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
+                        Self::push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
                         span_start = self.pos + 1;
                         current_word.clear();
                     }
@@ -810,7 +1149,7 @@ impl RshParser {
 
         if !current_word.is_empty() {
             debug!("Catching orphaned word: {}",current_word);
-            push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
+            Self::push_word(&mut current_block,&mut span_start,&mut current_word,self.pos);
         }
         debug!("pushing block: {:?}",current_block);
         self.blocks.push_back(current_block.clone());
@@ -829,17 +1168,15 @@ impl RshParser {
                 unit_block.push_back(unit);
                 // Move to the next node
             }
-            self.units.push_back(unit_block);
+            if !unit_block.is_empty() {
+                self.units.push_back(unit_block);
+            }
             unit_block = VecDeque::new();
         }
         Ok(())
     }
 
     pub fn parse_unitlist(&mut self) -> Result<VecDeque<Eval>,RshParseError> {
-        let mut evals = VecDeque::new();
-        while let Some(block) = self.units.pop_front() {
-            evals.push_back(Eval::infer_from(block, self)?);
-        }
-        Ok(evals)
+        Ok(Eval::infer_from_blocks(self.units.clone(), self)?)
     }
 }
