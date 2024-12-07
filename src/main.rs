@@ -30,7 +30,7 @@ use std::fs;
 
 fn main() {
     env_logger::init();
-    let input = "if while true; do inner_cmd; done; then outer_cmd; fi";
+    let input = "if a; then if b; then c; elif d; then e; else f; fi; else while g; do if h; then i; elif j; then k; else while l; do m; done; fi; done; fi";
     let test_script = "test_script.sh";
     let script_input = &fs::read_to_string(test_script);
     let mut parser = parser::RshParser::new(input);
