@@ -30,8 +30,8 @@ use std::fs;
 
 fn main() {
     env_logger::init();
-    let input = "if a; then if b; then c; elif d; then e; else f; fi; else while g; do if h; then i; elif j; then k; else while l; do m; done; fi; done; fi";
-    let test_script = "test_script.sh";
+    let input = "if true; then echo one && two; fi";
+    let test_script = "nested2.sh";
     let script_input = &fs::read_to_string(test_script);
     let mut parser = parser::RshParser::new(input);
     match parser.tokenize() {
