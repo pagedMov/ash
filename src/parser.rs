@@ -153,24 +153,24 @@ impl Keywords {
             Keywords::In,
         ]
     }
-    pub fn openers() -> Vec<Keywords> {
+    pub fn openers() -> Vec<String> {
         vec![
-            Keywords::If,
-            Keywords::While,
-            Keywords::For,
-            Keywords::Until,
-            Keywords::Select,
-            Keywords::Case,
+            "if".into(),
+            "while".into(),
+            "for".into(),
+            "until".into(),
+            "select".into(),
+            "case".into(),
         ]
     }
 
-    pub fn separators() -> Vec<Keywords> {
+    pub fn separators() -> Vec<String> {
         vec![
-            Keywords::Then,
-            Keywords::In,
-            Keywords::Do,
-            Keywords::Elif,
-            Keywords::Else,
+            "then".into(),
+            "in".into(),
+            "do".into(),
+            "elif".into(),
+            "else".into(),
         ]
     }
 
@@ -337,7 +337,8 @@ pub enum Eval {
         operator: ChainOp,
     },
     Pipeline {
-        commands: VecDeque<Eval>,
+        left: Box<Eval>,
+        right: Box<Eval>
     },
     IfThen {
         if_block: Conditional,
@@ -375,867 +376,353 @@ pub struct Conditional {
     body: VecDeque<Eval>,
 }
 
-impl Conditional {
-    pub fn new() -> Self {
-        Self {
-            condition: VecDeque::new(),
-            body: VecDeque::new(),
-        }
-    }
-
-    pub fn push_cond_eval(&mut self, eval: Eval) {
-        self.condition.push_back(eval);
-    }
-
-    pub fn pop_cond_eval(&mut self) -> Option<Eval> {
-        self.condition.pop_back()
-    }
-
-    pub fn peek_condition_eval(&mut self) -> Option<Eval> {
-        if self.condition.back().is_some() {
-            let eval = self.condition.pop_back().unwrap();
-            self.condition.push_back(eval.clone());
-            return Some(eval);
-        } else {
-            None
-        }
-    }
-
-    pub fn push_body_eval(&mut self, eval: Eval) {
-        self.body.push_back(eval);
-    }
-
-    pub fn pop_body_eval(&mut self) -> Option<Eval> {
-        self.body.pop_back()
-    }
-
-    pub fn peek_body_eval(&mut self) -> Option<Eval> {
-        if self.body.back().is_some() {
-            let eval = self.body.pop_back().unwrap();
-            self.body.push_back(eval.clone());
-            return Some(eval);
-        } else {
-            None
-        }
-    }
-}
-
 /// This struct is responsible for handling the logic present in the `infer_from_blocks` Eval method.
 /// One of these represents a layer of context. A stack of these is kept, and a new ParserContext
 /// is pushed to the stack each time a new nested structure is descended into. All of the code in
 /// `infer_from_blocks` executes on the topmost context, except for when it propagates upward after
 /// completing a logical structure
-#[derive(Debug)]
-struct ParserContext<'a> {
-    expecting: VecDeque<Keywords>,
-    keyword_stack: VecDeque<String>,
-    logic_components: VecDeque<Conditional>,
-    loop_vars: VecDeque<Unit>,
-    loop_array: VecDeque<Unit>,
-    parser: &'a RshParser,
-}
+impl Eval {
+    pub fn begin_descent(units: &mut VecDeque<Unit>, parser: &mut RshParser) {
+        let mut evals = VecDeque::new();
+        while !units.is_empty() {
+            evals.push_back(Self::descend(units, parser));
+        }
+        parser.evals.extend(evals.drain(..));
+    }
+    pub fn descend(units: &mut VecDeque<Unit>, parser: &mut RshParser) -> Eval {
+        let mut unit_buffer = VecDeque::new();
+        debug!("Starting descent with units: {:?}", units);
+        // Handle leading and trailing command separators
+        if let Some(unit) = units.pop_front() {
+            if !matches!(unit.utype(), UnitType::Cmdsep) {
+                units.push_front(unit)
+            }
+        }
+        if let Some(unit) = units.pop_back() {
+            if !matches!(unit.utype(), UnitType::Cmdsep) {
+                units.push_back(unit)
+            }
+        }
 
-impl<'a> ParserContext<'a> {
-    pub fn new(parser: &'a RshParser) -> Self {
-        info!("Creating new ParserContext");
-        Self {
-            expecting: VecDeque::from(Keywords::any()),
-            keyword_stack: VecDeque::new(),
-            logic_components: VecDeque::new(),
-            loop_vars: VecDeque::new(),
-            loop_array: VecDeque::new(),
-            parser,
+        while let Some(unit) = units.pop_front() {
+            match unit.utype() {
+                UnitType::Keyword => {
+                    info!("Found keyword, checking if it's an opener");
+                    if Keywords::openers().contains(&unit.text().into()) {
+                        trace!("Keyword is an opener, building structure");
+                        units.push_front(unit);
+                        return Self::build_structure(units, parser);
+                    } else {
+                        panic!(
+                            "Expected an opening keyword but got this: {}",
+                            unit.text()
+                        );
+                    }
+                },
+                _ => unit_buffer.push_back(unit)
+            }
+        }
+        // No structure keywords have been found, now check for chains
+        debug!("No chains found, draining unit_buffer back into units");
+        units.extend(unit_buffer.drain(..));
+
+        while let Some(unit) = units.pop_front() {
+            debug!("Processing unit: {:?}", unit);
+            match unit.utype() {
+                UnitType::And | UnitType::Or => {
+                    let operator = if matches!(unit.utype(), UnitType::And) {
+                        ChainOp::And
+                    } else {
+                        ChainOp::Or
+                    };
+                    info!(
+                        "Found chaining operator: {:?}, descending into unit_buffer and right sides",
+                        operator
+                    );
+
+                    return Eval::Chain {
+                        left: Box::new(Self::descend(&mut unit_buffer, parser)),
+                        right: Box::new(Self::descend(units, parser)),
+                        operator,
+                    };
+                }
+                _ => {
+                    trace!("Pushing unit onto unit_buffer stack: {:?}", unit);
+                    unit_buffer.push_back(unit);
+                }
+            }
+        }
+
+        // No chains have been found, now check for pipelines
+        debug!("No chains found, draining unit_buffer back into units");
+        units.extend(unit_buffer.drain(..));
+        while let Some(unit) = units.pop_front() {
+            debug!("Processing unit for pipeline: {:?}", unit);
+            match unit.utype() {
+                UnitType::Pipe => {
+                    info!("Found pipeline operator, building pipeline");
+
+                    return Eval::Pipeline {
+                        left: Box::new(Self::descend(&mut unit_buffer, parser)),
+                        right: Box::new(Self::descend(units, parser)),
+                    };
+                }
+                _ => {
+                    trace!("Pushing unit onto unit_buffer stack for pipeline: {:?}", unit);
+                    unit_buffer.push_back(unit);
+                }
+            }
+        }
+
+        // No pipelines have been found, check for commands
+        debug!("No pipelines found, draining unit_buffer back into units");
+        units.extend(unit_buffer.drain(..));
+
+        if let Some(unit) = units.pop_front() {
+            debug!("Processing final unit: {:?}", unit);
+            match unit.utype() {
+                UnitType::Ident => {
+                    info!("Found identifier, building invocation");
+                    units.push_front(unit);
+                    Self::build_invocation(units, parser)
+                }
+                _ => panic!(
+                    "Reached lowest depth and couldn't find logic for this unit: {:?}",
+                    unit
+                ),
+            }
+        } else {
+            panic!("Reached max depth with an empty units deque");
         }
     }
 
-    pub fn check_expectations(&self, unit: &Unit) -> Result<(), RshParseError> {
-        debug!("Checking expectations for unit: {:?}", unit);
-        debug!("Current expectations: {:?}", self.expecting);
-        debug!("Current keyword stack: {:?}", self.keyword_stack);
-        // TODO: clean this up
-        let keyword = Keywords::new(unit.text());
-        if !self.expecting.contains(&keyword) {
-            error!(
-                "Unexpected token: {}. Expected one of: {:?}",
-                unit.text(),
-                self.expecting
+    pub fn build_pipeline(units: &mut VecDeque<Unit>, parser: &mut RshParser) -> VecDeque<Eval> {
+        let mut commands: VecDeque<Eval> = VecDeque::new();
+        let mut unit_buffer: VecDeque<Unit> = VecDeque::new();
+        while let Some(unit) = units.pop_front() {
+            match unit.utype() {
+                UnitType::Pipe => {
+                    commands.push_back(Self::descend(&mut unit_buffer, parser));
+                    unit_buffer.clear();
+                }
+                UnitType::Cmdsep => break,
+                _ => {
+                    unit_buffer.push_back(unit);
+                }
+            }
+        }
+        commands
+    }
+
+    pub fn build_invocation(units: &mut VecDeque<Unit>, parser: &mut RshParser) -> Eval {
+        let mut args: VecDeque<Unit> = VecDeque::new();
+        debug!("Starting build_invocation with units: {:?}", units);
+
+        while let Some(unit) = units.pop_front() {
+            debug!("Processing unit: {:?}", unit);
+
+            if matches!(unit.utype(), UnitType::Cmdsep) {
+                debug!("Found command separator: {:?}", unit);
+                break
+            }
+
+            trace!("Pushing unit onto args: {:?}", unit);
+            args.push_back(unit);
+        }
+        if BUILTINS.contains(&args[0].text()) {
+            info!(
+                "Identified as a builtin command: {:?}, returning Eval::Builtin",
+                args[0].text()
             );
-            return Err(RshParseError {
-                abs_pos: unit.pos(),
-                span: unit.span(),
-                msg: format!("unexpected token: {}", unit.text()),
-                input: self.parser.input.clone(),
-            });
+            Eval::Builtin { words: args }
+        } else {
+            info!(
+                "Identified as a regular command: {:?}, returning Eval::Command",
+                args[0].text()
+            );
+            Eval::Command { words: args }
         }
 
-        trace!("Expectations met for token: {}", unit.text());
-        Ok(())
     }
 
-    fn new_expectation(&self, input: &str) -> VecDeque<Keywords> {
+    fn new_expectation(input: String) -> VecDeque<String> {
         trace!("Generating new expectations based on input: {}", input);
-        let mut expecting: Vec<Keywords> = match input {
-            "if" | "elif" => Keywords::from(vec!["then"]),
-            "then" => Keywords::from(vec!["elif", "else", "fi"]),
-            "else" => Keywords::from(vec!["fi"]),
-            "in" | "while" | "until" => Keywords::from(vec!["do"]),
-            "for" | "select" | "case" => Keywords::from(vec!["in"]),
-            "do" => Keywords::from(vec!["done"]),
-            _ => Keywords::from(vec![]),
+        let expecting: Vec<String> = match input.as_str() {
+            "if" | "elif" => vec!["then".into()],
+            "then" => vec!["elif".into(), "else".into(), "fi".into()],
+            "else" => vec!["fi".into()],
+            "in" | "while" | "until" => vec!["do".into()],
+            "for" | "select" | "case" => vec!["in".into()],
+            "do" => vec!["done".into()],
+            _ => vec![],
         };
 
-        if matches!(
-            input,
-            "if" | "do" | "else" | "elif" | "then" | "while" | "until"
-        ) {
-            expecting.extend(Keywords::openers());
+        expecting.into()
+    }
+
+    pub fn build_structure(units: &mut VecDeque<Unit>, parser: &mut RshParser) -> Eval {
+        let mut closer: &str = "";
+        let mut block_type: String = String::new();
+
+        if let Some(unit) = units.front() {
+            block_type = unit.text().into();
+            closer = match unit.text() {
+                "if" => "fi",
+                "for" | "while" | "until" | "select" => "done",
+                "case" => "esac",
+                _ => unreachable!("Unexpected block type: {}", unit.text()),
+            };
+            info!("Starting to build structure for block type: {}", block_type);
         }
 
-        trace!("New expectations: {:?}", expecting);
-        VecDeque::from(expecting)
-    }
-
-    fn zip_if_block(&mut self) -> Result<Eval, RshParseError> {
-        debug!("Zipping if block from logic components");
-        trace!("Components: {:#?}", self.logic_components);
-        let if_block = self.logic_components.pop_front().unwrap();
-        let mut else_block: Option<Conditional> = self.logic_components.pop_back();
-
-        if else_block.is_none() {
-            debug!("Found a simple if statement with no else block");
-            return Ok(Eval::IfThen {
-                if_block,
-                elif_blocks: VecDeque::new(),
-                else_block: None,
-            });
-        }
-
-        if !else_block.clone().unwrap().condition.is_empty() {
-            debug!("Found elif block, pushing back to logic components");
-            self.logic_components.push_back(else_block.clone().unwrap());
-            else_block = None;
-        }
-
-        let mut elif_blocks: VecDeque<Conditional> = VecDeque::new();
-        elif_blocks.extend(self.logic_components.drain(..));
-        debug!(
-            "Completed zipping if block with elif blocks: {:?} and else block: {:?}",
-            elif_blocks, else_block
-        );
-
-        Ok(Eval::IfThen {
-            if_block,
-            elif_blocks,
-            else_block,
-        })
-    }
-
-    pub fn push_keyword(&mut self, unit: &Unit) {
-        debug!("Pushing keyword: {}", unit.text());
-        self.keyword_stack.push_back(unit.text().into());
-        self.expecting = self.new_expectation(unit.text());
-        trace!(
-            "Keyword stack updated: {:?}, New expectations: {:?}",
-            self.keyword_stack,
-            self.expecting
-        );
-    }
-
-    pub fn pop_keyword(&mut self) -> Option<String> {
-        debug!("Popping keyword from stack");
-        let keyword = self.keyword_stack.pop_back();
-        if let Some(keyword) = &keyword {
-            trace!("Popped keyword: {}", keyword);
-        }
-        if let Some(next) = self.next_keyword() {
-            self.expecting = self.new_expectation(next);
-        }
-        trace!("Updated expectations after pop: {:?}", self.expecting);
-        keyword
-    }
-
-    pub fn next_keyword(&self) -> Option<&str> {
-        trace!("Fetching next keyword from stack");
-        self.keyword_stack.back().map(|x| x.as_str())
-    }
-
-    pub fn first_keyword(&self) -> Option<&str> {
-        trace!("Fetching first keyword from stack");
-        self.keyword_stack.front().map(|x| x.as_str())
-    }
-
-    pub fn new_component(&mut self, unit: &Unit) -> Result<(), RshParseError> {
-        debug!("Adding new component for unit: {:?}", unit);
-        self.check_expectations(unit)?;
-        self.logic_components.push_back(Conditional::new());
-        trace!("Updated logic components: {:?}", self.logic_components);
-        Ok(())
-    }
-
-    pub fn pop_component(&mut self) -> Option<Conditional> {
-        debug!("Popping component from logic components");
-        let component = self.logic_components.pop_back();
-        trace!("Popped component: {:?}", component);
-        component
-    }
-
-    pub fn push_condition(&mut self, eval: Eval) {
-        debug!("Pushing condition eval: {:?}", eval);
-        if let Some(mut component) = self.logic_components.pop_back() {
-            component.push_cond_eval(eval);
-            self.logic_components.push_back(component);
-        }
-        trace!("Updated logic components: {:?}", self.logic_components);
-    }
-
-    pub fn pop_condition(&mut self) -> Option<Eval> {
-        if let Some(mut component) = self.logic_components.pop_back() {
-            component.pop_cond_eval()
-        } else {
-            None
-        }
-    }
-
-    pub fn peek_condition(&mut self) -> Option<Eval> {
-        if let Some(mut component) = self.logic_components.pop_back() {
-            component.peek_condition_eval()
-        } else {
-            None
-        }
-    }
-
-    pub fn push_body(&mut self, eval: Eval) {
-        debug!("Pushing body eval: {:?}", eval);
-        if let Some(mut component) = self.logic_components.pop_back() {
-            component.push_body_eval(eval);
-            self.logic_components.push_back(component);
-        }
-        trace!("Updated logic components: {:?}", self.logic_components);
-    }
-
-    pub fn peek_body(&mut self) -> Option<Eval> {
-        if let Some(mut component) = self.logic_components.pop_back() {
-            component.peek_body_eval()
-        } else {
-            None
-        }
-    }
-
-    pub fn pop_body(&mut self) -> Option<Eval> {
-        if let Some(mut component) = self.logic_components.pop_back() {
-            component.pop_body_eval()
-        } else {
-            None
-        }
-    }
-
-    pub fn push_loop_var(&mut self, var: Unit) {
-        debug!("Pushing loop variable: {:?}", var);
-        self.loop_vars.push_back(var.clone());
-        trace!("Updated loop variables: {:?}", self.loop_vars);
-    }
-
-    pub fn push_loop_element(&mut self, var: Unit) {
-        debug!("Pushing loop element: {:?}", var);
-        self.loop_array.push_back(var.clone());
-        trace!("Updated loop array: {:?}", self.loop_array);
-    }
-}
-
-impl Eval {
-    pub fn infer_from_units(
-        mut units: VecDeque<Unit>,
-        parser: &RshParser,
-    ) -> Result<VecDeque<Eval>, RshParseError> {
-        let mut evals: VecDeque<Eval> = VecDeque::new();
-
-        let mut ctx_layers: VecDeque<ParserContext> = VecDeque::from(vec![]);
-        let mut ctx = ParserContext::new(parser);
+        let mut body: VecDeque<Eval> = VecDeque::new();
+        let mut condition: VecDeque<Eval> = VecDeque::new();
+        let mut components: VecDeque<Conditional> = VecDeque::new(); // Conditional = condition + body
         let mut first_run = true;
+        let mut current_context: String = String::new();
+        let mut expecting = VecDeque::new();
+        let mut next_units: VecDeque<Unit> = VecDeque::new();
 
-        // This switch flips after the first word is checked or if a keyword is found in a block
-        // Only one control structure keyword per block, and it must be the first identifier.
+        debug!(
+            "Initialized variables. Closer: '{}', Block type: '{}'",
+            closer, block_type
+        );
+
         while let Some(unit) = units.pop_front() {
-            trace!("Checking unit: {:?}", unit);
+            debug!("Processing unit: {:?}", unit);
 
-            //let mut cur_part = VecDeque::new();
+            if first_run {
+                current_context = unit.text().into();
+                expecting = Self::new_expectation(current_context.clone());
+                first_run = false;
+                debug!(
+                    "First run: Set current_context to '{}', expecting: {:?}",
+                    current_context, expecting
+                );
+            }
 
-            //while let Some(unit) = block.pop_front() {
-
-            //match unit.utype() {
-            //UnitType::Cmdsep => break,
-            //UnitType::And => {
-            //if block.front().is_none() {
-            //return Err(RshParseError {
-            //abs_pos: unit.pos(),
-            //span: unit.span(),
-            //msg: "Unexpected token following `&&` operator".into(),
-            //input: parser.input.clone(),
-            //});
-            //}
-            //let next_unit= block.front().unwrap();
-            //Eval::match_expectation(unit.utype(), next_unit,parser)?;
-            //return Ok(Eval::Chain {
-            //left: Box::new(Eval::infer_command(cur_part, parser)?),
-            //right: Box::new(Eval::infer_command(block, parser)?),
-            //operator: ChainOp::Or,
-            //});
-            //}
-            //UnitType::Or => {
-            //if block.front().is_none() {
-            //return Err(RshParseError {
-            //abs_pos: unit.pos(),
-            //span: unit.span(),
-            //msg: "Unexpected token following `||` operator".into(),
-            //input: parser.input.clone(),
-            //});
-            //}
-            //let next_unit = block.front().unwrap();
-            //Eval::match_expectation(unit.utype(), next_unit,parser)?;
-            //return Ok(Eval::Chain {
-            //left: Box::new(Eval::infer_command(cur_part, parser)?),
-            //right: Box::new(Eval::infer_command(block, parser)?),
-            //operator: ChainOp::Or,
-            //});
-            //}
-            //_ => {
-            //cur_part.push_back(unit);
-            //}
-            //}
-            //}
-            //
-            //block.extend(cur_part.drain(..));
-            //
-            //let mut pipeline_cmds: VecDeque<Eval> = VecDeque::new();
-            //while let Some(unit) = block.pop_front() {
-            //
-            //match unit.utype() {
-            //UnitType::Pipe => {
-            //if block.front().is_none() {
-            //return Err(RshParseError {
-            //abs_pos: unit.pos(),
-            //span: unit.span(),
-            //msg: "Unexpected token following `|` operator".into(),
-            //input: parser.input.clone(),
-            //});
-            //}
-            //let next_unit = block.front().unwrap();
-            //Eval::match_expectation(unit.utype(), next_unit,parser)?;
-            //pipeline_cmds.push_back(Eval::infer_command(cur_part.clone(), parser)?);
-            //pipeline_cmds.push_back(Eval::infer_command(block.clone(), parser)?);
-            //cur_part.clear();
-            //}
-            //_ => {
-            //cur_part.push_back(unit);
-            //}
-            //}
-            //}
-
-            //if !pipeline_cmds.is_empty() {
-            //return Ok(Eval::Pipeline { commands: pipeline_cmds });
-            //}
             match unit.utype() {
-                UnitType::Cmdsep => {
-                    if let Some(keyword) = ctx.next_keyword() {
-                        let mut local_context: VecDeque<Eval> = VecDeque::new();
-                        let mut target: &str;
-                        match keyword {
-                            "then" | "else" | "do" => {
-                                while let Some(eval) = ctx.pop_body() {
-                                    local_context.push_back(eval);
-                                }
-                                target = "ctx_body";
-                            }
-                            "if" | "elif" | "while" | "until" => {
-                                while let Some(eval) = ctx.pop_condition() {
-                                    local_context.push_back(eval);
-                                }
-                                target = "ctx_condition";
-                            }
-                            _ => {
-                                local_context.extend(evals.drain(..));
-                                target = "evals";
-                            }
-                        }
-                        debug!("Handling pipelines");
-                        let mut work_stack: VecDeque<Eval> = VecDeque::new();
-                        let mut pipeline_evals: VecDeque<Eval> = VecDeque::new();
-                        while let Some(eval) = local_context.pop_back() {
-                            trace!("Popped eval in search of pipes: {:?}", eval);
-                            match eval {
-                                Eval::Pipe => {
-                                    if pipeline_evals.is_empty() {
-                                        // TODO: handle unwrap
-                                        let first_cmd = work_stack.pop_back().unwrap();
-                                        pipeline_evals.push_back(first_cmd);
-                                    }
-                                    if let Some(right) = local_context.pop_back() {
-                                        trace!("pushed pipeline eval: {:?}", right);
-                                        pipeline_evals.push_back(right);
-                                    }
-                                }
-                                _ => {
-                                    if !pipeline_evals.is_empty() {
-                                        trace!("pushed pipeline with evals: {:?}", pipeline_evals);
-                                        work_stack.push_back(Eval::Pipeline {
-                                            commands: pipeline_evals.clone(),
-                                        });
-                                        pipeline_evals.clear()
-                                    }
-                                    work_stack.push_back(eval);
-                                }
-                            }
-                        }
-                        // Pipelines constructed, drain back into body
-                        while let Some(eval) = work_stack.pop_front() {
-                            ctx.push_body(eval);
-                        }
-                        let mut chain_stack: VecDeque<(Eval, ChainOp, Option<Eval>)> =
-                            VecDeque::new();
-                        debug!("handling chain operators");
-
-                        while let Some(eval) = local_context.pop_back() {
-                            trace!("popped eval in search of chain operator: {:?}", eval);
-                            match eval {
-                                Eval::And | Eval::Or => {
-                                    let operator = if matches!(eval, Eval::And) {
-                                        ChainOp::And
-                                    } else {
-                                        ChainOp::Or
-                                    };
-                                    trace!("operator found: {:?}", operator);
-
-                                    if chain_stack.is_empty() {
-                                        // Start a new chain with the last command on the work stack
-                                        if let Some(first_cmd) = work_stack.pop_back() {
-                                            trace!("pushing initial value: {:?}", first_cmd);
-                                            chain_stack.push_back((first_cmd, operator, None));
-                                        } else {
-                                            panic!(
-                                                "Syntax error: Missing left-hand side for operator"
-                                            );
-                                        }
-                                    }
-
-                                    // Look for the next command (right-hand side of the operator)
-                                    if let Some(right) = local_context.pop_back() {
-                                        if let Some((lhs, op, rhs)) = chain_stack.back_mut() {
-                                            // If the current chain is incomplete, add the right-hand side
-                                            *op = operator;
-                                            *rhs = Some(right);
-                                        } else {
-                                            // Start a new chain segment
-                                            chain_stack.push_back((right, operator, None));
-                                        }
-                                    } else {
-                                        panic!(
-                                            "Syntax error: Missing right-hand side for operator"
-                                        );
-                                    }
-                                }
-
-                                // Handle regular commands
-                                _ => {
-                                    work_stack.push_back(eval);
-                                }
-                            }
-                        }
-                        // Once all operators are processed, combine the chain stack
-                        while chain_stack.len() > 1 {
-                            let (rhs, _, _) = chain_stack.pop_back().unwrap();
-                            let (lhs, op, mid) = chain_stack.pop_back().unwrap();
-                            chain_stack.push_back((
-                                Eval::Chain {
-                                    left: Box::new(lhs),
-                                    right: Box::new(mid.unwrap()),
-                                    operator: op,
-                                },
-                                op,
-                                Some(rhs),
-                            ));
-                        }
-
-                        // Push the final chain back to the work stack
-                        if let Some((lhs, op, Some(rhs))) = chain_stack.pop_back() {
-                            work_stack.push_back(Eval::Chain {
-                                left: Box::new(lhs),
-                                right: Box::new(rhs),
-                                operator: op,
-                            });
-                        }
-                        // Drain back into body
-                        while let Some(eval) = work_stack.pop_front() {
-                            ctx.push_body(eval);
-                        }
-                    }
-                }
-                UnitType::And | UnitType::Or | UnitType::Pipe => {
-                    debug!("found an operator: {}", unit.text());
-                    if let Some(keyword) = ctx.next_keyword() {
-                        match keyword {
-                            "then" | "else" | "do" => match unit.utype() {
-                                UnitType::And => ctx.push_body(Eval::And),
-                                UnitType::Or => ctx.push_body(Eval::Or),
-                                UnitType::Pipe => ctx.push_body(Eval::Pipe),
-                                _ => unreachable!(),
-                            },
-                            "if" | "elif" | "while" | "until" => match unit.utype() {
-                                UnitType::And => ctx.push_condition(Eval::And),
-                                UnitType::Or => ctx.push_condition(Eval::Or),
-                                UnitType::Pipe => ctx.push_condition(Eval::Pipe),
-                                _ => unreachable!(),
-                            },
-                            _ => {
-                                debug!("Unexpected keyword context: {}", keyword);
-                            }
-                        }
-                    } else {
-                        debug!("No keyword context, treating as standalone operator");
-                        match unit.utype() {
-                            UnitType::And => evals.push_back(Eval::And),
-                            UnitType::Or => evals.push_back(Eval::Or),
-                            UnitType::Pipe => evals.push_back(Eval::Pipe),
-                            _ => unreachable!(),
-                        }
-                    }
-                }
                 UnitType::Keyword => {
-                    // Check if the keyword matches expectations
-                    ctx.check_expectations(&unit)?;
-                    match unit.text() {
-                        "while" | "until" | "if" | "for" => {
-                            if unit.text() == "if" {
-                                if let Some(keyword) = ctx.next_keyword() {
-                                    if matches!(keyword, "else") {
-                                        return Err(RshParseError {
-                                            abs_pos: unit.pos(),
-                                            span: unit.span(),
-                                            msg: "Found 'if' after 'else', use 'elif' instead."
-                                                .into(),
-                                            input: parser.input.clone(),
-                                        });
+                    debug!("Found keyword: {}", unit.text());
+
+                    if unit.text() == closer && expecting.contains(&unit.text().into()) {
+                        info!("Found closer keyword: '{}'", closer);
+                        match block_type.as_str() {
+                            "if" => {
+                                info!("Zipping if statement");
+                                debug!("components: {:?}",components);
+                                let if_block = components.pop_front().unwrap();
+                                let mut else_block: Option<Conditional> = None;
+                                if let Some(last_block) = components.pop_back() {
+                                    if last_block.condition.is_empty() {
+                                        else_block = Some(last_block)
+                                    } else {
+                                        components.push_back(last_block)
                                     }
                                 }
+                                let elif_blocks = components;
+                                debug!(
+                                    "Returning IfThen: if_block: {:?}, elif_blocks: {:?}, else_block: {:?}",
+                                    if_block, elif_blocks, else_block
+                                );
+                                return Eval::IfThen {
+                                    if_block,
+                                    elif_blocks,
+                                    else_block,
+                                };
                             }
-                            if first_run {
-                                debug!("First run...");
-                                first_run = false
+                            "while" => {
+                                return Eval::WhileDo { body: components.pop_back().unwrap() }
+                            }
+                            "until" => {
+                                return Eval::UntilDo { body: components.pop_back().unwrap() }
+                            }
+                            _ => panic!(
+                                "Unexpected block type during structure creation: {}",
+                                block_type
+                            ),
+                        }
+                    }
+
+                    if expecting.contains(&unit.text().into()) {
+                        debug!(
+                            "Keyword '{}' matches expectation. Updating current_context.",
+                            unit.text()
+                        );
+                        current_context = unit.text().into();
+                        expecting = Self::new_expectation(current_context.clone());
+                    } else if !expecting.contains(&unit.text().into()) && current_context != unit.text() {
+                        debug!(
+                            "Keyword '{}' does not match expectation: {:?}",
+                            unit.text(),
+                            expecting
+                        );
+                        next_units.push_back(unit.clone());
+                        debug!("next_units: {:?}",next_units);
+                    }
+                }
+                UnitType::Cmdsep => {
+                    if let Some(next_unit) = units.front() {
+                        if !expecting.contains(&next_unit.text().into()) {
+                            // If the next unit is expected, consume the command separator
+                            // else, push the command separator to the next_units buffer
+                            next_units.push_back(unit);
+                            continue
+                        }
+                    }
+                    debug!("Processing units '{:?}' under context: '{}'", next_units,current_context);
+
+                    match current_context.as_str() {
+                        "if" | "else" | "for" | "elif" | "while" | "until" => {
+                            if matches!(current_context.as_str(), "else" | "for") {
+                                let eval = Self::descend(&mut next_units, parser);
+                                components.push_back(Conditional {
+                                    condition: VecDeque::new(),
+                                    body: VecDeque::from(vec![eval]),
+                                });
                             } else {
-                                debug!("Found opening keyword: {}", unit.text());
-                                debug!("Descending...");
-                                ctx_layers.push_back(ctx);
-                                trace!("ctx_layers after pushing previous context:");
-                                trace!("{:?}", ctx_layers);
-                                ctx = ParserContext::new(parser);
-                            }
-                            ctx.new_component(&unit)?;
-                            ctx.push_keyword(&unit);
-                            if unit.text() == "for" {
-                                debug!("Descending into for loop block");
-                                // For loops are weird so lets get the vars and stuff here
-                                while let Some(inner_unit) = units.pop_front() {
-                                    match inner_unit.utype() {
-                                        UnitType::Ident | UnitType::String { .. } => {
-                                            match ctx.next_keyword() {
-                                                Some("for") => {
-                                                    info!(
-                                                        "pushing loop variable: {}",
-                                                        inner_unit.text()
-                                                    );
-                                                    ctx.push_loop_var(inner_unit.clone());
-                                                }
-                                                Some("in") => {
-                                                    info!(
-                                                        "pushing array element: {}",
-                                                        inner_unit.text()
-                                                    );
-                                                    ctx.push_loop_element(inner_unit.clone());
-                                                }
-                                                _ => return Err(RshParseError {
-                                                    abs_pos: unit.pos(),
-                                                    span: unit.span(),
-                                                    msg: format!(
-                                                        "Unexpected keyword found in for loop: {}",
-                                                        inner_unit.text()
-                                                    ),
-                                                    input: parser.input.clone(),
-                                                }),
-                                            }
-                                        }
-                                        UnitType::Keyword => {
-                                            match inner_unit.text() {
-                                                "in" if ctx.next_keyword() == Some("for") => {
-                                                    info!("found keyword: {}", inner_unit.text());
-                                                    ctx.push_keyword(&inner_unit);
-                                                }
-                                                "do" if ctx.next_keyword() == Some("in") => {
-                                                    info!("found keyword: {}", inner_unit.text());
-                                                    ctx.push_keyword(&inner_unit);
-                                                    break;
-                                                }
-                                                _ => return Err(RshParseError {
-                                                    abs_pos: unit.pos(),
-                                                    span: unit.span(),
-                                                    msg: format!(
-                                                        "Unexpected keyword found in for loop: {}",
-                                                        inner_unit.text()
-                                                    ),
-                                                    input: parser.input.clone(),
-                                                }),
-                                            }
-                                        }
-                                        _ => {
-                                            return Err(RshParseError {
-                                                abs_pos: unit.pos(),
-                                                span: unit.span(),
-                                                msg: format!(
-                                                    "Unexpected unit type found in for loop: {}",
-                                                    inner_unit.text()
-                                                ),
-                                                input: parser.input.clone(),
-                                            })
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        "then" | "do" => {
-                            match unit.text() {
-                                "then" => {
-                                    if !matches!(ctx.next_keyword(), Some("if") | Some("elif")) {
-                                        return Err(RshParseError {
-                                            abs_pos: unit.pos(),
-                                            span: unit.span(),
-                                            msg: format!(
-                                                "then matched with incorrect keyword: {}",
-                                                ctx.next_keyword().unwrap()
-                                            ),
-                                            input: parser.input.clone(),
-                                        });
-                                    }
-                                }
-                                "do" => {
-                                    if !matches!(
-                                        ctx.next_keyword(),
-                                        Some("while") | Some("until") | Some("for") | Some("in")
-                                    ) {
-                                        return Err(RshParseError {
-                                            abs_pos: unit.pos(),
-                                            span: unit.span(),
-                                            msg: format!(
-                                                "do matched with incorrect keyword: {}",
-                                                ctx.next_keyword().unwrap()
-                                            ),
-                                            input: parser.input.clone(),
-                                        });
-                                    }
-                                }
-                                _ => unreachable!(),
-                            }
-                            ctx.push_keyword(&unit);
-                        }
-                        "elif" => {
-                            ctx.new_component(&unit)?;
-                            ctx.push_keyword(&unit);
-                        }
-                        "else" => {
-                            ctx.new_component(&unit)?;
-                            ctx.push_keyword(&unit);
-                        }
-                        "fi" | "done" | "esac" => {
-                            info!("Reached closing delimiter");
-                            debug!(
-                                "ctx_layers.is_empty: {}, ctx.first_keyword().is_some(): {}",
-                                ctx_layers.is_empty(),
-                                ctx.first_keyword().is_some()
-                            );
-                            trace!("ctx_layers before zipping structure: {:?}", ctx_layers);
-                            if ctx_layers.is_empty() && ctx.first_keyword().is_some() {
-                                match ctx.first_keyword().unwrap() {
-                                    "if" => {
-                                        let if_eval = ctx.zip_if_block()?;
-                                        evals.push_back(if_eval);
-                                    }
-                                    "while" => evals.push_back(Eval::WhileDo {
-                                        body: ctx.pop_component().unwrap(),
-                                    }),
-                                    "until" => evals.push_back(Eval::UntilDo {
-                                        body: ctx.pop_component().unwrap(),
-                                    }),
-                                    "for" => evals.push_back(Eval::ForDo {
-                                        vars: ctx.loop_vars.clone(),
-                                        array: ctx.loop_array.clone(),
-                                        body: ctx.pop_component().unwrap(),
-                                    }),
-                                    _ => {
-                                        return Err(RshParseError {
-                                            abs_pos: unit.pos(),
-                                            span: unit.span(),
-                                            msg: format!(
-                                                "Unexpected unit type {}!",
-                                                ctx.first_keyword().unwrap()
-                                            ),
-                                            input: parser.input.clone(),
-                                        })
-                                    }
-                                }
-                                ctx = ParserContext::new(parser);
-                            } else if !ctx.keyword_stack.is_empty() && ctx.first_keyword().is_some()
-                            {
-                                let mut outer_ctx = ctx_layers.pop_front().unwrap();
-                                let keyword = ctx.next_keyword().unwrap();
-                                match keyword {
-                                    "do" | "then" | "else" => {
-                                        match ctx.first_keyword().unwrap() {
-                                            "if" => {
-                                                // Make a vecdeque here because
-                                                // bodystack is two dimensional
-                                                // This allows a single body to have
-                                                // many nested constructs
-                                                let if_eval = ctx.zip_if_block()?;
-                                                outer_ctx.push_body(if_eval);
-                                            }
-                                            "while" => {
-                                                let body = ctx.pop_component().unwrap();
-                                                outer_ctx.push_body(Eval::WhileDo { body })
-                                            }
-                                            "until" => {
-                                                let body = ctx.pop_component().unwrap();
-                                                outer_ctx.push_body(Eval::UntilDo { body })
-                                            }
-                                            "for" => {
-                                                let vars = ctx.loop_vars.clone();
-                                                let array = ctx.loop_array.clone();
-                                                let body = ctx.pop_component().unwrap();
-                                                outer_ctx.push_body(Eval::ForDo {
-                                                    vars,
-                                                    array,
-                                                    body,
-                                                });
-                                            }
-                                            _ => unreachable!(),
-                                        }
-                                    }
-                                    "if" | "while" | "until" | "elif" => {
-                                        match ctx.first_keyword().unwrap() {
-                                            "if" => {
-                                                let if_eval = ctx.zip_if_block()?;
-                                                outer_ctx.push_condition(if_eval);
-                                            }
-                                            "while" => {
-                                                let body = ctx.pop_component().unwrap();
-                                                outer_ctx.push_condition(Eval::WhileDo { body })
-                                            }
-                                            "until" => {
-                                                let body = ctx.pop_component().unwrap();
-                                                outer_ctx.push_condition(Eval::UntilDo { body })
-                                            }
-                                            "for" => {
-                                                let vars = ctx.loop_vars.clone();
-                                                let array = ctx.loop_array.clone();
-                                                let body = ctx.pop_component().unwrap();
-                                                outer_ctx.push_condition(Eval::ForDo {
-                                                    vars,
-                                                    array,
-                                                    body,
-                                                });
-                                            }
-                                            _ => unreachable!(),
-                                        }
-                                    }
-                                    _ => return Err(RshParseError {
-                                        abs_pos: unit.pos(),
-                                        span: unit.span(),
-                                        msg: format!(
-                                            "Unexpected keyword context while finalizing 'if': {}",
-                                            keyword
-                                        ),
-                                        input: parser.input.clone(),
-                                    }),
-                                }
-                                ctx = outer_ctx;
-                                debug!("Moving down a layer of context...");
+                                let eval = Self::descend(&mut next_units, parser);
+                                debug!("Pushing to condition: {:?}", eval);
+                                condition.push_back(eval);
                             }
                         }
                         _ => {
-                            ctx.push_keyword(&unit);
+                            let eval = Self::descend(&mut next_units, parser);
+                            debug!("Pushing to body: {:?}", eval);
+                            body.push_back(eval);
+                            debug!(
+                                "Finalizing component for context '{}'. Adding to components.",
+                                current_context
+                            );
+                            components.push_back(Conditional {
+                                condition: condition.clone(),
+                                body: body.clone(),
+                            });
+                            condition.clear();
+                            body.clear();
                         }
-                    }
-                }
-                UnitType::Ident => {
-                    let mut args: VecDeque<Unit> = VecDeque::from(vec![unit]);
-
-                    while let Some(unit) = units.pop_front() {
-                        if !matches!(
-                            unit.utype(),
-                            UnitType::Cmdsep | UnitType::And | UnitType::Or | UnitType::Pipe
-                        ) {
-                            args.push_back(unit);
-                        } else {
-                            // Put the operator back
-                            units.push_front(unit);
-                            break;
-                        }
-                    }
-                    let command: Eval;
-                    if BUILTINS.contains(&args.front().unwrap().text()) {
-                        command = Eval::Builtin { words: args };
-                    } else {
-                        command = Eval::Command { words: args };
-                    }
-                    // Replace the identifier
-                    if let Some(keyword) = ctx.next_keyword() {
-                        match keyword {
-                            "then" | "else" | "do" => {
-                                ctx.push_body(command);
-                            }
-                            "if" | "elif" | "while" | "until" => {
-                                debug!("Adding to condition under context '{}'", keyword);
-                                ctx.push_condition(command);
-                            }
-                            _ => {
-                                debug!("Unexpected keyword context: {}", keyword);
-                            }
-                        }
-                    } else {
-                        debug!("No keyword context, treating as standalone command");
-                        evals.push_back(command);
                     }
                 }
                 _ => {
-                    debug!("Encountered unexpected unit type: {:?}", unit.utype());
-                    return Err(RshParseError {
-                        abs_pos: unit.pos(),
-                        span: unit.span(),
-                        msg: "Failed to infer evaluation from unit".into(),
-                        input: parser.input.clone(),
-                    });
-                }
+                    trace!("defaulting to pushing to next_units for unit: {:?}",unit);
+                    next_units.push_back(unit.clone())
+                },
+            }
+
+            if unit.text() == closer {
+                info!("Encountered closing keyword '{}'. Breaking loop.", closer);
+                break;
             }
         }
 
-        debug!("Final evals: {:?}", evals);
-        Ok(evals)
-    }
-
-    fn match_expectation(
-        left: &UnitType,
-        right: &Unit,
-        parser: &RshParser,
-    ) -> Result<bool, RshParseError> {
-        match left {
-            UnitType::And | UnitType::Or | UnitType::Pipe | UnitType::Redir { .. } => {
-                Ok([UnitType::Ident].contains(right.utype()))
-            }
-            _ => Err(RshParseError {
-                abs_pos: right.pos(),
-                span: right.span(),
-                msg: "unhandled unit type passed to expect_next_unit".into(),
-                input: parser.input.clone(),
-            }),
-        }
+        debug!(
+            "Finished parsing structure for block type '{}'. Returning todo!",
+            block_type
+        );
+        todo!()
     }
 }
+
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Unit {
@@ -1447,7 +934,7 @@ pub struct RshParser {
     chars: VecDeque<char>,
     words: VecDeque<WordDesc>,
     units: VecDeque<Unit>,
-    evals: VecDeque<Eval>,
+    pub evals: VecDeque<Eval>,
     delim_stack: VecDeque<(usize, char)>,
     pos: usize,
     window: VecDeque<char>,
@@ -1468,6 +955,9 @@ impl RshParser {
             window_start_col: 1,
         };
         parser
+    }
+    pub fn get_evals(&self) -> VecDeque<Eval> {
+        self.evals.clone()
     }
 
     pub fn print_tokens(&self) {
@@ -1819,6 +1309,8 @@ impl RshParser {
     }
 
     pub fn parse_unitlist(&mut self) -> Result<VecDeque<Eval>, RshParseError> {
-        Eval::infer_from_units(self.units.clone(), self)
+        let mut units = self.units.clone();
+        Eval::begin_descent(&mut units, self);
+        Ok(self.evals.clone())
     }
 }
