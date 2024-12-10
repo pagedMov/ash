@@ -1,9 +1,13 @@
+use std::collections::VecDeque;
+
 use tokio::sync::mpsc;
 use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};
 use thiserror::Error;
 
-use crate::{rsh::parse::{ast,redir,case},parser, prompt};
+use crate::parser::{RshParseError,ASTNode};
+use crate::{execute, prompt};
+use crate::shellenv::ShellEnv;
 //use crate::execute::NodeWalker;
 
 #[derive(Debug,Error,PartialEq)]
@@ -15,7 +19,7 @@ pub enum ShellError {
     InvalidSyntax(String),
 
     #[error("Parsing failed: {0}")]
-    ParsingError(String),
+    ParsingError(RshParseError),
 
     #[error("Execution faiiled for command '{0}' with exit code {1}")]
     ExecFailed(String,i32),
@@ -39,10 +43,9 @@ impl ShellError {
 #[derive(Debug,PartialEq)]
 pub enum ShellEvent {
     Prompt,
-    UserInput(String),
     Signal(Signals),
     SubprocessExited(u32,i32),
-    NewASTNode(ast::ASTNode),
+    NewAST(VecDeque<ASTNode>),
     CatchError(ShellError),
     Exit(i32)
 }
@@ -65,29 +68,39 @@ pub enum Signals {
 pub struct EventLoop {
     sender: mpsc::Sender<ShellEvent>,
     receiver: mpsc::Receiver<ShellEvent>,
-}
-
-impl Default for EventLoop {
-    fn default() -> Self {
-        Self::new()
-    }
+    shellenv: ShellEnv
 }
 
 impl EventLoop {
-    pub fn new() -> Self {
-        let (sender,receiver) = mpsc::channel(100);
+    /// Creates a new `EventLoop` instance with a message passing channel.
+    ///
+    /// # Returns
+    /// A new instance of `EventLoop` with a sender and receiver for inter-task communication.
+    pub fn new(shellenv: ShellEnv) -> Self {
+        let (sender, receiver) = mpsc::channel(100);
         Self {
             sender,
             receiver,
+            shellenv
         }
     }
 
-
+    /// Provides a clone of the `sender` channel to send events to the event loop.
+    ///
+    /// # Returns
+    /// A clone of the `mpsc::Sender<ShellEvent>` for sending events.
     pub fn inbox(&self) -> mpsc::Sender<ShellEvent> {
         self.sender.clone()
     }
 
-    pub async fn listen(&mut self) -> Result<i32,ShellError> {
+    /// Starts the event loop and listens for incoming events.
+    ///
+    /// This method spawns a separate task to listen for system signals using a `SignalListener`,
+    /// and then begins processing events from the channel.
+    ///
+    /// # Returns
+    /// A `Result` containing the exit code (`i32`) or a `ShellError` if an error occurs.
+    pub async fn listen(&mut self) -> Result<i32, ShellError> {
         let mut signal_listener = SignalListener::new(self.inbox());
         tokio::spawn(async move {
             signal_listener.signal_listen().await
@@ -95,46 +108,55 @@ impl EventLoop {
         self.event_listen().await
     }
 
-    pub async fn event_listen(&mut self) -> Result<i32,ShellError> {
+    /// Processes events from the event loop's receiver channel.
+    ///
+    /// This method handles different types of `ShellEvent` messages, such as prompting the user,
+    /// handling exit signals, processing new AST nodes, and responding to subprocess exits or errors.
+    ///
+    /// # Returns
+    /// A `Result` containing the exit code (`i32`) or a `ShellError` if an error occurs.
+    pub async fn event_listen(&mut self) -> Result<i32, ShellError> {
         debug!("Event loop started.");
         let mut code: i32 = 0;
 
-        // TODO: Find a better way to initialize the prompt? idk might be fine
+        // Send an initial prompt event to the loop.
         self.sender.send(ShellEvent::Prompt).await.unwrap();
         while let Some(event) = self.receiver.recv().await {
             match event {
                 ShellEvent::Prompt => {
+                    // Trigger the prompt logic.
                     prompt::prompt(self.inbox()).await;
                 }
                 ShellEvent::Exit(exit_code) => {
-                    // TODO: properly implement using the exit code here
+                    // Handle exit events and set the exit code.
                     code = exit_code;
                 }
-                ShellEvent::UserInput(input) => {
-                    //interpret::interpret(input, self.inbox()).await;
+                ShellEvent::NewAST(tree) => {
+                    // Log and process a new AST node.
+                    debug!("new tree:\n {:#?}", tree);
+                    let mut walker = execute::NodeWalker::new(tree,&mut self.shellenv);
+                    match walker.start_walk() {
+                        Ok(code) => {
+                            info!("Last exit status: {:?}",code);
+                        },
+                        Err(e) => self.inbox().send(ShellEvent::CatchError(e)).await.unwrap()
+                    }
                 }
-                ShellEvent::NewASTNode(node) => {
-                    info!("new node:\n {:#?}", node);
-                    //let sender = self.inbox();
-                    //tokio::spawn(async move {
-                        //let _ = NodeWalker::new(sender, node).walk().await;
-                    //});
-                }
-                ShellEvent::SubprocessExited(pid,exit_code) => {
-                    // TODO: Handle subprocesses exiting
-                    debug!("Process '{}' exited with code {}",pid,exit_code);
+                ShellEvent::SubprocessExited(pid, exit_code) => {
+                    // Log the exit of a subprocess.
+                    debug!("Process '{}' exited with code {}", pid, exit_code);
                 }
                 ShellEvent::Signal(signal) => {
-                    // TODO: Handle signals
+                    // Handle received signals.
                     debug!("Received signal: {:?}", signal);
                 }
                 ShellEvent::CatchError(err) => {
-                    // TODO: Figure out how to handle fatals properly
+                    // Handle errors, exiting if fatal.
                     if err.is_fatal() {
-                        error!("Fatal: {:?}",err);
+                        error!("Fatal: {}", err);
                         std::process::exit(1);
                     } else {
-                        error!("Error: {:?}",err);
+                        error!("Error: {}", err);
                     }
                 }
             }

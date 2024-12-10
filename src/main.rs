@@ -21,33 +21,19 @@
 //}
 
 pub mod parser;
-pub mod event;
 pub mod prompt;
-mod rsh;
+pub mod event;
+pub mod execute;
+pub mod shellenv;
 
-use std::fs;
+use crate::event::EventLoop;
+use crate::shellenv::ShellEnv;
 
 
-fn main() {
+#[tokio::main]
+async fn main() {
     env_logger::init();
-    let input = "if echo && echo; then echo || echo; else echo | echo; fi";
-    let test_script = "nested2.sh";
-    let script_input = &fs::read_to_string(test_script).unwrap();
-    let mut parser = parser::RshParser::new(script_input);
-    match parser.tokenize() {
-        Ok(_) => {
-            parser.print_tokens();
-            match parser.parse_blocks() {
-                Ok(_) => {
-                    parser.print_units();
-                    match parser.parse_unitlist() {
-                        Ok(_) => println!("final evaluations: {:#?}",parser.get_evals()),
-                        Err(e) => println!("{}",e)
-                    }
-                }
-                Err(e) => println!("{}",e),
-            }
-        }
-        Err(e) => println!("{}",e),
-    }
+    let mut shellenv = ShellEnv::new(true);
+    let mut event_loop = EventLoop::new(shellenv);
+    let _ = event_loop.listen().await;
 }

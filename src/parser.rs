@@ -1,61 +1,42 @@
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use log::{debug, error, info, trace};
 use regex::Regex;
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::path::PathBuf;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::event::ShellEvent;
-use crate::rsh::parse::ast::ASTNode;
-
-lazy_static! {
-    pub static ref REGEX: HashMap<String, Regex> = {
+macro_rules! define_patterns {
+    ($($name:expr => $pattern:expr),* $(,)?) => {{
         let mut m = HashMap::new();
-        m.insert(
-            "redirection".into(),
-            Regex::new(r"^([0-9]+)?(>{1,2}|<{1,3})([&]?[0-9]+)?$").unwrap(),
-        );
-        m.insert(
-            "path".into(),
-            Regex::new(r"^(\/(?:[^\/]+\/)*[^\/]*|(?:\.[\/\w\-]+\/?))$").unwrap(),
-        );
-        m.insert("range_num".into(), Regex::new(r"^\{\d+\.\.\d+\}$").unwrap());
-        m.insert(
-            "rsh_shebang".into(),
-            Regex::new(r"^#!((?:/[^\s]+)+)((?:\s+arg:[a-zA-Z][a-zA-Z0-9_\-]*)*)$").unwrap(),
-        );
-        m.insert(
-            "range_alpha".into(),
-            Regex::new(r"^\{[a-zA-Z]\.\.[a-zA-Z]\}$").unwrap(),
-        );
-        m.insert("process_sub".into(), Regex::new(r"^>\(.*\)$").unwrap());
-        m.insert("command_sub".into(), Regex::new(r"^\$\([^\)]+\)$").unwrap());
-        m.insert(
-            "arithmetic".into(),
-            Regex::new(r"^\$\(\([^\)]+\)\)$").unwrap(),
-        );
-        m.insert("subshell".into(), Regex::new(r"^\([^\)]+\)$").unwrap());
-        m.insert("test".into(), Regex::new(r"^\[\s*(.*?)\s*\]$").unwrap());
-        m.insert("string".into(), Regex::new(r#"^\"([^\"]*)\"$"#).unwrap());
-        m.insert(
-            "var_sub".into(),
-            Regex::new(r"^\$([A-Za-z_][A-Za-z0-9_]*)$").unwrap(),
-        );
-        m.insert("block".into(), Regex::new(r"^\{[^{}]*\}$").unwrap());
-        m.insert(
-            "assignment".to_string(),
-            Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*=.*$").unwrap(),
-        );
-        m.insert(
-            "operator".into(),
-            Regex::new(r"(?:&&|\|\||[><]=?|[|;&])").unwrap(),
-        );
-        m.insert("ident".into(), Regex::new(r"^[A-Za-z0-9_\-/\.]*$").unwrap());
-        m.insert("cmdsep".into(), Regex::new(r"^(?:\n|;)$").unwrap());
+        $(m.insert($name, Regex::new($pattern).unwrap());)*
         m
-    };
+    }};
 }
+
+pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
+    define_patterns! {
+        "redirection" => r"^([0-9]+)?(>{1,2}|<{1,3})(?:[&]?([0-9]+))?$",
+        "path" => r"^(\/(?:[^\/]+\/)*[^\/]*|(?:\.[\/\w\-]+\/?))$",
+        "range_num" => r"^\{\d+\.\.\d+\}$",
+        "rsh_shebang" => r"^#!((?:/[^\s]+)+)((?:\s+arg:[a-zA-Z][a-zA-Z0-9_\-]*)*)$",
+        "range_alpha" => r"^\{[a-zA-Z]\.\.[a-zA-Z]\}$",
+        "process_sub" => r"^>\(.*\)$",
+        "command_sub" => r"^\$\([^\)]+\)$",
+        "arithmetic" => r"^\$\(\([^\)]+\)\)$",
+        "subshell" => r"^\([^\)]+\)$",
+        "test" => r"^\[\s*(.*?)\s*\]$",
+        "string" => r#"^\"([^\"]*)\"$"#,
+        "var_sub" => r"^\$([A-Za-z_][A-Za-z0-9_]*)$",
+        "block" => r"^\{[^{}]*\}$",
+        "assignment" => r"^[A-Za-z_][A-Za-z0-9_]*=.*$",
+        "operator" => r"(?:&&|\|\||[><]=?|[|;&])",
+        "cmdsep" => r"^(?:\n|;)$",
+        "ident" => r"^[\x20-\x7E]*$",
+    }
+});
 
 const FUNCTIONS: [&str; 1] = [
     // Will replace this with an actual functions implementation later
@@ -70,7 +51,7 @@ const ALIASES: [&str; 1] = [
 ];
 
 const BUILTINS: [&str; 13] = [
-    "echo", "set", "shift", "export", "readonly", "declare", "local", "unset", "trap", "eval",
+    "echo", "set", "shift", "export", "readonly", "declare", "local", "unset", "trap", "node",
     "exec", "source", "wait",
 ];
 
@@ -201,7 +182,7 @@ pub struct WordDesc {
     flags: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RshParseError {
     abs_pos: usize,
     span: (usize, usize),
@@ -321,24 +302,24 @@ impl fmt::Display for RshParseError {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Eval {
+pub enum ASTNode {
     Command {
-        words: VecDeque<Unit>,
+        words: VecDeque<Token>,
     },
     Builtin {
-        words: VecDeque<Unit>,
+        words: VecDeque<Token>,
     },
     Function {
-        words: VecDeque<Unit>,
+        words: VecDeque<Token>,
     },
     Chain {
-        left: Box<Eval>,
-        right: Box<Eval>,
+        left: Box<ASTNode>,
+        right: Box<ASTNode>,
         operator: ChainOp,
     },
     Pipeline {
-        left: Box<Eval>,
-        right: Box<Eval>
+        left: Box<ASTNode>,
+        right: Box<ASTNode>
     },
     IfThen {
         if_block: Conditional,
@@ -352,8 +333,8 @@ pub enum Eval {
         body: Conditional,
     },
     ForDo {
-        vars: VecDeque<Unit>,
-        array: VecDeque<Unit>,
+        vars: VecDeque<Token>,
+        array: VecDeque<Token>,
         body: Conditional,
     },
     CaseIn {
@@ -362,7 +343,7 @@ pub enum Eval {
     },
     FuncDef {
         func_name: WordDesc,
-        func_body: Vec<Eval>,
+        func_body: Vec<ASTNode>,
     },
     Cmdsep,
     And,
@@ -372,177 +353,167 @@ pub enum Eval {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Conditional {
-    condition: VecDeque<Eval>,
-    body: VecDeque<Eval>,
+    condition: VecDeque<ASTNode>,
+    body: VecDeque<ASTNode>,
 }
 
-/// This struct is responsible for handling the logic present in the `infer_from_blocks` Eval method.
-/// One of these represents a layer of context. A stack of these is kept, and a new ParserContext
-/// is pushed to the stack each time a new nested structure is descended into. All of the code in
-/// `infer_from_blocks` executes on the topmost context, except for when it propagates upward after
-/// completing a logical structure
-impl Eval {
-    pub fn begin_descent(units: &mut VecDeque<Unit>, parser: &mut RshParser) {
-        let mut evals = VecDeque::new();
-        while !units.is_empty() {
-            evals.push_back(Self::descend(units, parser));
+impl ASTNode {
+    pub fn begin_descent(tokens: &mut VecDeque<Token>, parser: &mut RshParser) {
+        let mut ast = VecDeque::new();
+        while !tokens.is_empty() {
+            ast.push_back(Self::descend(tokens, parser));
         }
-        parser.evals.extend(evals.drain(..));
+        parser.ast = ast;
     }
-    pub fn descend(units: &mut VecDeque<Unit>, parser: &mut RshParser) -> Eval {
-        let mut unit_buffer = VecDeque::new();
-        debug!("Starting descent with units: {:?}", units);
+    /// This takes a list of tokens, and then performs some check on all of them. If the check is
+    /// ever found to be true, the function returns. The state of the buffer and tokens stack is
+    /// left as is, which is useful for finding the left and right side of pipelines and command chains
+    pub fn process_tokens<F>(buffer: &mut VecDeque<Token>, tokens: &mut VecDeque<Token>, mut f: F) -> Option<Token>
+        where F: FnMut(&Token) -> bool,
+    {
+        while let Some(token) = tokens.pop_front() {
+            // If we find a cmdsep, we have exhausted the scope of this invocation
+            // Put everything back in the same order it was taken out
+            if let TokenType::Cmdsep = token.class() {
+                tokens.push_front(token);
+                while let Some(token) = buffer.pop_back() {
+                    tokens.push_front(token);
+                }
+                break
+            }
+            // If the condition returns true, then break this operation and return the token
+            // This leaves both the buffer and the original deque in their current state, easily
+            // showing both sides of an operation such as pipelines or chains while returning the
+            // operator which it broke on
+            match f(&token) {
+                true => return Some(token),
+                false => buffer.push_back(token),
+            }
+        }
+        tokens.extend(buffer.drain(..));
+        None
+    }
+    pub fn descend(tokens: &mut VecDeque<Token>, parser: &mut RshParser) -> ASTNode {
+        let mut buffer = VecDeque::new();
+        debug!("Starting descent with tokens: {:?}", tokens);
         // Handle leading and trailing command separators
-        if let Some(unit) = units.pop_front() {
-            if !matches!(unit.utype(), UnitType::Cmdsep) {
-                units.push_front(unit)
+        if let Some(token) = tokens.pop_front() {
+            if !matches!(token.class(), TokenType::Cmdsep) {
+                tokens.push_front(token)
             }
         }
-        if let Some(unit) = units.pop_back() {
-            if !matches!(unit.utype(), UnitType::Cmdsep) {
-                units.push_back(unit)
+        if let Some(token) = tokens.pop_back() {
+            if !matches!(token.class(), TokenType::Cmdsep) {
+                tokens.push_back(token)
             }
         }
 
-        while let Some(unit) = units.pop_front() {
-            match unit.utype() {
-                UnitType::Keyword => {
-                    info!("Found keyword, checking if it's an opener");
-                    if Keywords::openers().contains(&unit.text().into()) {
-                        trace!("Keyword is an opener, building structure");
-                        units.push_front(unit);
-                        return Self::build_structure(units, parser);
-                    } else {
-                        panic!(
-                            "Expected an opening keyword but got this: {}",
-                            unit.text()
-                        );
-                    }
-                },
-                _ => unit_buffer.push_back(unit)
+        if let Some(token) = Self::process_tokens(&mut buffer,tokens,|t| *t.class() == TokenType::Keyword) {
+            info!("Found keyword, checking if it's an opener");
+            if Keywords::openers().contains(&token.text().into()) {
+                trace!("Keyword is an opener, building structure");
+                tokens.push_front(token);
+                return Self::build_structure(tokens, parser);
+            } else {
+                panic!(
+                    "Expected an opening keyword but got this: {}",
+                    token.text()
+                );
             }
         }
+
         // No structure keywords have been found, now check for chains
-        debug!("No chains found, draining unit_buffer back into units");
-        units.extend(unit_buffer.drain(..));
+        if let Some(token) = Self::process_tokens(&mut buffer,tokens,|t| matches!(*t.class(), TokenType::And | TokenType::Or)) {
+            let operator = if *token.class() == TokenType::And {
+                ChainOp::And
+            } else {
+                ChainOp::Or
+            };
+            info!( "Found chaining operator: {:?}, descending into buffer and right sides", operator);
 
-        while let Some(unit) = units.pop_front() {
-            debug!("Processing unit: {:?}", unit);
-            match unit.utype() {
-                UnitType::And | UnitType::Or => {
-                    let operator = if matches!(unit.utype(), UnitType::And) {
-                        ChainOp::And
-                    } else {
-                        ChainOp::Or
-                    };
-                    info!(
-                        "Found chaining operator: {:?}, descending into unit_buffer and right sides",
-                        operator
-                    );
-
-                    return Eval::Chain {
-                        left: Box::new(Self::descend(&mut unit_buffer, parser)),
-                        right: Box::new(Self::descend(units, parser)),
-                        operator,
-                    };
-                }
-                _ => {
-                    trace!("Pushing unit onto unit_buffer stack: {:?}", unit);
-                    unit_buffer.push_back(unit);
-                }
-            }
+            return ASTNode::Chain {
+                left: Box::new(Self::descend(&mut buffer, parser)),
+                right: Box::new(Self::descend(tokens, parser)),
+                operator,
+            };
         }
+
 
         // No chains have been found, now check for pipelines
-        debug!("No chains found, draining unit_buffer back into units");
-        units.extend(unit_buffer.drain(..));
-        while let Some(unit) = units.pop_front() {
-            debug!("Processing unit for pipeline: {:?}", unit);
-            match unit.utype() {
-                UnitType::Pipe => {
-                    info!("Found pipeline operator, building pipeline");
-
-                    return Eval::Pipeline {
-                        left: Box::new(Self::descend(&mut unit_buffer, parser)),
-                        right: Box::new(Self::descend(units, parser)),
-                    };
-                }
-                _ => {
-                    trace!("Pushing unit onto unit_buffer stack for pipeline: {:?}", unit);
-                    unit_buffer.push_back(unit);
-                }
-            }
+        if let Some(_token) = Self::process_tokens(&mut buffer,tokens,|t| *t.class() == TokenType::Pipe) {
+            return ASTNode::Pipeline {
+                left: Box::new(Self::descend(&mut buffer, parser)),
+                right: Box::new(Self::descend(tokens, parser)),
+            };
         }
 
-        // No pipelines have been found, check for commands
-        debug!("No pipelines found, draining unit_buffer back into units");
-        units.extend(unit_buffer.drain(..));
-
-        if let Some(unit) = units.pop_front() {
-            debug!("Processing final unit: {:?}", unit);
-            match unit.utype() {
-                UnitType::Ident => {
-                    info!("Found identifier, building invocation");
-                    units.push_front(unit);
-                    Self::build_invocation(units, parser)
-                }
-                _ => panic!(
-                    "Reached lowest depth and couldn't find logic for this unit: {:?}",
-                    unit
-                ),
-            }
+        if let Some(token) = Self::process_tokens(&mut buffer,tokens,|t| matches!(*t.class(), TokenType::Ident | TokenType::String { .. })) {
+                info!("Found identifier, building invocation");
+                tokens.push_front(token);
+                Self::build_invocation(tokens, parser)
         } else {
-            panic!("Reached max depth with an empty units deque");
+            panic!("Reached the bottom of the descent function with these tokens: {:#?}",tokens);
         }
     }
 
-    pub fn build_pipeline(units: &mut VecDeque<Unit>, parser: &mut RshParser) -> VecDeque<Eval> {
-        let mut commands: VecDeque<Eval> = VecDeque::new();
-        let mut unit_buffer: VecDeque<Unit> = VecDeque::new();
-        while let Some(unit) = units.pop_front() {
-            match unit.utype() {
-                UnitType::Pipe => {
-                    commands.push_back(Self::descend(&mut unit_buffer, parser));
-                    unit_buffer.clear();
+    pub fn build_pipeline(tokens: &mut VecDeque<Token>, parser: &mut RshParser) -> VecDeque<ASTNode> {
+        let mut commands: VecDeque<ASTNode> = VecDeque::new();
+        let mut buffer: VecDeque<Token> = VecDeque::new();
+        while let Some(token) = tokens.pop_front() {
+            match token.class() {
+                TokenType::Pipe => {
+                    commands.push_back(Self::descend(&mut buffer, parser));
+                    buffer.clear();
                 }
-                UnitType::Cmdsep => break,
+                TokenType::Cmdsep => break,
                 _ => {
-                    unit_buffer.push_back(unit);
+                    buffer.push_back(token);
                 }
             }
         }
         commands
     }
 
-    pub fn build_invocation(units: &mut VecDeque<Unit>, parser: &mut RshParser) -> Eval {
-        let mut args: VecDeque<Unit> = VecDeque::new();
-        debug!("Starting build_invocation with units: {:?}", units);
+    pub fn build_invocation(tokens: &mut VecDeque<Token>, parser: &mut RshParser) -> ASTNode {
+        let mut args: VecDeque<Token> = VecDeque::new();
+        debug!("Starting build_invocation with tokens: {:?}", tokens);
 
-        while let Some(unit) = units.pop_front() {
-            debug!("Processing unit: {:?}", unit);
+        while let Some(token) = tokens.pop_front() {
+            debug!("Processing token: {:?}", token);
 
-            if matches!(unit.utype(), UnitType::Cmdsep) {
-                debug!("Found command separator: {:?}", unit);
+            if matches!(token.class(), TokenType::Cmdsep) {
+                debug!("Found command separator: {:?}", token);
                 break
             }
 
-            trace!("Pushing unit onto args: {:?}", unit);
-            args.push_back(unit);
-        }
-        if BUILTINS.contains(&args[0].text()) {
-            info!(
-                "Identified as a builtin command: {:?}, returning Eval::Builtin",
-                args[0].text()
-            );
-            Eval::Builtin { words: args }
-        } else {
-            info!(
-                "Identified as a regular command: {:?}, returning Eval::Command",
-                args[0].text()
-            );
-            Eval::Command { words: args }
-        }
+            if matches!(token.class(), TokenType::Redir {..}) {
+                args.push_back(token);
+                // Keep grabbing redirs until there are no more left
+                while let Some(token) = tokens.front() {
+                    if matches!(token.class(), TokenType::Redir {..}) {
+                        args.push_back(tokens.pop_front().unwrap());
+                    } else {
+                        break
+                    }
+                }
+                break
+            }
 
+            trace!("Pushing token onto args: {:?}", token);
+            args.push_back(token);
+        }
+        //if BUILTINS.contains(&args[0].text()) {
+            //info!(
+                //"Identified as a builtin command: {:?}, returning ASTNode::Builtin",
+                //args[0].text()
+            //);
+            //ASTNode::Builtin { words: args }
+        //} else {
+            //info!(
+                //"Identified as a regular command: {:?}, returning ASTNode::Command",
+                //args[0].text()
+            //);
+        ASTNode::Command { words: args }
     }
 
     fn new_expectation(input: String) -> VecDeque<String> {
@@ -560,39 +531,39 @@ impl Eval {
         expecting.into()
     }
 
-    pub fn build_structure(units: &mut VecDeque<Unit>, parser: &mut RshParser) -> Eval {
+    pub fn build_structure(tokens: &mut VecDeque<Token>, parser: &mut RshParser) -> ASTNode {
         let mut closer: &str = "";
         let mut block_type: String = String::new();
 
-        if let Some(unit) = units.front() {
-            block_type = unit.text().into();
-            closer = match unit.text() {
+        if let Some(token) = tokens.front() {
+            block_type = token.text().into();
+            closer = match token.text() {
                 "if" => "fi",
                 "for" | "while" | "until" | "select" => "done",
                 "case" => "esac",
-                _ => unreachable!("Unexpected block type: {}", unit.text()),
+                _ => unreachable!("Unexpected block type: {}", token.text()),
             };
             info!("Starting to build structure for block type: {}", block_type);
         }
 
-        let mut body: VecDeque<Eval> = VecDeque::new();
-        let mut condition: VecDeque<Eval> = VecDeque::new();
+        let mut body: VecDeque<ASTNode> = VecDeque::new();
+        let mut condition: VecDeque<ASTNode> = VecDeque::new();
         let mut components: VecDeque<Conditional> = VecDeque::new(); // Conditional = condition + body
         let mut first_run = true;
         let mut current_context: String = String::new();
         let mut expecting = VecDeque::new();
-        let mut next_units: VecDeque<Unit> = VecDeque::new();
+        let mut next_tokens: VecDeque<Token> = VecDeque::new();
 
         debug!(
             "Initialized variables. Closer: '{}', Block type: '{}'",
             closer, block_type
         );
 
-        while let Some(unit) = units.pop_front() {
-            debug!("Processing unit: {:?}", unit);
+        while let Some(token) = tokens.pop_front() {
+            debug!("Processing token: {:?}", token);
 
             if first_run {
-                current_context = unit.text().into();
+                current_context = token.text().into();
                 expecting = Self::new_expectation(current_context.clone());
                 first_run = false;
                 debug!(
@@ -601,11 +572,11 @@ impl Eval {
                 );
             }
 
-            match unit.utype() {
-                UnitType::Keyword => {
-                    debug!("Found keyword: {}", unit.text());
+            match token.class() {
+                TokenType::Keyword => {
+                    debug!("Found keyword: {}", token.text());
 
-                    if unit.text() == closer && expecting.contains(&unit.text().into()) {
+                    if token.text() == closer && expecting.contains(&token.text().into()) {
                         info!("Found closer keyword: '{}'", closer);
                         match block_type.as_str() {
                             "if" => {
@@ -625,17 +596,17 @@ impl Eval {
                                     "Returning IfThen: if_block: {:?}, elif_blocks: {:?}, else_block: {:?}",
                                     if_block, elif_blocks, else_block
                                 );
-                                return Eval::IfThen {
+                                return ASTNode::IfThen {
                                     if_block,
                                     elif_blocks,
                                     else_block,
                                 };
                             }
                             "while" => {
-                                return Eval::WhileDo { body: components.pop_back().unwrap() }
+                                return ASTNode::WhileDo { body: components.pop_back().unwrap() }
                             }
                             "until" => {
-                                return Eval::UntilDo { body: components.pop_back().unwrap() }
+                                return ASTNode::UntilDo { body: components.pop_back().unwrap() }
                             }
                             _ => panic!(
                                 "Unexpected block type during structure creation: {}",
@@ -644,52 +615,52 @@ impl Eval {
                         }
                     }
 
-                    if expecting.contains(&unit.text().into()) {
+                    if expecting.contains(&token.text().into()) {
                         debug!(
                             "Keyword '{}' matches expectation. Updating current_context.",
-                            unit.text()
+                            token.text()
                         );
-                        current_context = unit.text().into();
+                        current_context = token.text().into();
                         expecting = Self::new_expectation(current_context.clone());
-                    } else if !expecting.contains(&unit.text().into()) && current_context != unit.text() {
+                    } else if !expecting.contains(&token.text().into()) && current_context != token.text() {
                         debug!(
                             "Keyword '{}' does not match expectation: {:?}",
-                            unit.text(),
+                            token.text(),
                             expecting
                         );
-                        next_units.push_back(unit.clone());
-                        debug!("next_units: {:?}",next_units);
+                        next_tokens.push_back(token.clone());
+                        debug!("next_tokens: {:?}",next_tokens);
                     }
                 }
-                UnitType::Cmdsep => {
-                    if let Some(next_unit) = units.front() {
-                        if !expecting.contains(&next_unit.text().into()) {
-                            // If the next unit is expected, consume the command separator
-                            // else, push the command separator to the next_units buffer
-                            next_units.push_back(unit);
+                TokenType::Cmdsep => {
+                    if let Some(next_token) = tokens.front() {
+                        if !expecting.contains(&next_token.text().into()) {
+                            // If the next token is expected, consume the command separator
+                            // else, push the command separator to the next_tokens buffer
+                            next_tokens.push_back(token);
                             continue
                         }
                     }
-                    debug!("Processing units '{:?}' under context: '{}'", next_units,current_context);
+                    debug!("Processing tokens '{:?}' under context: '{}'", next_tokens,current_context);
 
                     match current_context.as_str() {
                         "if" | "else" | "for" | "elif" | "while" | "until" => {
                             if matches!(current_context.as_str(), "else" | "for") {
-                                let eval = Self::descend(&mut next_units, parser);
+                                let node = Self::descend(&mut next_tokens, parser);
                                 components.push_back(Conditional {
                                     condition: VecDeque::new(),
-                                    body: VecDeque::from(vec![eval]),
+                                    body: VecDeque::from(vec![node]),
                                 });
                             } else {
-                                let eval = Self::descend(&mut next_units, parser);
-                                debug!("Pushing to condition: {:?}", eval);
-                                condition.push_back(eval);
+                                let node = Self::descend(&mut next_tokens, parser);
+                                debug!("Pushing to condition: {:?}", node);
+                                condition.push_back(node);
                             }
                         }
                         _ => {
-                            let eval = Self::descend(&mut next_units, parser);
-                            debug!("Pushing to body: {:?}", eval);
-                            body.push_back(eval);
+                            let node = Self::descend(&mut next_tokens, parser);
+                            debug!("Pushing to body: {:?}", node);
+                            body.push_back(node);
                             debug!(
                                 "Finalizing component for context '{}'. Adding to components.",
                                 current_context
@@ -704,12 +675,12 @@ impl Eval {
                     }
                 }
                 _ => {
-                    trace!("defaulting to pushing to next_units for unit: {:?}",unit);
-                    next_units.push_back(unit.clone())
+                    trace!("defaulting to pushing to next_tokens for token: {:?}",token);
+                    next_tokens.push_back(token.clone())
                 },
             }
 
-            if unit.text() == closer {
+            if token.text() == closer {
                 info!("Encountered closing keyword '{}'. Breaking loop.", closer);
                 break;
             }
@@ -725,13 +696,13 @@ impl Eval {
 
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Unit {
-    pub unit_type: UnitType,
+pub struct Token {
+    pub token_type: TokenType,
     pub word_desc: WordDesc,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum UnitType {
+pub enum TokenType {
     Shebang,
     RangeNum,
     RangeAlpha,
@@ -758,7 +729,8 @@ pub enum UnitType {
     Redir {
         redir_type: RedirType,
         fd_out: i32,
-        fd_target: i32,
+        fd_target: Option<i32>,
+        file_target: Option<PathBuf>
     },
     Keyword,
     Ident,
@@ -774,43 +746,36 @@ pub enum RedirType {
     Herestring,
 }
 
-impl Unit {
-    pub fn new(unit_type: UnitType, word_desc: WordDesc) -> Self {
+impl Token {
+    pub fn new(token_type: TokenType, word_desc: WordDesc) -> Self {
         Self {
-            unit_type,
+            token_type,
             word_desc,
         }
     }
-    // The function that creates a Unit from a WordDesc
-    pub fn from(word_desc: WordDesc, parser: &RshParser) -> Result<Unit, RshParseError> {
+    // The function that creates a Token from a WordDesc
+    pub fn from(word_desc: WordDesc, parser: &mut RshParser) -> Result<Token, RshParseError> {
         let string = word_desc.text.clone();
-        debug!("Evaluating unit type for: {}", string);
+        debug!("ASTNodeuating token type for: {}", string);
         match string.as_str() {
             _ if REGEX["path"].is_match(&string) => {
                 let relative = !string.starts_with('/');
-                Ok(Unit::new(UnitType::Path { relative }, word_desc))
+                Ok(Token::new(TokenType::Path { relative }, word_desc))
             }
             _ if REGEX["assignment"].is_match(&string) => {
                 let parts: Vec<&str> = string.split('=').collect();
                 let (var, value) = (parts[0].into(), parts[1].to_string());
-                Ok(Unit::new(UnitType::Assignment { var, value }, word_desc))
+                Ok(Token::new(TokenType::Assignment { var, value }, word_desc))
             }
             _ if REGEX["redirection"].is_match(&string) => {
                 if let Some(captures) = REGEX["redirection"].captures(&string) {
-                    let fd_out = captures
-                        .get(1)
-                        .map_or("1", |m| m.as_str())
-                        .to_string()
-                        .parse::<i32>()
-                        .unwrap_or(1);
                     let operator = captures.get(2).map_or("none", |m| m.as_str()).to_string();
                     let fd_target = captures
-                        .get(4)
-                        .map_or("1", |m| m.as_str())
-                        .to_string()
-                        .parse::<i32>()
-                        .unwrap_or(1);
+                        .get(3)
+                        .and_then(|m| m.as_str().to_string().parse::<i32>().ok());
+
                     debug!("redir operator: {}", operator);
+
                     if string.matches('<').count() > 3 || string.matches('>').count() > 2 {
                         return Err(RshParseError {
                             abs_pos: word_desc.abs_pos,
@@ -819,6 +784,16 @@ impl Unit {
                             input: parser.input.clone(),
                         });
                     }
+
+                    let mut file_target = None;
+                    if !string.contains('&') {
+                        // Fetch the filename from parser.words
+                        if let Some(word) = parser.words.pop_front() {
+                            file_target = Some(PathBuf::from(word.text.clone()));
+                        }
+                    }
+
+
                     let redir_type = match operator.as_str() {
                         ">" => RedirType::Output,
                         ">>" => RedirType::Append,
@@ -834,53 +809,76 @@ impl Unit {
                             })
                         }
                     };
-                    Ok(Unit::new(
-                        UnitType::Redir {
+
+                    // Determine the default fd_out based on redir_type
+                    let fd_out = match redir_type {
+                        RedirType::Output | RedirType::Append => 1,
+                        RedirType::Input | RedirType::Heredoc | RedirType::Herestring => 0,
+                    };
+
+                    // Override the default if an fd is specified
+                    let fd_out = captures
+                        .get(1)
+                        .and_then(|m| m.as_str().parse::<i32>().ok())
+                        .unwrap_or(fd_out);
+
+                    if file_target.is_none() && fd_target.is_none() {
+                        return Err(RshParseError {
+                            abs_pos: word_desc.abs_pos,
+                            span: word_desc.span,
+                            msg: "Couldn't find an output for this redirection".into(),
+                            input: parser.input.clone(),
+                        });
+                    }
+
+                    Ok(Token::new(
+                        TokenType::Redir {
                             redir_type,
                             fd_out,
                             fd_target,
+                            file_target
                         },
                         word_desc,
                     ))
                 } else {
-                    panic!("Redirection somehow succeeded and then failed on the same regex check?")
+                    panic!("Redirection somehow succeeded and then failed on the same regex check?");
                 }
             }
             _ if REGEX["rsh_shebang"].is_match(&string) => {
-                Ok(Unit::new(UnitType::Shebang, word_desc))
+                Ok(Token::new(TokenType::Shebang, word_desc))
             }
             _ if REGEX["range_num"].is_match(&string) => {
-                Ok(Unit::new(UnitType::RangeNum, word_desc))
+                Ok(Token::new(TokenType::RangeNum, word_desc))
             }
             _ if REGEX["range_alpha"].is_match(&string) => {
-                Ok(Unit::new(UnitType::RangeAlpha, word_desc))
+                Ok(Token::new(TokenType::RangeAlpha, word_desc))
             }
             _ if REGEX["process_sub"].is_match(&string) => {
-                Ok(Unit::new(UnitType::ProcessSub, word_desc))
+                Ok(Token::new(TokenType::ProcessSub, word_desc))
             }
             _ if REGEX["command_sub"].is_match(&string) => {
-                Ok(Unit::new(UnitType::CommandSub, word_desc))
+                Ok(Token::new(TokenType::CommandSub, word_desc))
             }
             _ if REGEX["arithmetic"].is_match(&string) => {
-                Ok(Unit::new(UnitType::Arithmetic, word_desc))
+                Ok(Token::new(TokenType::Arithmetic, word_desc))
             }
             _ if REGEX["subshell"].is_match(&string) => {
-                Ok(Unit::new(UnitType::Subshell, word_desc))
+                Ok(Token::new(TokenType::Subshell, word_desc))
             }
-            _ if REGEX["test"].is_match(&string) => Ok(Unit::new(UnitType::Test, word_desc)),
-            _ if REGEX["block"].is_match(&string) => Ok(Unit::new(UnitType::Block, word_desc)),
-            _ if REGEX["string"].is_match(&string) => Ok(Unit::new(
-                UnitType::String {
+            _ if REGEX["test"].is_match(&string) => Ok(Token::new(TokenType::Test, word_desc)),
+            _ if REGEX["block"].is_match(&string) => Ok(Token::new(TokenType::Block, word_desc)),
+            _ if REGEX["string"].is_match(&string) => Ok(Token::new(
+                TokenType::String {
                     single_quote: string.starts_with('\''),
                 },
                 word_desc,
             )),
-            _ if REGEX["var_sub"].is_match(&string) => Ok(Unit::new(UnitType::VarSub, word_desc)),
-            _ if REGEX["cmdsep"].is_match(&string) => Ok(Unit::new(UnitType::Cmdsep, word_desc)),
+            _ if REGEX["var_sub"].is_match(&string) => Ok(Token::new(TokenType::VarSub, word_desc)),
+            _ if REGEX["cmdsep"].is_match(&string) => Ok(Token::new(TokenType::Cmdsep, word_desc)),
             _ if REGEX["operator"].is_match(&string) => match string.as_str() {
-                "||" => Ok(Unit::new(UnitType::Or, word_desc)),
-                "&&" => Ok(Unit::new(UnitType::And, word_desc)),
-                "|" => Ok(Unit::new(UnitType::Pipe, word_desc)),
+                "||" => Ok(Token::new(TokenType::Or, word_desc)),
+                "&&" => Ok(Token::new(TokenType::And, word_desc)),
+                "|" => Ok(Token::new(TokenType::Pipe, word_desc)),
                 _ => Err(RshParseError {
                     abs_pos: word_desc.abs_pos,
                     span: word_desc.span,
@@ -889,8 +887,8 @@ impl Unit {
                 }),
             },
             // TODO: implement some method for this or something
-            _ if Keywords::check(&string) => Ok(Unit::new(UnitType::Keyword, word_desc)),
-            _ if REGEX["ident"].is_match(&string) => Ok(Unit::new(UnitType::Ident, word_desc)),
+            _ if Keywords::check(&string) => Ok(Token::new(TokenType::Keyword, word_desc)),
+            _ if REGEX["ident"].is_match(&string) => Ok(Token::new(TokenType::Ident, word_desc)),
             _ => Err(RshParseError {
                 abs_pos: word_desc.abs_pos,
                 span: word_desc.span,
@@ -902,8 +900,8 @@ impl Unit {
     pub fn text(&self) -> &str {
         self.word_desc.text.as_str()
     }
-    pub fn utype(&self) -> &UnitType {
-        &self.unit_type
+    pub fn class(&self) -> &TokenType {
+        &self.token_type
     }
     pub fn pos(&self) -> usize {
         self.word_desc.abs_pos
@@ -933,8 +931,8 @@ pub struct RshParser {
     input: String,
     chars: VecDeque<char>,
     words: VecDeque<WordDesc>,
-    units: VecDeque<Unit>,
-    pub evals: VecDeque<Eval>,
+    tokens: VecDeque<Token>,
+    pub ast: VecDeque<ASTNode>,
     delim_stack: VecDeque<(usize, char)>,
     pos: usize,
     window: VecDeque<char>,
@@ -947,8 +945,8 @@ impl RshParser {
             input: input.into(),
             chars: VecDeque::from(input.chars().collect::<Vec<char>>()),
             words: VecDeque::new(),
-            units: VecDeque::new(),
-            evals: VecDeque::new(),
+            tokens: VecDeque::new(),
+            ast: VecDeque::new(),
             delim_stack: VecDeque::new(),
             pos: 0,
             window: VecDeque::new(),
@@ -956,20 +954,14 @@ impl RshParser {
         };
         parser
     }
-    pub fn get_evals(&self) -> VecDeque<Eval> {
-        self.evals.clone()
+    pub fn get_ast(&self) -> VecDeque<ASTNode> {
+        self.ast.clone()
     }
 
     pub fn print_tokens(&self) {
         println!("blocks:");
         for word in self.words.clone() {
             println!("{:?}", word);
-        }
-    }
-    pub fn print_units(&self) {
-        println!("units:");
-        for unit in self.units.clone() {
-            println!("{:#?}", unit);
         }
     }
     pub fn advance(&mut self) -> Option<char> {
@@ -1143,7 +1135,6 @@ impl RshParser {
                 '"' | '\'' => {
                     debug!("found quotation mark: {}", c);
                     self.delim_stack.push_back((self.pos, c)); // Push opening delimiter onto the stack
-                    current_word.push(c); // Add the delimiter to the word
 
                     while let Some(char) = self.advance() {
                         // If we encounter the same delimiter, check the stack
@@ -1170,10 +1161,8 @@ impl RshParser {
                                     input: self.input.clone(),
                                 });
                             }
-                            current_word.push(c);
                         }
                     } else if self.delim_stack.is_empty() {
-                        current_word.push(c);
                         debug!("Pushing word to block: {}", current_word);
                         self.push_word(&mut span_start, &mut current_word, self.pos);
                         span_start = self.pos + 1;
@@ -1294,23 +1283,23 @@ impl RshParser {
             debug!("Catching orphaned word: {}", current_word);
             self.push_word(&mut span_start, &mut current_word, self.pos);
         }
-        Ok(())
+        self.parse_blocks()
     }
 
     pub fn parse_blocks(&mut self) -> Result<(), RshParseError> {
         while let Some(word) = self.words.pop_front() {
             let string = word.clone();
-            let unit = Unit::from(word, self)?;
-            debug!("Produced unit: {:?} from word {:?}", unit, string);
-            self.units.push_back(unit);
+            let token = Token::from(word, self)?;
+            debug!("Produced token: {:?} from word {:?}", token, string);
+            self.tokens.push_back(token);
             // Move to the next node
         }
-        Ok(())
+        self.parse_tokenlist()
     }
 
-    pub fn parse_unitlist(&mut self) -> Result<VecDeque<Eval>, RshParseError> {
-        let mut units = self.units.clone();
-        Eval::begin_descent(&mut units, self);
-        Ok(self.evals.clone())
+    pub fn parse_tokenlist(&mut self) -> Result<(), RshParseError> {
+        let mut tokens = self.tokens.clone();
+        ASTNode::begin_descent(&mut tokens, self);
+        Ok(())
     }
 }
