@@ -7,7 +7,7 @@ use std::fmt;
 use std::path::PathBuf;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
-use crate::event::ShellEvent;
+use crate::event::{ShellError, ShellEvent};
 macro_rules! define_patterns {
     ($($name:expr => $pattern:expr),* $(,)?) => {{
         let mut m = HashMap::new();
@@ -366,340 +366,6 @@ impl Conditional {
     }
 }
 
-impl ASTNode {
-    pub fn begin_descent(tokens: &mut VecDeque<Token>, parser: &mut RshParser) {
-        let mut ast = VecDeque::new();
-        while !tokens.is_empty() {
-            ast.push_back(Self::descend(tokens, parser));
-        }
-        parser.ast = ast;
-    }
-    /// This takes a list of tokens, and then performs some check on all of them. If the check is
-    /// ever found to be true, the function returns. The state of the buffer and tokens stack is
-    /// left as is, which is useful for finding the left and right side of pipelines and command chains
-    pub fn process_tokens<F>(buffer: &mut VecDeque<Token>, tokens: &mut VecDeque<Token>, mut f: F) -> Option<Token>
-        where F: FnMut(&Token) -> bool,
-    {
-        while let Some(token) = tokens.pop_front() {
-            // If we find a cmdsep, we have exhausted the scope of this invocation
-            // Put everything back in the same order it was taken out
-            if let TokenType::Cmdsep = token.class() {
-                tokens.push_front(token);
-                while let Some(token) = buffer.pop_back() {
-                    tokens.push_front(token);
-                }
-                break
-            }
-            // If the condition returns true, then break this operation and return the token
-            // This leaves both the buffer and the original deque in their current state, easily
-            // showing both sides of an operation such as pipelines or chains while returning the
-            // operator which it broke on
-            match f(&token) {
-                true => return Some(token),
-                false => buffer.push_back(token),
-            }
-        }
-        tokens.extend(buffer.drain(..));
-        None
-    }
-    pub fn descend(tokens: &mut VecDeque<Token>, parser: &mut RshParser) -> ASTNode {
-        let mut buffer = VecDeque::new();
-        debug!("Starting descent with tokens: {:?}", tokens);
-        // Handle leading and trailing command separators
-        if let Some(token) = tokens.pop_front() {
-            if !matches!(token.class(), TokenType::Cmdsep) {
-                tokens.push_front(token)
-            }
-        }
-        if let Some(token) = tokens.pop_back() {
-            if !matches!(token.class(), TokenType::Cmdsep) {
-                tokens.push_back(token)
-            }
-        }
-
-        if let Some(token) = Self::process_tokens(&mut buffer,tokens,|t| *t.class() == TokenType::Keyword) {
-            info!("Found keyword, checking if it's an opener");
-            if Keywords::openers().contains(&token.text().into()) {
-                trace!("Keyword is an opener, building structure");
-                tokens.push_front(token);
-                return Self::build_structure(tokens, parser);
-            } else {
-                panic!(
-                    "Expected an opening keyword but got this: {}",
-                    token.text()
-                );
-            }
-        }
-
-        // No structure keywords have been found, now check for chains
-        if let Some(token) = Self::process_tokens(&mut buffer,tokens,|t| matches!(*t.class(), TokenType::And | TokenType::Or)) {
-            let operator = if *token.class() == TokenType::And {
-                ChainOp::And
-            } else {
-                ChainOp::Or
-            };
-            info!( "Found chaining operator: {:?}, descending into buffer and right sides", operator);
-
-            return ASTNode::Chain {
-                left: Box::new(Self::descend(&mut buffer, parser)),
-                right: Box::new(Self::descend(tokens, parser)),
-                operator,
-            };
-        }
-
-
-        // No chains have been found, now check for pipelines
-        if let Some(_token) = Self::process_tokens(&mut buffer,tokens,|t| *t.class() == TokenType::Pipe) {
-            return ASTNode::Pipeline {
-                left: Box::new(Self::descend(&mut buffer, parser)),
-                right: Box::new(Self::descend(tokens, parser)),
-            };
-        }
-
-        if let Some(token) = Self::process_tokens(&mut buffer,tokens,|t| matches!(*t.class(), TokenType::Ident | TokenType::String { .. })) {
-                info!("Found identifier, building invocation");
-                tokens.push_front(token);
-                Self::build_invocation(tokens, parser)
-        } else {
-            panic!("Reached the bottom of the descent function with these tokens: {:#?}",tokens);
-        }
-    }
-
-    pub fn build_pipeline(tokens: &mut VecDeque<Token>, parser: &mut RshParser) -> VecDeque<ASTNode> {
-        let mut commands: VecDeque<ASTNode> = VecDeque::new();
-        let mut buffer: VecDeque<Token> = VecDeque::new();
-        while let Some(token) = tokens.pop_front() {
-            match token.class() {
-                TokenType::Pipe => {
-                    commands.push_back(Self::descend(&mut buffer, parser));
-                    buffer.clear();
-                }
-                TokenType::Cmdsep => break,
-                _ => {
-                    buffer.push_back(token);
-                }
-            }
-        }
-        commands
-    }
-
-    pub fn build_invocation(tokens: &mut VecDeque<Token>, parser: &mut RshParser) -> ASTNode {
-        let mut args: VecDeque<Token> = VecDeque::new();
-        debug!("Starting build_invocation with tokens: {:?}", tokens);
-
-        while let Some(token) = tokens.pop_front() {
-            debug!("Processing token: {:?}", token);
-
-            if matches!(token.class(), TokenType::Cmdsep) {
-                debug!("Found command separator: {:?}", token);
-                break
-            }
-
-            if matches!(token.class(), TokenType::Redir {..}) {
-                args.push_back(token);
-                // Keep grabbing redirs until there are no more left
-                while let Some(token) = tokens.front() {
-                    if matches!(token.class(), TokenType::Redir {..}) {
-                        args.push_back(tokens.pop_front().unwrap());
-                    } else {
-                        break
-                    }
-                }
-                break
-            }
-
-            trace!("Pushing token onto args: {:?}", token);
-            args.push_back(token);
-        }
-        if BUILTINS.contains(&args[0].text()) {
-            info!("Identified as a builtin command: {:?}, returning ASTNode::Builtin",args[0].text());
-            ASTNode::Builtin { argv: args }
-
-        } else {
-            info!("Identified as a regular command: {:?}, returning ASTNode::Command", args[0].text());
-            ASTNode::Command { argv: args }
-        }
-    }
-
-    fn new_expectation(input: String) -> VecDeque<String> {
-        trace!("Generating new expectations based on input: {}", input);
-        let expecting: Vec<String> = match input.as_str() {
-            "if" | "elif" => vec!["then".into()],
-            "then" => vec!["elif".into(), "else".into(), "fi".into()],
-            "else" => vec!["fi".into()],
-            "in" | "while" | "until" => vec!["do".into()],
-            "for" | "select" | "case" => vec!["in".into()],
-            "do" => vec!["done".into()],
-            _ => vec![],
-        };
-
-        expecting.into()
-    }
-
-    pub fn build_structure(tokens: &mut VecDeque<Token>, parser: &mut RshParser) -> ASTNode {
-        let mut closer: &str = "";
-        let mut block_type: String = String::new();
-
-        if let Some(token) = tokens.front() {
-            block_type = token.text().into();
-            closer = match token.text() {
-                "if" => "fi",
-                "for" | "while" | "until" | "select" => "done",
-                "case" => "esac",
-                _ => unreachable!("Unexpected block type: {}", token.text()),
-            };
-            info!("Starting to build structure for block type: {}", block_type);
-        }
-
-        let mut body: VecDeque<ASTNode> = VecDeque::new();
-        let mut condition: VecDeque<ASTNode> = VecDeque::new();
-        let mut components: VecDeque<Conditional> = VecDeque::new(); // Conditional = condition + body
-        let mut first_run = true;
-        let mut current_context: String = String::new();
-        let mut expecting = VecDeque::new();
-        let mut next_tokens: VecDeque<Token> = VecDeque::new();
-
-        debug!(
-            "Initialized variables. Closer: '{}', Block type: '{}'",
-            closer, block_type
-        );
-
-        while let Some(token) = tokens.pop_front() {
-            debug!("Processing token: {:?}", token);
-
-            if first_run {
-                current_context = token.text().into();
-                expecting = Self::new_expectation(current_context.clone());
-                first_run = false;
-                debug!(
-                    "First run: Set current_context to '{}', expecting: {:?}",
-                    current_context, expecting
-                );
-            }
-
-            match token.class() {
-                TokenType::Keyword => {
-                    debug!("Found keyword: {}", token.text());
-
-                    if token.text() == closer && expecting.contains(&token.text().into()) {
-                        info!("Found closer keyword: '{}'", closer);
-                        match block_type.as_str() {
-                            "if" => {
-                                info!("Zipping if statement");
-                                debug!("components: {:?}",components);
-                                let if_block = components.pop_front().unwrap();
-                                let mut else_block: Option<Conditional> = None;
-                                if let Some(last_block) = components.pop_back() {
-                                    if last_block.condition.is_empty() {
-                                        else_block = Some(last_block)
-                                    } else {
-                                        components.push_back(last_block)
-                                    }
-                                }
-                                let elif_blocks = components;
-                                debug!(
-                                    "Returning IfThen: if_block: {:?}, elif_blocks: {:?}, else_block: {:?}",
-                                    if_block, elif_blocks, else_block
-                                );
-                                return ASTNode::IfThen {
-                                    if_block,
-                                    elif_blocks,
-                                    else_block,
-                                };
-                            }
-                            "while" => {
-                                return ASTNode::WhileDo { body: components.pop_back().unwrap() }
-                            }
-                            "until" => {
-                                return ASTNode::UntilDo { body: components.pop_back().unwrap() }
-                            }
-                            _ => panic!(
-                                "Unexpected block type during structure creation: {}",
-                                block_type
-                            ),
-                        }
-                    }
-
-                    if expecting.contains(&token.text().into()) {
-                        debug!(
-                            "Keyword '{}' matches expectation. Updating current_context.",
-                            token.text()
-                        );
-                        current_context = token.text().into();
-                        expecting = Self::new_expectation(current_context.clone());
-                    } else if !expecting.contains(&token.text().into()) && current_context != token.text() {
-                        debug!(
-                            "Keyword '{}' does not match expectation: {:?}",
-                            token.text(),
-                            expecting
-                        );
-                        next_tokens.push_back(token.clone());
-                        debug!("next_tokens: {:?}",next_tokens);
-                    }
-                }
-                TokenType::Cmdsep => {
-                    if let Some(next_token) = tokens.front() {
-                        if !expecting.contains(&next_token.text().into()) {
-                            // If the next token is expected, consume the command separator
-                            // else, push the command separator to the next_tokens buffer
-                            next_tokens.push_back(token);
-                            continue
-                        }
-                    }
-                    debug!("Processing tokens '{:?}' under context: '{}'", next_tokens,current_context);
-
-                    match current_context.as_str() {
-                        "if" | "else" | "for" | "elif" | "while" | "until" => {
-                            if matches!(current_context.as_str(), "else" | "for") {
-                                let node = Self::descend(&mut next_tokens, parser);
-                                components.push_back(Conditional {
-                                    condition: VecDeque::new(),
-                                    body: VecDeque::from(vec![node]),
-                                });
-                            } else {
-                                let node = Self::descend(&mut next_tokens, parser);
-                                debug!("Pushing to condition: {:?}", node);
-                                condition.push_back(node);
-                            }
-                        }
-                        _ => {
-                            let node = Self::descend(&mut next_tokens, parser);
-                            debug!("Pushing to body: {:?}", node);
-                            body.push_back(node);
-                            debug!(
-                                "Finalizing component for context '{}'. Adding to components.",
-                                current_context
-                            );
-                            components.push_back(Conditional {
-                                condition: condition.clone(),
-                                body: body.clone(),
-                            });
-                            condition.clear();
-                            body.clear();
-                        }
-                    }
-                }
-                _ => {
-                    trace!("defaulting to pushing to next_tokens for token: {:?}",token);
-                    next_tokens.push_back(token.clone())
-                },
-            }
-
-            if token.text() == closer {
-                info!("Encountered closing keyword '{}'. Breaking loop.", closer);
-                break;
-            }
-        }
-
-        debug!(
-            "Finished parsing structure for block type '{}'. Returning todo!",
-            block_type
-        );
-        todo!()
-    }
-}
-
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub token_type: TokenType,
@@ -937,6 +603,7 @@ pub struct RshParser {
     chars: VecDeque<char>,
     words: VecDeque<WordDesc>,
     tokens: VecDeque<Token>,
+    buffer: VecDeque<Token>, // Temp storage for tokens being processed
     pub ast: VecDeque<ASTNode>,
     delim_stack: VecDeque<(usize, char)>,
     pos: usize,
@@ -951,6 +618,7 @@ impl RshParser {
             chars: VecDeque::from(input.chars().collect::<Vec<char>>()),
             words: VecDeque::new(),
             tokens: VecDeque::new(),
+            buffer: VecDeque::new(),
             ast: VecDeque::new(),
             delim_stack: VecDeque::new(),
             pos: 0,
@@ -1288,10 +956,6 @@ impl RshParser {
             debug!("Catching orphaned word: {}", current_word);
             self.push_word(&mut span_start, &mut current_word, self.pos);
         }
-        self.parse_blocks()
-    }
-
-    pub fn parse_blocks(&mut self) -> Result<(), RshParseError> {
         while let Some(word) = self.words.pop_front() {
             let string = word.clone();
             let token = Token::from(word, self)?;
@@ -1299,12 +963,342 @@ impl RshParser {
             self.tokens.push_back(token);
             // Move to the next node
         }
-        self.parse_tokenlist()
+        self.begin_descent()
     }
 
-    pub fn parse_tokenlist(&mut self) -> Result<(), RshParseError> {
-        let mut tokens = self.tokens.clone();
-        ASTNode::begin_descent(&mut tokens, self);
+    pub fn begin_descent(&mut self) -> Result<(),RshParseError> {
+        let mut ast = self.ast.clone();
+        while !self.tokens.is_empty() {
+            ast.push_back(self.descend());
+        }
         Ok(())
+    }
+
+    pub fn process_tokens<F>(&mut self, mut f: F) -> Option<Token>
+        where F: FnMut(&Token) -> bool,
+    {
+        while let Some(token) = self.tokens.pop_front() {
+            // If we find a cmdsep, we have exhausted the scope of this invocation
+            // Put everything back in the same order it was taken out
+            if let TokenType::Cmdsep = token.class() {
+                self.tokens.push_front(token);
+                while let Some(token) = self.buffer.pop_back() {
+                    self.tokens.push_front(token);
+                }
+                break
+            }
+            // If the condition returns true, then break this operation and return the token
+            // This leaves both the buffer and the original deque in their current state, easily
+            // showing both sides of an operation such as pipelines or chains while returning the
+            // operator which it broke on
+            match f(&token) {
+                true => return Some(token),
+                false => self.buffer.push_back(token),
+            }
+        }
+        self.tokens.extend(self.buffer.drain(..));
+        None
+    }
+
+    pub fn descend(&mut self) -> ASTNode {
+        debug!("Starting descent with tokens: {:?}", self.tokens);
+        // Handle leading and trailing command separators
+        if let Some(token) = self.tokens.pop_front() {
+            if !matches!(token.class(), TokenType::Cmdsep) {
+                self.tokens.push_front(token)
+            }
+        }
+        if let Some(token) = self.tokens.pop_back() {
+            if !matches!(token.class(), TokenType::Cmdsep) {
+                self.tokens.push_back(token)
+            }
+        }
+
+        if let Some(token) = self.process_tokens(|t| *t.class() == TokenType::Keyword) {
+            info!("Found keyword, checking if it's an opener");
+            if Keywords::openers().contains(&token.text().into()) {
+                trace!("Keyword is an opener, building structure");
+                self.tokens.push_front(token);
+                return self.build_structure();
+            } else {
+                panic!(
+                    "Expected an opening keyword but got this: {}",
+                    token.text()
+                );
+            }
+        }
+
+        // No structure keywords have been found, now check for chains
+        if let Some(token) = self.process_tokens(|t| matches!(*t.class(), TokenType::And | TokenType::Or)) {
+            let operator = if *token.class() == TokenType::And {
+                ChainOp::And
+            } else {
+                ChainOp::Or
+            };
+            info!( "Found chaining operator: {:?}, descending into buffer and right sides", operator);
+
+            return ASTNode::Chain {
+                left: Box::new(self.descend()),
+                right: Box::new(self.descend()),
+                operator,
+            };
+        }
+
+
+        // No chains have been found, now check for pipelines
+        if let Some(_token) = self.process_tokens(|t| *t.class() == TokenType::Pipe) {
+            return ASTNode::Pipeline {
+                left: Box::new(self.descend()),
+                right: Box::new(self.descend()),
+            };
+        }
+
+        if let Some(token) = self.process_tokens(|t| matches!(*t.class(), TokenType::Ident | TokenType::String { .. })) {
+                info!("Found identifier, building invocation");
+                self.tokens.push_front(token);
+                self.build_invocation()
+        } else {
+            panic!("Reached the bottom of the descent function with these tokens: {:#?}",self.tokens);
+        }
+    }
+
+    pub fn build_pipeline(&mut self) -> VecDeque<ASTNode> {
+        let mut commands: VecDeque<ASTNode> = VecDeque::new();
+        let mut buffer: VecDeque<Token> = VecDeque::new();
+        while let Some(token) = self.tokens.pop_front() {
+            match token.class() {
+                TokenType::Pipe => {
+                    commands.push_back(self.descend());
+                    buffer.clear();
+                }
+                TokenType::Cmdsep => break,
+                _ => {
+                    buffer.push_back(token);
+                }
+            }
+        }
+        commands
+    }
+
+    pub fn build_invocation(&mut self) -> ASTNode {
+        let mut args: VecDeque<Token> = VecDeque::new();
+        debug!("Starting build_invocation with tokens: {:?}", self.tokens);
+
+        while let Some(token) = self.tokens.pop_front() {
+            debug!("Processing token: {:?}", token);
+
+            if matches!(token.class(), TokenType::Cmdsep) {
+                debug!("Found command separator: {:?}", token);
+                break
+            }
+
+            if matches!(token.class(), TokenType::Redir {..}) {
+                args.push_back(token);
+                // Keep grabbing redirs until there are no more left
+                while let Some(token) = self.tokens.front() {
+                    if matches!(token.class(), TokenType::Redir {..}) {
+                        args.push_back(self.tokens.pop_front().unwrap());
+                    } else {
+                        break
+                    }
+                }
+                break
+            }
+
+            trace!("Pushing token onto args: {:?}", token);
+            args.push_back(token);
+        }
+        if BUILTINS.contains(&args[0].text()) {
+            info!("Identified as a builtin command: {:?}, returning ASTNode::Builtin",args[0].text());
+            ASTNode::Builtin { argv: args }
+
+        } else {
+            info!("Identified as a regular command: {:?}, returning ASTNode::Command", args[0].text());
+            ASTNode::Command { argv: args }
+        }
+    }
+
+    fn new_expectation(input: String) -> VecDeque<String> {
+        trace!("Generating new expectations based on input: {}", input);
+
+        let mut expectations = VecDeque::new();
+
+        match input.as_str() {
+            "if" | "elif" => expectations.push_back("then".into()),
+            "then" => {
+                expectations.push_back("elif".into());
+                expectations.push_back("else".into());
+                expectations.push_back("fi".into());
+            },
+            "else" => expectations.push_back("fi".into()),
+            "in" | "while" | "until" => expectations.push_back("do".into()),
+            "for" | "select" | "case" => expectations.push_back("in".into()),
+            "do" => expectations.push_back("done".into()),
+            _ => {},
+        }
+
+        expectations
+    }
+
+    pub fn build_structure(&mut self) -> ASTNode {
+        let mut closer: &str = "";
+        let mut block_type: String = String::new();
+
+        if let Some(token) = self.tokens.front() {
+            block_type = token.text().into();
+            closer = match token.text() {
+                "if" => "fi",
+                "for" | "while" | "until" | "select" => "done",
+                "case" => "esac",
+                _ => unreachable!("Unexpected block type: {}", token.text()),
+            };
+            info!("Starting to build structure for block type: {}", block_type);
+        }
+
+        let mut body: VecDeque<ASTNode> = VecDeque::new();
+        let mut condition: VecDeque<ASTNode> = VecDeque::new();
+        let mut components: VecDeque<Conditional> = VecDeque::new(); // Conditional = condition + body
+        let mut first_run = true;
+        let mut current_context: String = String::new();
+        let mut expecting = VecDeque::new();
+        let mut next_tokens: VecDeque<Token> = VecDeque::new();
+
+        debug!(
+            "Initialized variables. Closer: '{}', Block type: '{}'",
+            closer, block_type
+        );
+
+        while let Some(token) = self.tokens.pop_front() {
+            debug!("Processing token: {:?}", token);
+
+            if first_run {
+                current_context = token.text().into();
+                expecting = Self::new_expectation(current_context.clone());
+                first_run = false;
+                debug!(
+                    "First run: Set current_context to '{}', expecting: {:?}",
+                    current_context, expecting
+                );
+            }
+
+            match token.class() {
+                TokenType::Keyword => {
+                    debug!("Found keyword: {}", token.text());
+
+                    if token.text() == closer && expecting.contains(&token.text().into()) {
+                        info!("Found closer keyword: '{}'", closer);
+                        match block_type.as_str() {
+                            "if" => {
+                                info!("Zipping if statement");
+                                debug!("components: {:?}",components);
+                                let if_block = components.pop_front().unwrap();
+                                let mut else_block: Option<Conditional> = None;
+                                if let Some(last_block) = components.pop_back() {
+                                    if last_block.condition.is_empty() {
+                                        else_block = Some(last_block)
+                                    } else {
+                                        components.push_back(last_block)
+                                    }
+                                }
+                                let elif_blocks = components;
+                                debug!(
+                                    "Returning IfThen: if_block: {:?}, elif_blocks: {:?}, else_block: {:?}",
+                                    if_block, elif_blocks, else_block
+                                );
+                                return ASTNode::IfThen {
+                                    if_block,
+                                    elif_blocks,
+                                    else_block,
+                                };
+                            }
+                            "while" => {
+                                return ASTNode::WhileDo { body: components.pop_back().unwrap() }
+                            }
+                            "until" => {
+                                return ASTNode::UntilDo { body: components.pop_back().unwrap() }
+                            }
+                            _ => panic!(
+                                "Unexpected block type during structure creation: {}",
+                                block_type
+                            ),
+                        }
+                    }
+
+                    if expecting.contains(&token.text().into()) {
+                        debug!(
+                            "Keyword '{}' matches expectation. Updating current_context.",
+                            token.text()
+                        );
+                        current_context = token.text().into();
+                        expecting = Self::new_expectation(current_context.clone());
+                    } else if !expecting.contains(&token.text().into()) && current_context != token.text() {
+                        debug!(
+                            "Keyword '{}' does not match expectation: {:?}",
+                            token.text(),
+                            expecting
+                        );
+                        next_tokens.push_back(token.clone());
+                        debug!("next_tokens: {:?}",next_tokens);
+                    }
+                }
+                TokenType::Cmdsep => {
+                    if let Some(next_token) = self.tokens.front() {
+                        if !expecting.contains(&next_token.text().into()) {
+                            // If the next token is expected, consume the command separator
+                            // else, push the command separator to the next_tokens buffer
+                            next_tokens.push_back(token);
+                            continue
+                        }
+                    }
+                    debug!("Processing tokens '{:?}' under context: '{}'", next_tokens,current_context);
+
+                    match current_context.as_str() {
+                        "if" | "else" | "for" | "elif" | "while" | "until" => {
+                            if matches!(current_context.as_str(), "else" | "for") {
+                                let node = self.descend();
+                                components.push_back(Conditional {
+                                    condition: VecDeque::new(),
+                                    body: VecDeque::from(vec![node]),
+                                });
+                            } else {
+                                let node = self.descend();
+                                debug!("Pushing to condition: {:?}", node);
+                                condition.push_back(node);
+                            }
+                        }
+                        _ => {
+                            let node = self.descend();
+                            debug!("Pushing to body: {:?}", node);
+                            body.push_back(node);
+                            debug!(
+                                "Finalizing component for context '{}'. Adding to components.",
+                                current_context
+                            );
+                            components.push_back(Conditional {
+                                condition: condition.clone(),
+                                body: body.clone(),
+                            });
+                            condition.clear();
+                            body.clear();
+                        }
+                    }
+                }
+                _ => {
+                    trace!("defaulting to pushing to next_tokens for token: {:?}",token);
+                    next_tokens.push_back(token.clone())
+                },
+            }
+
+            if token.text() == closer {
+                info!("Encountered closing keyword '{}'. Breaking loop.", closer);
+                break;
+            }
+        }
+
+        debug!(
+            "Finished parsing structure for block type '{}'. Returning todo!",
+            block_type
+        );
+        todo!()
     }
 }
