@@ -304,13 +304,13 @@ impl fmt::Display for RshParseError {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ASTNode {
     Command {
-        words: VecDeque<Token>,
+        argv: VecDeque<Token>,
     },
     Builtin {
-        words: VecDeque<Token>,
+        argv: VecDeque<Token>,
     },
     Function {
-        words: VecDeque<Token>,
+        argv: VecDeque<Token>,
     },
     Chain {
         left: Box<ASTNode>,
@@ -355,6 +355,15 @@ pub enum ASTNode {
 pub struct Conditional {
     condition: VecDeque<ASTNode>,
     body: VecDeque<ASTNode>,
+}
+
+impl Conditional {
+    pub fn get_cond(&self) -> VecDeque<ASTNode> {
+        self.condition.clone()
+    }
+    pub fn get_body(&self) -> VecDeque<ASTNode> {
+        self.body.clone()
+    }
 }
 
 impl ASTNode {
@@ -502,18 +511,14 @@ impl ASTNode {
             trace!("Pushing token onto args: {:?}", token);
             args.push_back(token);
         }
-        //if BUILTINS.contains(&args[0].text()) {
-            //info!(
-                //"Identified as a builtin command: {:?}, returning ASTNode::Builtin",
-                //args[0].text()
-            //);
-            //ASTNode::Builtin { words: args }
-        //} else {
-            //info!(
-                //"Identified as a regular command: {:?}, returning ASTNode::Command",
-                //args[0].text()
-            //);
-        ASTNode::Command { words: args }
+        if BUILTINS.contains(&args[0].text()) {
+            info!("Identified as a builtin command: {:?}, returning ASTNode::Builtin",args[0].text());
+            ASTNode::Builtin { argv: args }
+
+        } else {
+            info!("Identified as a regular command: {:?}, returning ASTNode::Command", args[0].text());
+            ASTNode::Command { argv: args }
+        }
     }
 
     fn new_expectation(input: String) -> VecDeque<String> {

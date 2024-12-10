@@ -25,6 +25,7 @@ pub mod prompt;
 pub mod event;
 pub mod execute;
 pub mod shellenv;
+pub mod builtin;
 
 use crate::event::EventLoop;
 use crate::shellenv::ShellEnv;
