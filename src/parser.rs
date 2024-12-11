@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::event::{ShellError, ShellEvent};
+use crate::builtin::BUILTINS;
 macro_rules! define_patterns {
     ($($name:expr => $pattern:expr),* $(,)?) => {{
         let mut m = HashMap::new();
@@ -20,9 +21,9 @@ pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
     define_patterns! {
         "redirection" => r"^([0-9]+)?(>{1,2}|<{1,3})(?:[&]?([0-9]+))?$",
         "path" => r"^(\/(?:[^\/]+\/)*[^\/]*|(?:\.[\/\w\-]+\/?))$",
-        "range_num" => r"^\{\d+\.\.\d+\}$",
         "rsh_shebang" => r"^#!((?:/[^\s]+)+)((?:\s+arg:[a-zA-Z][a-zA-Z0-9_\-]*)*)$",
-        "range_alpha" => r"^\{[a-zA-Z]\.\.[a-zA-Z]\}$",
+        "brace_numrange" => r"\{([0-9]+)\.\.([0-9]+)(?:\.\.([0-9]+))?\}",
+        "brace_alpharange" => r"\{([0-9]+)\.\.([0-9]+)(?:\.\.([0-9]+))?\}",
         "process_sub" => r"^>\(.*\)$",
         "command_sub" => r"^\$\([^\)]+\)$",
         "arithmetic" => r"^\$\(\([^\)]+\)\)$",
@@ -30,9 +31,8 @@ pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
         "test" => r"^\[\s*(.*?)\s*\]$",
         "string" => r#"^\"([^\"]*)\"$"#,
         "var_sub" => r"^\$([A-Za-z_][A-Za-z0-9_]*)$",
-        "block" => r"^\{[^{}]*\}$",
         "assignment" => r"^[A-Za-z_][A-Za-z0-9_]*=.*$",
-        "operator" => r"(?:&&|\|\||[><]=?|[|;&])",
+        "operator" => r"(?:&&|\|\||[><]=?|[|&])",
         "cmdsep" => r"^(?:\n|;)$",
         "ident" => r"^[\x20-\x7E]*$",
     }
@@ -48,11 +48,6 @@ const ALIASES: [&str; 1] = [
     // Will replace this with an actual aliases implementation later
     // Used for now for word flags
     "PLACEHOLDER_TEXT",
-];
-
-const BUILTINS: [&str; 13] = [
-    "echo", "set", "shift", "export", "readonly", "declare", "local", "unset", "trap", "node",
-    "exec", "source", "wait",
 ];
 
 #[derive(Debug, PartialEq)]
@@ -309,6 +304,10 @@ pub enum ASTNode {
     Builtin {
         argv: VecDeque<Token>,
     },
+    Assignment {
+        var: String,
+        val: String
+    },
     Function {
         argv: VecDeque<Token>,
     },
@@ -375,21 +374,18 @@ pub struct Token {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TokenType {
     Shebang,
-    RangeNum,
-    RangeAlpha,
     ProcessSub,
     CommandSub,
     Arithmetic,
     Subshell,
     Test,
-    Block,
     String {
         single_quote: bool,
     },
     VarSub,
     Assignment {
         var: String,
-        value: String,
+        val: String,
     },
     Path {
         relative: bool,
@@ -435,8 +431,8 @@ impl Token {
             }
             _ if REGEX["assignment"].is_match(&string) => {
                 let parts: Vec<&str> = string.split('=').collect();
-                let (var, value) = (parts[0].into(), parts[1].to_string());
-                Ok(Token::new(TokenType::Assignment { var, value }, word_desc))
+                let (var, val) = (parts[0].into(), parts[1].to_string());
+                Ok(Token::new(TokenType::Assignment { var, val }, word_desc))
             }
             _ if REGEX["redirection"].is_match(&string) => {
                 if let Some(captures) = REGEX["redirection"].captures(&string) {
@@ -518,12 +514,6 @@ impl Token {
             _ if REGEX["rsh_shebang"].is_match(&string) => {
                 Ok(Token::new(TokenType::Shebang, word_desc))
             }
-            _ if REGEX["range_num"].is_match(&string) => {
-                Ok(Token::new(TokenType::RangeNum, word_desc))
-            }
-            _ if REGEX["range_alpha"].is_match(&string) => {
-                Ok(Token::new(TokenType::RangeAlpha, word_desc))
-            }
             _ if REGEX["process_sub"].is_match(&string) => {
                 Ok(Token::new(TokenType::ProcessSub, word_desc))
             }
@@ -537,7 +527,6 @@ impl Token {
                 Ok(Token::new(TokenType::Subshell, word_desc))
             }
             _ if REGEX["test"].is_match(&string) => Ok(Token::new(TokenType::Test, word_desc)),
-            _ if REGEX["block"].is_match(&string) => Ok(Token::new(TokenType::Block, word_desc)),
             _ if REGEX["string"].is_match(&string) => Ok(Token::new(
                 TokenType::String {
                     single_quote: string.starts_with('\''),
@@ -567,6 +556,9 @@ impl Token {
                 input: parser.input.clone(),
             }),
         }
+    }
+    pub fn substitute(&mut self,new_text: String) {
+        self.word_desc.text = new_text;
     }
     pub fn text(&self) -> &str {
         self.word_desc.text.as_str()
@@ -735,6 +727,7 @@ impl RshParser {
                         }
                     }
                     '}' => {
+                        // Guard condition for brace expansion
                         let open_delim = self.delim_stack.pop_back();
                         if open_delim.is_some() && open_delim.unwrap().1 != '{' {
                             let delim = open_delim.unwrap();
@@ -746,6 +739,9 @@ impl RshParser {
                             });
                         } else if self.delim_stack.is_empty() {
                             current_word.push(c);
+                            if !matches!(self.chars.front(), Some(' ') | Some(';') | Some('\n')) {
+                                continue
+                            }
                             debug!("Pushing word to block: {}", current_word);
                             self.push_word(&mut span_start, &mut current_word, self.pos);
                             span_start = self.pos + 1;
@@ -794,6 +790,8 @@ impl RshParser {
                         debug!("current block: {:?}", current_block);
                         span_start = self.pos + 1;
                         current_word.clear();
+                    } else {
+                        current_word.push(c);
                     }
                     current_block = VecDeque::new();
                 }
@@ -963,27 +961,216 @@ impl RshParser {
             self.tokens.push_back(token);
             // Move to the next node
         }
+        self.expand()?;
         self.begin_descent()
     }
 
+    pub fn expand(&mut self) -> Result<(),RshParseError> {
+        let mut arg = false;
+
+        while let Some(token) = self.tokens.pop_front() {
+            match token.class() {
+                TokenType::Cmdsep => {
+                    arg = false;
+                    self.buffer.push_back(token); // Push Cmdsep tokens directly
+                }
+                _ if token.text().contains('{') && token.text().contains('}') && arg => {
+                    // Perform brace expansion
+                    let expanded = self.expand_braces(token.text().to_string());
+                    for expanded_token in expanded {
+                        self.buffer.push_back(Token::new(
+                            TokenType::String { single_quote: true },
+                            WordDesc {
+                                text: expanded_token,
+                                abs_pos: token.pos(),
+                                span: token.span(),
+                                flags: token.flags(),
+                            },
+                        ));
+                    }
+                }
+                TokenType::VarSub => {
+                    // Perform variable expansion
+                    let expanded = self.expand_variables(token.text().to_string());
+                    for expanded_token in expanded {
+                        self.buffer.push_back(Token::new(
+                            TokenType::String { single_quote: false },
+                            WordDesc {
+                                text: expanded_token,
+                                abs_pos: token.pos(),
+                                span: token.span(),
+                                flags: token.flags(),
+                            },
+                        ));
+                    }
+                }
+                TokenType::CommandSub => {
+                    // Perform command substitution
+                    let expanded = self.expand_command_substitution(token.text().to_string());
+                    for expanded_token in expanded {
+                        self.buffer.push_back(Token::new(
+                            TokenType::String { single_quote: false },
+                            WordDesc {
+                                text: expanded_token,
+                                abs_pos: token.pos(),
+                                span: token.span(),
+                                flags: token.flags(),
+                            },
+                        ));
+                    }
+                }
+                _ => {
+                    // Push non-expandable tokens directly
+                    self.buffer.push_back(token);
+                }
+            }
+
+            // Mark that subsequent tokens are part of an argument
+            arg = true;
+        }
+
+        // Drain the buffer back into tokens for further processing
+        self.tokens.extend(self.buffer.drain(..));
+        Ok(())
+    }
+
+    pub fn expand_variables(&self, block: String) -> Vec<String> {
+        todo!()
+    }
+
+    pub fn expand_command_substitution(&self, block: String) -> Vec<String> {
+        todo!()
+    }
+
+    pub fn expand_braces(&self, word: String) -> Vec<String> {
+        let mut results = Vec::new();
+        let mut buffer = VecDeque::from([word]);
+
+        while let Some(current) = buffer.pop_front() {
+            if let Some((prefix, amble, postfix)) = self.parse_first_brace(&current) {
+                let expanded = self.expand_amble(amble);
+                for part in expanded {
+                    buffer.push_back(format!("{}{}{}", prefix, part, postfix));
+                }
+            } else {
+                // No braces left to expand
+                results.push(current);
+            }
+        }
+
+        results
+    }
+
+    fn parse_first_brace(&self, word: &str) -> Option<(String, String, String)> {
+        let mut prefix = String::new();
+        let mut amble = String::new();
+        let mut postfix = String::new();
+        let mut char_iter = word.chars().peekable();
+        let mut brace_stack = VecDeque::new();
+
+        // Parse prefix
+        while let Some(&c) = char_iter.peek() {
+            if c == '{' {
+                brace_stack.push_back(c);
+                char_iter.next();
+                break;
+            } else {
+                prefix.push(c);
+                char_iter.next();
+            }
+        }
+
+        // Parse amble
+        while let Some(&c) = char_iter.peek() {
+            match c {
+                '{' => {
+                    brace_stack.push_back(c);
+                    amble.push(c);
+                }
+                '}' => {
+                    brace_stack.pop_back();
+                    if brace_stack.is_empty() {
+                        char_iter.next(); // Consume closing brace
+                        break;
+                    } else {
+                        amble.push(c);
+                    }
+                }
+                _ => amble.push(c),
+            }
+            char_iter.next();
+        }
+
+        // Parse postfix
+        postfix.extend(char_iter);
+
+        if !brace_stack.is_empty() {
+            None // Unmatched braces
+        } else if !amble.is_empty() {
+            Some((prefix, amble, postfix))
+        } else {
+            None // No braces found
+        }
+    }
+
+    fn expand_amble(&self, amble: String) -> Vec<String> {
+        if amble.contains("..") {
+            // Handle range expansion
+            if let Some(expanded) = self.expand_range(&amble) {
+                return expanded;
+            }
+        } else if amble.contains(',') {
+            // Handle comma-separated values
+            return amble
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect::<Vec<String>>();
+        }
+
+        vec![amble] // If no expansion is needed, return as-is
+    }
+
+    fn expand_range(&self, range: &str) -> Option<Vec<String>> {
+        let parts: Vec<&str> = range.trim_matches('{').trim_matches('}').split("..").collect();
+        if let [start, end] = parts.as_slice() {
+            if let (Ok(start_num), Ok(end_num)) = (start.parse::<i32>(), end.parse::<i32>()) {
+                // Numeric range
+                return Some((start_num..=end_num).map(|n| n.to_string()).collect());
+            } else if start.len() == 1 && end.len() == 1 {
+                // Alphabetic range
+                let start_char = start.chars().next().unwrap();
+                let end_char = end.chars().next().unwrap();
+                return Some(
+                    (start_char..=end_char)
+                        .map(|c| c.to_string())
+                        .collect(),
+                );
+            }
+        }
+
+        None // Invalid range
+    }
+
     pub fn begin_descent(&mut self) -> Result<(),RshParseError> {
-        let mut ast = self.ast.clone();
-        while !self.tokens.is_empty() {
-            ast.push_back(self.descend());
+        let mut tokens = self.tokens.clone();
+        let mut node;
+        while !tokens.is_empty() {
+            node = self.descend(&mut tokens);
+            self.ast.push_back(node);
         }
         Ok(())
     }
 
-    pub fn process_tokens<F>(&mut self, mut f: F) -> Option<Token>
+    pub fn process_tokens<F>(&mut self, tokens: &mut VecDeque<Token>, mut f: F) -> Option<Token>
         where F: FnMut(&Token) -> bool,
     {
-        while let Some(token) = self.tokens.pop_front() {
+        while let Some(token) = tokens.pop_front() {
             // If we find a cmdsep, we have exhausted the scope of this invocation
             // Put everything back in the same order it was taken out
             if let TokenType::Cmdsep = token.class() {
-                self.tokens.push_front(token);
+                tokens.push_front(token);
                 while let Some(token) = self.buffer.pop_back() {
-                    self.tokens.push_front(token);
+                    tokens.push_front(token);
                 }
                 break
             }
@@ -996,30 +1183,31 @@ impl RshParser {
                 false => self.buffer.push_back(token),
             }
         }
-        self.tokens.extend(self.buffer.drain(..));
+        tokens.extend(self.buffer.drain(..));
         None
     }
 
-    pub fn descend(&mut self) -> ASTNode {
-        debug!("Starting descent with tokens: {:?}", self.tokens);
+    pub fn descend(&mut self, tokens: &mut VecDeque<Token>) -> ASTNode {
+        debug!("Starting descent with tokens: {:?}", tokens);
         // Handle leading and trailing command separators
-        if let Some(token) = self.tokens.pop_front() {
+        if let Some(token) = tokens.pop_front() {
             if !matches!(token.class(), TokenType::Cmdsep) {
-                self.tokens.push_front(token)
+                tokens.push_front(token)
             }
         }
-        if let Some(token) = self.tokens.pop_back() {
+        if let Some(token) = tokens.pop_back() {
             if !matches!(token.class(), TokenType::Cmdsep) {
-                self.tokens.push_back(token)
+                tokens.push_back(token)
             }
         }
 
-        if let Some(token) = self.process_tokens(|t| *t.class() == TokenType::Keyword) {
+        if let Some(token) = self.process_tokens(tokens, |t| *t.class() == TokenType::Keyword) {
             info!("Found keyword, checking if it's an opener");
             if Keywords::openers().contains(&token.text().into()) {
                 trace!("Keyword is an opener, building structure");
-                self.tokens.push_front(token);
-                return self.build_structure();
+                trace!("tokens: {:?}",tokens);
+                tokens.push_front(token);
+                return self.build_structure(tokens);
             } else {
                 panic!(
                     "Expected an opening keyword but got this: {}",
@@ -1029,7 +1217,7 @@ impl RshParser {
         }
 
         // No structure keywords have been found, now check for chains
-        if let Some(token) = self.process_tokens(|t| matches!(*t.class(), TokenType::And | TokenType::Or)) {
+        if let Some(token) = self.process_tokens(tokens, |t| matches!(*t.class(), TokenType::And | TokenType::Or)) {
             let operator = if *token.class() == TokenType::And {
                 ChainOp::And
             } else {
@@ -1038,37 +1226,39 @@ impl RshParser {
             info!( "Found chaining operator: {:?}, descending into buffer and right sides", operator);
 
             return ASTNode::Chain {
-                left: Box::new(self.descend()),
-                right: Box::new(self.descend()),
+                left: Box::new(self.descend(tokens)),
+                right: Box::new(self.descend(tokens)),
                 operator,
             };
         }
 
 
         // No chains have been found, now check for pipelines
-        if let Some(_token) = self.process_tokens(|t| *t.class() == TokenType::Pipe) {
+        if let Some(_token) = self.process_tokens(tokens, |t| *t.class() == TokenType::Pipe) {
             return ASTNode::Pipeline {
-                left: Box::new(self.descend()),
-                right: Box::new(self.descend()),
+                left: Box::new(self.descend(tokens)),
+                right: Box::new(self.descend(tokens)),
             };
         }
 
-        if let Some(token) = self.process_tokens(|t| matches!(*t.class(), TokenType::Ident | TokenType::String { .. })) {
+        if let Some(token) = self.process_tokens(
+            tokens,
+            |t| matches!(*t.class(), TokenType::Ident | TokenType::String { .. } | TokenType::Assignment { .. })) {
                 info!("Found identifier, building invocation");
-                self.tokens.push_front(token);
-                self.build_invocation()
+                tokens.push_front(token);
+                self.build_invocation(tokens)
         } else {
-            panic!("Reached the bottom of the descent function with these tokens: {:#?}",self.tokens);
+            panic!("Reached the bottom of the descent function with these tokens: {:#?}",tokens);
         }
     }
 
-    pub fn build_pipeline(&mut self) -> VecDeque<ASTNode> {
+    pub fn build_pipeline(&mut self, tokens: &mut VecDeque<Token>) -> VecDeque<ASTNode> {
         let mut commands: VecDeque<ASTNode> = VecDeque::new();
         let mut buffer: VecDeque<Token> = VecDeque::new();
-        while let Some(token) = self.tokens.pop_front() {
+        while let Some(token) = tokens.pop_front() {
             match token.class() {
                 TokenType::Pipe => {
-                    commands.push_back(self.descend());
+                    commands.push_back(self.descend(tokens));
                     buffer.clear();
                 }
                 TokenType::Cmdsep => break,
@@ -1080,11 +1270,11 @@ impl RshParser {
         commands
     }
 
-    pub fn build_invocation(&mut self) -> ASTNode {
+    pub fn build_invocation(&mut self, tokens: &mut VecDeque<Token>) -> ASTNode {
         let mut args: VecDeque<Token> = VecDeque::new();
-        debug!("Starting build_invocation with tokens: {:?}", self.tokens);
+        debug!("Starting build_invocation with tokens: {:?}", tokens);
 
-        while let Some(token) = self.tokens.pop_front() {
+        while let Some(token) = tokens.pop_front() {
             debug!("Processing token: {:?}", token);
 
             if matches!(token.class(), TokenType::Cmdsep) {
@@ -1095,9 +1285,9 @@ impl RshParser {
             if matches!(token.class(), TokenType::Redir {..}) {
                 args.push_back(token);
                 // Keep grabbing redirs until there are no more left
-                while let Some(token) = self.tokens.front() {
+                while let Some(token) = tokens.front() {
                     if matches!(token.class(), TokenType::Redir {..}) {
-                        args.push_back(self.tokens.pop_front().unwrap());
+                        args.push_back(tokens.pop_front().unwrap());
                     } else {
                         break
                     }
@@ -1108,10 +1298,13 @@ impl RshParser {
             trace!("Pushing token onto args: {:?}", token);
             args.push_back(token);
         }
+
         if BUILTINS.contains(&args[0].text()) {
             info!("Identified as a builtin command: {:?}, returning ASTNode::Builtin",args[0].text());
             ASTNode::Builtin { argv: args }
 
+        } else if let TokenType::Assignment { var, val } = args[0].class() {
+            ASTNode::Assignment { var: var.into(), val: val.into() }
         } else {
             info!("Identified as a regular command: {:?}, returning ASTNode::Command", args[0].text());
             ASTNode::Command { argv: args }
@@ -1140,11 +1333,11 @@ impl RshParser {
         expectations
     }
 
-    pub fn build_structure(&mut self) -> ASTNode {
+    pub fn build_structure(&mut self, tokens: &mut VecDeque<Token>) -> ASTNode {
         let mut closer: &str = "";
         let mut block_type: String = String::new();
 
-        if let Some(token) = self.tokens.front() {
+        if let Some(token) = tokens.front() {
             block_type = token.text().into();
             closer = match token.text() {
                 "if" => "fi",
@@ -1168,7 +1361,7 @@ impl RshParser {
             closer, block_type
         );
 
-        while let Some(token) = self.tokens.pop_front() {
+        while let Some(token) = tokens.pop_front() {
             debug!("Processing token: {:?}", token);
 
             if first_run {
@@ -1242,32 +1435,35 @@ impl RshParser {
                     }
                 }
                 TokenType::Cmdsep => {
-                    if let Some(next_token) = self.tokens.front() {
+                    trace!("found cmdsep in structure");
+                    if let Some(next_token) = tokens.front() {
                         if !expecting.contains(&next_token.text().into()) {
-                            // If the next token is expected, consume the command separator
+                            trace!("not expecting this: {:?}",next_token);
+                                // If the next token is expected, consume the command separator
                             // else, push the command separator to the next_tokens buffer
                             next_tokens.push_back(token);
                             continue
                         }
+                        trace!("found expectation: {:?}",next_token);
                     }
                     debug!("Processing tokens '{:?}' under context: '{}'", next_tokens,current_context);
 
                     match current_context.as_str() {
                         "if" | "else" | "for" | "elif" | "while" | "until" => {
                             if matches!(current_context.as_str(), "else" | "for") {
-                                let node = self.descend();
+                                let node = self.descend(&mut next_tokens);
                                 components.push_back(Conditional {
                                     condition: VecDeque::new(),
                                     body: VecDeque::from(vec![node]),
                                 });
                             } else {
-                                let node = self.descend();
+                                let node = self.descend(&mut next_tokens);
                                 debug!("Pushing to condition: {:?}", node);
                                 condition.push_back(node);
                             }
                         }
                         _ => {
-                            let node = self.descend();
+                            let node = self.descend(&mut next_tokens);
                             debug!("Pushing to body: {:?}", node);
                             body.push_back(node);
                             debug!(
