@@ -22,7 +22,6 @@ macro_rules! define_patterns {
 pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
     define_patterns! {
         "redirection" => r"^([0-9]+)?(>{1,2}|<{1,3})(?:[&]?([0-9]+))?$",
-        "path" => r"^(\/(?:[^\/]+\/)*[^\/]*|(?:\.[\/\w\-]+\/?))$",
         "rsh_shebang" => r"^#!((?:/[^\s]+)+)((?:\s+arg:[a-zA-Z][a-zA-Z0-9_\-]*)*)$",
         "brace_expansion" => r"(\$?)\{(?:[\x20-\x7e,]+|[0-9]+(?:\.\.[0-9+]){1,2}|[a-z]\.\.[a-z]|[A-Z]\.\.[A-Z])\}",
         "process_sub" => r"^>\(.*\)$",
@@ -214,6 +213,7 @@ pub enum ASTNode {
     Select {
         var: WordDesc,
         options: Vec<(String, ASTNode)>,
+        body: TokenDeck,
     },
     FuncDef {
         func_name: WordDesc,
@@ -319,16 +319,13 @@ impl Token {
     }
 
     pub fn from(
-        word_desc: WordDesc,
+        mut word_desc: WordDesc,
         input_man: &mut RshInputManager,
     ) -> Result<Token, RshParseError> {
         let string = word_desc.text.clone();
         debug!("Token::from(): Evaluating token type for: {}", string);
 
         match string.as_str() {
-            _ if REGEX["path"].is_match(&string) => {
-                Self::create_path_token(string, word_desc)
-            }
             _ if REGEX["assignment"].is_match(&string) => {
                 Self::create_assignment_token(string, word_desc)
             }
@@ -336,49 +333,92 @@ impl Token {
                 Self::create_redirection_token(string, word_desc, input_man)
             }
             _ if REGEX["rsh_shebang"].is_match(&string) => {
+                word_desc.text = Self::clean_string(string);
                 Ok(Token::new(TokenType::Shebang, word_desc))
             }
             _ if REGEX["process_sub"].is_match(&string) => {
+                word_desc.text = Self::clean_string(string);
                 Ok(Token::new(TokenType::ProcessSub, word_desc))
             }
             _ if REGEX["command_sub"].is_match(&string) => {
+                word_desc.text = Self::clean_string(string);
                 Ok(Token::new(TokenType::CommandSub, word_desc))
             }
             _ if REGEX["arithmetic"].is_match(&string) => {
+                word_desc.text = Self::clean_string(string);
                 Ok(Token::new(TokenType::Arithmetic, word_desc))
             }
             _ if REGEX["string"].is_match(&string) => {
                 Self::create_string_token(string, word_desc)
             }
             _ if REGEX["operator"].is_match(&string) => {
-                Self::create_operator_token(string, word_desc)
+                Self::create_operator_token(string, word_desc, input_man)
             }
             _ if REGEX["ident"].is_match(&string) => {
-                Ok(Token::new(TokenType::Ident, word_desc))
+                Self::create_path_or_ident(string, word_desc)
             }
-            _ => Err(RshParseError {
-                abs_pos: word_desc.abs_pos,
-                span: word_desc.span,
-                msg: "Failed to classify word".into(),
-                input: input_man.input.clone(),
-            }),
+            _ => Err(input_man.parse_error("Failed to classify word".into())),
         }
     }
 
-    fn create_path_token(string: String, word_desc: WordDesc) -> Result<Token, RshParseError> {
+    // Remove escape backslashes
+    fn clean_string(string: String) -> String {
+        let mut chars = string.chars();
+        let mut cleaned = String::new();
+        while let Some(char) = chars.next() {
+            match char {
+                '\\' => {
+                    if let Some(escaped_char) = chars.next() {
+                        cleaned.push(escaped_char)
+                    }
+                },
+                _ => cleaned.push(char)
+            }
+        }
+        cleaned
+    }
+
+    fn create_path_or_ident(string: String, mut word_desc: WordDesc) -> Result<Token, RshParseError> {
+        let mut chars = string.chars();
+        let mut path: bool = false;
+        debug!("checking string for path or ident: {}",string);
+        while let Some(char) = chars.next() {
+            match char {
+                '\\' => { chars.next(); },
+                '/' => path = true,
+                _ => continue
+            }
+        }
+        if path {
+            // Make sure path tokens are only created if they are commands
+            // Arguments should be treated as idents
+            path = word_desc.is_cmd;
+        }
+        match path {
+            true => Self::create_path_token(string,word_desc),
+            false => {
+                word_desc.text = Self::clean_string(string);
+                Ok(Token::new(TokenType::Ident, word_desc))
+            }
+        }
+    }
+
+    fn create_path_token(string: String, mut word_desc: WordDesc) -> Result<Token, RshParseError> {
         let relative = !string.starts_with('/');
+        word_desc.text = Self::clean_string(string);
         Ok(Token::new(TokenType::Path { relative }, word_desc))
     }
 
-    fn create_assignment_token(string: String, word_desc: WordDesc) -> Result<Token, RshParseError> {
+    fn create_assignment_token(string: String, mut word_desc: WordDesc) -> Result<Token, RshParseError> {
         let parts: Vec<&str> = string.split('=').collect();
         let (var, val) = (parts[0].into(), parts[1].to_string());
+        word_desc.text = Self::clean_string(string);
         Ok(Token::new(TokenType::Assignment { var, val }, word_desc))
     }
 
     fn create_redirection_token(
         string: String,
-        word_desc: WordDesc,
+        mut word_desc: WordDesc,
         input_man: &mut RshInputManager,
     ) -> Result<Token, RshParseError> {
         if let Some(captures) = REGEX["redirection"].captures(&string) {
@@ -390,17 +430,11 @@ impl Token {
             debug!("Token::from(): redir operator: {}", operator);
 
             if string.matches('<').count() > 3 || string.matches('>').count() > 2 {
-                return Err(RshParseError {
-                    abs_pos: word_desc.abs_pos,
-                    span: word_desc.span,
-                    msg: "Invalid redirection operator".into(),
-                    input: input_man.input.clone(),
-                });
+                return Err(input_man.parse_error("Invalid redirection operator".into()))
             }
 
             let mut file_target = None;
             if !string.contains('&') {
-                // Fetch the filename from input_man.words
                 if let Some(word) = input_man.tk.tokens.pop_front() {
                     file_target = Some(PathBuf::from(word.text()));
                 }
@@ -412,37 +446,24 @@ impl Token {
                 "<" => RedirType::Input,
                 "<<" => RedirType::Heredoc,
                 "<<<" => RedirType::Herestring,
-                _ => {
-                    return Err(RshParseError {
-                        abs_pos: word_desc.abs_pos,
-                        span: word_desc.span,
-                        msg: "Invalid redirection operator".into(),
-                        input: input_man.input.clone(),
-                    })
-                }
+                _ => return Err(input_man.parse_error("Invalid redirection operator".into()))
             };
 
-            // Determine the default fd_out based on redir_type
             let fd_out = match redir_type {
                 RedirType::Output | RedirType::Append => 1,
                 RedirType::Input | RedirType::Heredoc | RedirType::Herestring => 0,
             };
 
-            // Override the default if an fd is specified
             let fd_out = captures
                 .get(1)
                 .and_then(|m| m.as_str().parse::<i32>().ok())
                 .unwrap_or(fd_out);
 
             if file_target.is_none() && fd_target.is_none() {
-                return Err(RshParseError {
-                    abs_pos: word_desc.abs_pos,
-                    span: word_desc.span,
-                    msg: "Couldn't find an output for this redirection".into(),
-                    input: input_man.input.clone(),
-                });
+                return Err(input_man.parse_error("Couldn't find an output for this redirection".into()))
             }
 
+            word_desc.text = Self::clean_string(string);
             Ok(Token::new(
                 TokenType::Redir {
                     redir_type,
@@ -457,7 +478,8 @@ impl Token {
         }
     }
 
-    fn create_string_token(string: String, word_desc: WordDesc) -> Result<Token, RshParseError> {
+    fn create_string_token(string: String, mut word_desc: WordDesc) -> Result<Token, RshParseError> {
+        word_desc.text = Self::clean_string(string.clone());
         Ok(Token::new(
             TokenType::String {
                 single_quote: string.starts_with('\''),
@@ -466,17 +488,13 @@ impl Token {
         ))
     }
 
-    fn create_operator_token(string: String, word_desc: WordDesc) -> Result<Token, RshParseError> {
+    fn create_operator_token(string: String, mut word_desc: WordDesc, input_man: &mut RshInputManager) -> Result<Token, RshParseError> {
+        word_desc.text = Self::clean_string(string.clone());
         match string.as_str() {
             "||" => Ok(Token::new(TokenType::Or, word_desc)),
             "&&" => Ok(Token::new(TokenType::And, word_desc)),
             "|" => Ok(Token::new(TokenType::Pipe, word_desc)),
-            _ => Err(RshParseError {
-                abs_pos: word_desc.abs_pos,
-                span: word_desc.span,
-                msg: "Invalid operator".into(),
-                input: word_desc.text.clone(),
-            }),
+            _ => Err(input_man.parse_error("Invalid operator".into()))
         }
     }
 
@@ -515,6 +533,7 @@ impl Token {
 
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Helper function to get the name of the token type as a string.
         fn token_type_name(token_type: &TokenType) -> &'static str {
             match token_type {
                 TokenType::Shebang => "Shebang",
@@ -542,13 +561,17 @@ impl fmt::Display for Token {
             }
         }
 
+        // Recursive function to format a token and its nested tokens.
         fn fmt_token(
             token: &Token,
             f: &mut fmt::Formatter<'_>,
             prefix: &str,
             is_last: bool,
         ) -> fmt::Result {
+            // Determine the connector based on whether this is the last token.
             let connector = if is_last { "└── " } else { "├── " };
+
+            // Get the token name, handling the special case for Loop tokens.
             let token_name = if let TokenType::Loop { condition, structure: _ } = &token.token_type {
                 match condition {
                     true => "While",
@@ -557,6 +580,8 @@ impl fmt::Display for Token {
             } else {
                 token_type_name(&token.token_type)
             };
+
+            // Write the token name and its text.
             writeln!(
                 f,
                 "{}{}{} (Text: '{}')",
@@ -566,12 +591,14 @@ impl fmt::Display for Token {
                 token.word_desc.text
             )?;
 
+            // Prepare the new prefix for nested tokens.
             let new_prefix = if is_last {
                 format!("{}    ", prefix)
             } else {
                 format!("{}│   ", prefix)
             };
 
+            // Handle nested tokens based on the token type.
             match &token.token_type {
                 TokenType::Subshell { tokens }
                 | TokenType::CmdGroup { tokens }
@@ -592,21 +619,25 @@ impl fmt::Display for Token {
             Ok(())
         }
 
+        // Recursive function to format a structure and its nested tokens.
         fn fmt_structure(
             structure: &Structure,
             f: &mut fmt::Formatter<'_>,
             prefix: &str,
             is_last: bool,
         ) -> fmt::Result {
+            // Determine the connector based on whether this is the last structure.
             let connector = if is_last { "└── " } else { "├── " };
             writeln!(f, "{}{}Structure:", prefix, connector)?;
 
+            // Prepare the new prefix for nested structures.
             let new_prefix = if is_last {
                 format!("{}    ", prefix)
             } else {
                 format!("{}│   ", prefix)
             };
 
+            // Handle different types of structures.
             match structure {
                 Structure::If { cond_blocks, else_block } => {
                     for (i, cond) in cond_blocks.iter().enumerate() {
@@ -637,6 +668,17 @@ impl fmt::Display for Token {
                 Structure::Loop { condition: _, logic } => {
                     fmt_conditional(logic, f, &new_prefix, true)?;
                 }
+                Structure::Select { target_var, options, body } => {
+                    writeln!(f, "{}Target Var: {}",new_prefix,target_var.text())?;
+                    writeln!(f, "{}Option Array:", new_prefix)?;
+                    for (i,token) in options.iter().enumerate() {
+                        fmt_token(token, f, &new_prefix, i == options.len() - 1)?;
+                    }
+                    writeln!(f, "{}Body:", new_prefix)?;
+                    for (i, token) in body.iter().enumerate() {
+                        fmt_token(token, f, &new_prefix, i == body.len() - 1)?;
+                    }
+                }
                 Structure::Case { check_string, cases } => {
                     writeln!(f, "{}Case Expression:", new_prefix)?;
                     writeln!(f, "{}{}Case Variable: '{}'", new_prefix, connector, check_string.text())?;
@@ -662,21 +704,25 @@ impl fmt::Display for Token {
             Ok(())
         }
 
+        // Recursive function to format a conditional and its nested tokens.
         fn fmt_conditional(
             conditional: &Conditional,
             f: &mut fmt::Formatter<'_>,
             prefix: &str,
             is_last: bool,
         ) -> fmt::Result {
+            // Determine the connector based on whether this is the last conditional.
             let connector = if is_last { "└── " } else { "├── " };
             writeln!(f, "{}{}Conditional:", prefix, connector)?;
 
+            // Prepare the new prefix for nested conditionals.
             let new_prefix = if is_last {
                 format!("{}    ", prefix)
             } else {
                 format!("{}│   ", prefix)
             };
 
+            // Write the condition and body of the conditional.
             writeln!(f, "{}Condition:", new_prefix)?;
             for (i, token) in conditional.condition.iter().enumerate() {
                 fmt_token(token, f, &new_prefix, i == conditional.condition.len() - 1)?;
@@ -690,6 +736,7 @@ impl fmt::Display for Token {
             Ok(())
         }
 
+        // Start the formatting process for the current token.
         fmt_token(self, f, "", true)
     }
 }
@@ -739,7 +786,8 @@ pub enum Structure {
     },
     Select {
         target_var: Box<Token>,
-        options: VecDeque<(Token, TokenDeck)>,
+        options: TokenDeck,
+        body: TokenDeck,
     },
 }
 
@@ -900,18 +948,26 @@ impl<'a> RshInputManager<'a> {
     }
 
     fn build_for(&mut self) -> Result<Structure, RshParseError> {
-        let loop_vars: TokenDeck = self.clean_interpret(Some(vec!["in".into()]),false)?;
-        let mut loop_arr: TokenDeck = self.clean_interpret(Some(vec!["do".into()]),false)?;
-        // TODO: fix this for god's sake
-        if !matches!(loop_arr.pop_back().unwrap().text().chars().next().unwrap(), ';' | '\n') {
-            error!("Broke on this loop array: {:?}",loop_arr);
-            return Err(self.parse_error("`do` not properly separated".into()));
+        let loop_vars: TokenDeck = self.clean_interpret(Some(vec!["in".into()]), false)?;
+        let loop_arr: TokenDeck = self.clean_interpret(Some(vec!["do".into()]), false)?;
+
+        // Safely get the last token and check if it ends with a valid separator
+        if let Some(last_token) = loop_arr.back() {
+            let text = last_token.text();
+            if !text.ends_with(';') && !text.ends_with('\n') {
+                error!("Broke on this loop array: {:?}", loop_arr);
+                return Err(self.parse_error("`do` not properly separated".into()));
+            }
+        } else {
+            return Err(self.parse_error("Empty loop array".into()));
         }
-        let body = self.interpret(Some(vec!["done".into()]),true)?;
+
+        let body = self.interpret(Some(vec!["done".into()]), true)?;
         if !body.back().unwrap().is_cmd() {
-            error!("Broke on this loop body: {:?}",body);
+            error!("Broke on this loop body: {:?}", body);
             return Err(self.parse_error("`done` not properly separated".into()));
         }
+
         Ok(Structure::For {
             loop_vars,
             loop_arr,
@@ -930,18 +986,20 @@ impl<'a> RshInputManager<'a> {
     }
 
     fn build_case(&mut self) -> Result<Structure, RshParseError> {
-        let mut var = self.clean_interpret(Some(vec!["in".into()]),false)?;
+        let mut var = self.clean_interpret(Some(vec!["in".into()]), false)?;
         let mut cases: VecDeque<(Token, TokenDeck)> = VecDeque::new();
-        if var.len() > 1 {
-            return Err(self.parse_error("Only expected one variable in case statement".into()));
+        if var.len() != 1 {
+            return Err(self.parse_error(format!("Expected one variable in case statement, got {}",var.len())));
         }
         loop {
-            let mut condition = self.interpret(Some(vec!["esac".into(), ")".into()]),false)?;
+            let mut condition = self.interpret(Some(vec!["esac".into(), ")".into()]), false)?;
             debug!("got condition: {:?}", condition);
-            if condition.back().unwrap().text() == "esac" {
+            if condition.back().is_some() && condition.back().unwrap().text() == "esac" {
                 break;
+            } else if condition.back().is_none() {
+                return Err(self.parse_error("No case blocks found in case statement".into()));
             }
-            let body = self.interpret(Some(vec![";;".into()]),true)?;
+            let body = self.interpret(Some(vec![";;".into()]), true)?;
             debug!("got body: {:?}", body);
             cases.push_back((condition.pop_back().unwrap(), body));
         }
@@ -951,8 +1009,32 @@ impl<'a> RshInputManager<'a> {
         })
     }
 
-    fn build_select(&self) -> Structure {
-        todo!("function for building a select structure")
+    fn build_select(&mut self) -> Result<Structure,RshParseError> {
+        let mut target = self.clean_interpret(Some(vec!["in".into()]), false)?;
+        let target_var;
+        if target.len() != 1 {
+            return Err(self.parse_error(format!("Expected one variable in case statement, got {}",target.len())));
+        } else {
+            target_var = Box::new(target.pop_back().unwrap());
+        };
+        let mut options: TokenDeck = self.clean_interpret(Some(vec!["do".into()]), false)?;
+        if let Some(last_token) = options.back() {
+            let text = last_token.text();
+            if !text.ends_with(';') && !text.ends_with('\n') {
+                error!("Broke on this option array: {:?}", options);
+                return Err(self.parse_error("`do` not properly separated".into()));
+            }
+            options.pop_back(); // Consume command separator
+        } else {
+            return Err(self.parse_error("Empty option array".into()));
+        }
+
+        let body = self.interpret(Some(vec!["done".into()]), true)?;
+        if !body.back().unwrap().is_cmd() {
+            error!("Broke on this loop body: {:?}", body);
+            return Err(self.parse_error("`done` not properly separated".into()));
+        }
+        Ok(Structure::Select { target_var, options, body })
     }
 
     fn check_context(&self, string: &str) -> Option<Context> {
@@ -1010,18 +1092,6 @@ impl<'a> RshInputManager<'a> {
         self.lx.span_start
     }
 
-    /// Handles the creation of a token for a given context.
-    ///
-    /// # Parameters
-    /// - `context`: The context to handle.
-    /// - `is_cmd`: A boolean indicating if the token is part of a command.
-    /// - `span_start`: The starting position of the span.
-    /// - `span_end`: The ending position of the span.
-    /// - `structure`: The structure to include in the token.
-    ///
-    /// # Returns
-    /// - `Ok(Token)`: The created token.
-    /// - `Err(RshParseError)`: If there is an error during token creation.
     fn create_token_for_context(
         &self,
         context: Context,
@@ -1111,49 +1181,41 @@ impl<'a> RshInputManager<'a> {
             word_desc
         })
     }
-/// Dispatches the context to the appropriate builder method and creates a token.
-///
-/// # Parameters
-/// - `context`: The context to dispatch.
-/// - `is_cmd`: A boolean indicating if the token is part of a command.
-///
-/// # Returns
-/// - `Ok(Token)`: The created token.
-/// - `Err(RshParseError)`: If there is an error during token creation.
-fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, RshParseError> {
-    let span_start = self.span_start();
-    if matches!(context,Context::Subshell | Context::CmdGroup | Context::Test | Context::DoubleString | Context::SingleString | Context::Substitution) {
-        return self.handle_simple_structures(context,is_cmd);
+
+    fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, RshParseError> {
+        let span_start = self.span_start();
+        if matches!(context,Context::Subshell | Context::CmdGroup | Context::Test | Context::DoubleString | Context::SingleString | Context::Substitution) {
+            return self.handle_simple_structures(context,is_cmd);
+        }
+        let (structure, span_end) = match context {
+            Context::If => {
+                let structure = self.build_if()?;
+                (structure, self.lx.abs_pos)
+            }
+            Context::For => {
+                let structure = self.build_for()?;
+                (structure, self.lx.abs_pos)
+            }
+            Context::While => {
+                let structure = self.build_loop(true)?;
+                (structure, self.lx.abs_pos)
+            }
+            Context::Until => {
+                let structure = self.build_loop(false)?;
+                (structure, self.lx.abs_pos)
+            }
+            Context::Case => {
+                let structure = self.build_case()?;
+                (structure, self.lx.abs_pos)
+            }
+            Context::Select => {
+                let structure = self.build_select()?;
+                (structure, self.lx.abs_pos)
+            }
+            _ => unreachable!()
+        };
+        self.create_token_for_context(context, is_cmd, span_start, span_end, structure)
     }
-    let (structure, span_end) = match context {
-        Context::If => {
-            let structure = self.build_if()?;
-            (structure, self.lx.abs_pos)
-        }
-        Context::For => {
-            let structure = self.build_for()?;
-            (structure, self.lx.abs_pos)
-        }
-        Context::While => {
-            let structure = self.build_loop(true)?;
-            (structure, self.lx.abs_pos)
-        }
-        Context::Until => {
-            let structure = self.build_loop(false)?;
-            (structure, self.lx.abs_pos)
-        }
-        Context::Case => {
-            let structure = self.build_case()?;
-            (structure, self.lx.abs_pos)
-        }
-        Context::Select => {
-            let structure = self.build_select();
-            (structure, self.lx.abs_pos)
-        }
-        _ => unreachable!()
-    };
-    self.create_token_for_context(context, is_cmd, span_start, span_end, structure)
-}
 
     fn parse_error(&self, msg: String) -> RshParseError {
         RshParseError {
@@ -1218,12 +1280,28 @@ fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, 
         Ok(tokens)
     }
 
-    // break_on arg is for recursive calls for structure building
-    // e.g. 'fi', 'done', 'esac'
-    // `recurse` determines whether or not the parser is allowed to descend any further here, or treat keywords literally instead
+    fn create_and_push_token(&mut self, current_word: &String, is_cmd: bool, current_deck: &mut TokenDeck) -> Result<(), RshParseError> {
+        let token = self.create_token(current_word, is_cmd)?;
+        current_deck.push_back(token);
+        self.lx.span_start = self.lx.abs_pos;
+        Ok(())
+    }
+
+    fn handle_context(&mut self, context: Context, is_cmd: bool, current_deck: &mut TokenDeck) -> Result<(), RshParseError> {
+        let ctx_token = self.dispatch_context(context, is_cmd)?;
+        current_deck.push_back(ctx_token);
+        Ok(())
+    }
+
+    fn break_interpretation(&self, current_word: &String, break_patterns: &Vec<String>) -> bool {
+        break_patterns.contains(current_word)
+    }
+
+    // `break_on` defines a list of patterns to break the interpretation upon finding
+    // `recurse` tells the interpreter whether or not it is allowed to recurse upon finding a
+    // structural keyword like `if` and `for`, used for contexts where these words are treated literally
     pub fn interpret(&mut self, break_on: Option<Vec<String>>, recurse: bool) -> Result<TokenDeck, RshParseError> {
         let break_patterns = break_on.unwrap_or_default();
-        let mut tokens_pushed = 0; // Debug variable for tracking changes in recursion depth basically
         let mut is_cmd = true;
         let mut current_word = String::new();
         let mut current_deck = VecDeque::new();
@@ -1235,23 +1313,18 @@ fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, 
                 let context = self.check_context(&c.to_string()).unwrap();
                 debug!("Dispatching context: {:?}", context);
                 self.lx.span_start = self.lx.abs_pos;
-                let ctx_token = self.dispatch_context(context, is_cmd)?;
-                debug!("pushing ctx_token: {:?}", ctx_token);
-                current_deck.push_back(ctx_token);
-                debug!("tokens_pushed: {}", tokens_pushed);
-                tokens_pushed += 1;
+                self.handle_context(context, is_cmd, &mut current_deck)?;
                 continue
             }
 
             // Check for simple break patterns
             if break_patterns.contains(&c.to_string()) {
                 debug!("breaking on '{}'!",c);
-                let token = self.create_token(&current_word, is_cmd)?;
+                self.create_and_push_token(&current_word, is_cmd, &mut current_deck)?;
                 // Do not consume command separators
                 if matches!(c, ';' | '\n') {
                     self.lx.chars.push_front(';');
                 }
-                current_deck.push_back(token);
                 current_word.clear();
                 self.clean_deck(&mut current_deck);
                 return Ok(current_deck);
@@ -1260,6 +1333,8 @@ fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, 
                 '\\' => { // Escaping
                     if let Some(&next_char) = self.lx.chars.front() {
 
+                        // We will clean up the left-over escape slashes later
+                        current_word.push(c);
                         if !matches!(next_char, '\n') {
                             current_word.push(next_char);
                         }
@@ -1283,9 +1358,9 @@ fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, 
                     if let Some(';') = self.lx.chars.front() {
                         if break_patterns.contains(&";;".into()) {
                             debug!("breaking case statement parse");
-                            let token = self.create_token(&current_word, is_cmd)?;
-                            debug!("pushing last token: {:?}",token);
-                            current_deck.push_back(token);
+                            self.create_and_push_token(&current_word, is_cmd, &mut current_deck)?;
+                            debug!("pushing last token: {:?}",current_word);
+                            current_deck.push_back(self.get_separator());
                             current_word.clear();
                             self.lx.advance();
                             self.clean_deck(&mut current_deck);
@@ -1299,27 +1374,17 @@ fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, 
                         if self.check_context(&current_word).is_some() && recurse {
                             let context = self.check_context(&current_word).unwrap();
                             debug!("Dispatching context: {:?}", context);
-                            let ctx_token = self.dispatch_context(context, is_cmd)?;
-                            debug!("returned from recursive descent with ctx_token: {:?}",ctx_token);
-                            current_deck.push_back(ctx_token);
-                            tokens_pushed += 1;
-                            debug!("tokens_pushed: {}", tokens_pushed);
-                            self.lx.span_start = self.lx.abs_pos;
+                            self.handle_context(context, is_cmd, &mut current_deck)?;
                         } else {
 
                             // Create generic token
-                            let token = self.create_token(&current_word, is_cmd)?;
-                            debug!("pushing token: {:?}", token);
-                            current_deck.push_back(token);
-                            tokens_pushed += 1;
-                            debug!("tokens_pushed: {}", tokens_pushed);
-                            self.lx.span_start = self.lx.abs_pos;
+                            self.create_and_push_token(&current_word, is_cmd, &mut current_deck)?;
                         }
                         debug!(
                             "break_patterns: {:?}, current_word: {}",
                             break_patterns, current_word
                         );
-                        if break_patterns.contains(&current_word) {
+                        if self.break_interpretation(&current_word, &break_patterns) {
                             debug!("breaking on '{}'!",current_word);
                             current_word.clear();
                             self.clean_deck(&mut current_deck);
@@ -1331,8 +1396,6 @@ fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, 
                     let token = self.get_separator();
                     debug!("pushing token: {:?}", token);
                     current_deck.push_back(token);
-                    tokens_pushed += 1;
-                    debug!("tokens_pushed: {}", tokens_pushed);
                     self.lx.span_start = self.lx.abs_pos;
                     current_word.clear();
                 }
@@ -1345,39 +1408,25 @@ fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, 
                         if self.check_context(&current_word).is_some() && recurse {
                             let context = self.check_context(&current_word).unwrap();
                             debug!("Dispatching context: {:?}", context);
-                            let ctx_token = self.dispatch_context(context, is_cmd)?;
-                            debug!("returned from recursive descent with ctx_token: {:?}",ctx_token);
-                            current_deck.push_back(ctx_token);
+                            self.handle_context(context, is_cmd, &mut current_deck)?;
                             is_cmd = true;
-                            tokens_pushed += 1;
-                            debug!("tokens_pushed: {}", tokens_pushed);
-                            self.lx.span_start = self.lx.abs_pos;
                         } else {
-                            let token = self.create_token(&current_word, is_cmd)?;
-                            debug!("pushing token: {:?}", token);
-                            current_deck.push_back(token);
-                            tokens_pushed += 1;
-                            debug!("tokens_pushed: {}", tokens_pushed);
-                            self.lx.span_start = self.lx.abs_pos;
+                            self.create_and_push_token(&current_word, is_cmd, &mut current_deck)?;
                             is_cmd = false;
                         }
-                        if break_patterns.contains(&current_word) {
+                        if self.break_interpretation(&current_word, &break_patterns) {
                             self.clean_deck(&mut current_deck);
                             return Ok(current_deck);
                         }
                         current_word.clear();
-                        current_word.clear();
+                        self.lx.span_start = self.lx.abs_pos;
                     }
                 }
                 '|' => {
                     debug!("tokenize(): found pipe");
 
                     if !current_word.is_empty() {
-                        let token = self.create_token(&current_word, is_cmd)?;
-                        debug!("pushing token: {:?}", token);
-                        current_deck.push_back(token);
-                        tokens_pushed += 1;
-                        debug!("tokens_pushed: {}", tokens_pushed);
+                        self.create_and_push_token(&current_word, is_cmd, &mut current_deck)?;
                         self.lx.span_start = self.lx.abs_pos;
                         current_word.clear();
                     }
@@ -1393,10 +1442,7 @@ fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, 
                             '|' => {
 
                                 current_word.push(self.lx.advance().unwrap());
-                                let token = self.create_token(&current_word, is_cmd)?;
-                                current_deck.push_back(token);
-                                tokens_pushed += 1;
-                                debug!("tokens_pushed: {}", tokens_pushed);
+                                self.create_and_push_token(&current_word, is_cmd, &mut current_deck)?;
                                 self.lx.span_start = self.lx.abs_pos;
                                 current_word.clear();
                             }
@@ -1404,10 +1450,7 @@ fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, 
                                 debug!("tokenize(): Returning single pipe: {}", current_word);
 
                                 debug!("tokenize(): Pushing word to block: {}", current_word);
-                                let token = self.create_token(&current_word, is_cmd)?;
-                                current_deck.push_back(token);
-                                tokens_pushed += 1;
-                                debug!("tokens_pushed: {}", tokens_pushed);
+                                self.create_and_push_token(&current_word, is_cmd, &mut current_deck)?;
                                 self.lx.span_start = self.lx.abs_pos;
                                 current_word.clear();
                                 self.lx.advance();
@@ -1420,19 +1463,13 @@ fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, 
 
                     if !current_word.is_empty() {
                         debug!("tokenize(): Pushing word to block: {}", current_word);
-                        let token = self.create_token(&current_word, is_cmd)?;
-                        current_deck.push_back(token);
-                        tokens_pushed += 1;
-                        debug!("tokens_pushed: {}", tokens_pushed);
+                        self.create_and_push_token(&current_word, is_cmd, &mut current_deck)?;
                         self.lx.span_start = self.lx.abs_pos;
                         current_word.clear();
                     }
                     current_word = "&&".into();
                     self.lx.advance();
-                    let token = self.create_token(&current_word, is_cmd)?;
-                    current_deck.push_back(token);
-                    tokens_pushed += 1;
-                    debug!("tokens_pushed: {}", tokens_pushed);
+                    self.create_and_push_token(&current_word, is_cmd, &mut current_deck)?;
                     self.lx.span_start = self.lx.abs_pos;
                     current_word.clear();
                 }
@@ -1442,7 +1479,6 @@ fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, 
                     let mut redir_check_stack = self.lx.chars.clone();
                     let mut redir_test_string: String = "".into();
                     let mut count = 0;
-
 
                     while let Some(check_char) = redir_check_stack.pop_front() {
                         debug!(
@@ -1466,10 +1502,7 @@ fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, 
                             current_word.push(redir_char);
                             count -= 1
                         }
-                        let token = self.create_token(&current_word, is_cmd)?;
-                        current_deck.push_back(token);
-                        tokens_pushed += 1;
-                        debug!("tokens_pushed: {}", tokens_pushed);
+                        self.create_and_push_token(&current_word, is_cmd, &mut current_deck)?;
                         self.lx.span_start = self.lx.abs_pos;
                         current_word.clear();
                     }
@@ -1478,14 +1511,11 @@ fn dispatch_context(&mut self, context: Context, is_cmd: bool) -> Result<Token, 
             }
         }
         if !current_word.is_empty() {
-            if !break_patterns.is_empty() && !break_patterns.contains(&current_word) {
+            if !break_patterns.is_empty() && !self.break_interpretation(&current_word, &break_patterns) {
 
                 return Err(self.parse_error(format!("Expected one of {:?}, found this: {}", break_patterns, current_word)));
             } else {
-                let token = self.create_token(&current_word, is_cmd)?;
-                current_deck.push_back(token);
-                tokens_pushed += 1;
-                debug!("tokens_pushed: {}", tokens_pushed);
+                self.create_and_push_token(&current_word, is_cmd, &mut current_deck)?;
                 self.lx.span_start = self.lx.abs_pos;
                 current_word.clear();
             }

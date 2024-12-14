@@ -43,7 +43,7 @@ use crate::shellenv::ShellEnv;
 
 fn main() {
     env_logger::init();
-    let input = "for for in for; do for=for; echo $for; done";
+    let input = "/path/to/thing";
     let mut shellenv = ShellEnv::new(false,false);
     let mut input_man = RshInputManager::new(input,&mut shellenv);
     let tokens = input_man.interpret(None,true);
