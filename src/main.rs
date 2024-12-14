@@ -20,21 +20,37 @@
   //let _ = event_loop.listen().await;
 //}
 
-pub mod parser;
-pub mod prompt;
-pub mod event;
-pub mod execute;
-pub mod shellenv;
-pub mod builtin;
 
-use crate::event::EventLoop;
+pub mod parser2;
+//pub mod prompt;
+//pub mod event;
+//pub mod execute;
+pub mod shellenv;
+//pub mod builtin;
+
+use crate::parser2::RshInputManager;
+//use crate::event::EventLoop;
 use crate::shellenv::ShellEnv;
 
 
-#[tokio::main]
-async fn main() {
+//#[tokio::main]
+//async fn main() {
+    //env_logger::init();
+    //let mut shellenv = ShellEnv::new(false,true);
+    //let mut event_loop = EventLoop::new(&mut shellenv);
+    //let _ = event_loop.listen().await;
+//}
+
+fn main() {
     env_logger::init();
-    let mut shellenv = ShellEnv::new(true);
-    let mut event_loop = EventLoop::new(shellenv);
-    let _ = event_loop.listen().await;
+    let input = "for for in for; do for=for; echo $for; done";
+    let mut shellenv = ShellEnv::new(false,false);
+    let mut input_man = RshInputManager::new(input,&mut shellenv);
+    let tokens = input_man.interpret(None,true);
+    match tokens {
+        Ok(tree) => for token in tree {
+            println!("{}",token);
+        },
+        Err(e) => println!("{}",e)
+    }
 }

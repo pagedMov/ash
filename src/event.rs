@@ -65,18 +65,18 @@ pub enum Signals {
     SIGUSR2
 }
 
-pub struct EventLoop {
+pub struct EventLoop<'a> {
     sender: mpsc::Sender<ShellEvent>,
     receiver: mpsc::Receiver<ShellEvent>,
-    shellenv: ShellEnv
+    shellenv: &'a mut ShellEnv
 }
 
-impl EventLoop {
+impl<'a> EventLoop<'a> {
     /// Creates a new `EventLoop` instance with a message passing channel.
     ///
     /// # Returns
     /// A new instance of `EventLoop` with a sender and receiver for inter-task communication.
-    pub fn new(shellenv: ShellEnv) -> Self {
+    pub fn new(shellenv: &'a mut ShellEnv) -> Self {
         let (sender, receiver) = mpsc::channel(100);
         Self {
             sender,
@@ -125,7 +125,7 @@ impl EventLoop {
             match event {
                 ShellEvent::Prompt => {
                     // Trigger the prompt logic.
-                    prompt::prompt(self.inbox()).await;
+                    prompt::prompt(self.inbox(),self.shellenv).await;
                 }
                 ShellEvent::Exit(exit_code) => {
                     // Handle exit events and set the exit code.

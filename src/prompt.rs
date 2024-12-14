@@ -1,10 +1,10 @@
 use tokio::{io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader}, sync::mpsc};
-use log::debug;
+use log::{trace,debug};
 
-use crate::event::{ShellError,ShellEvent};
+use crate::{event::{ShellError,ShellEvent}, shellenv::ShellEnv};
 use crate::parser;
 
-pub async fn prompt(sender: mpsc::Sender<ShellEvent>) {
+pub async fn prompt(sender: mpsc::Sender<ShellEvent>, shellenv: &mut ShellEnv) {
     debug!("Reached prompt");
 
     let mut stdout = io::stdout();
@@ -18,7 +18,8 @@ pub async fn prompt(sender: mpsc::Sender<ShellEvent>) {
     reader.read_line(&mut input).await.unwrap();
 
     let trimmed_input = input.trim().to_string();
-    let mut parser = parser::RshParser::new(&trimmed_input);
+    trace!("Received input! {}",trimmed_input);
+    let mut parser = parser::Rsh::new(&trimmed_input,shellenv);
     if let Err(e) = parser.tokenize() {
         let _ = sender.send(ShellEvent::CatchError(ShellError::ParsingError(e))).await;
         let _ = sender.send(ShellEvent::Prompt).await;

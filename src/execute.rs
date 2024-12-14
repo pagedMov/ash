@@ -6,18 +6,24 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::ffi::CString;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
 use log::{error,info,debug,trace};
+use glob::MatchOptions;
 
-use crate::builtin::echo;
+use crate::builtin::{cd, echo};
 use crate::event::ShellError;
-use crate::parser::{ASTNode, ChainOp, RedirType, Token, TokenType};
-use crate::shellenv::{self, ShellEnv};
+use crate::parser::{self, ASTNode, ChainOp, RedirType, Token, TokenType};
+use crate::shellenv::ShellEnv;
 
 // Allow both of these types to be handled by redirection
 pub trait RedirTarget {}
 impl RedirTarget for i32 {}
 impl RedirTarget for PathBuf {}
+
+pub const GLOB_OPTS: MatchOptions = MatchOptions {
+    case_sensitive: false,
+    require_literal_separator: true,
+    require_literal_leading_dot: false
+};
 
 #[derive(Debug)]
 pub enum RshExitStatus {
@@ -66,7 +72,7 @@ impl<'a> NodeWalker<'a> {
     /// stdout to.
     ///
     /// # Outputs: An RshExitStatus or a shell error.
-    pub fn walk(&mut self, node: ASTNode, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
+    fn walk(&mut self, node: ASTNode, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
         debug!("walking over node {:?} with these pipes: {:?},{:?}",node,stdin,stdout);
         let last_status;
         match node {
@@ -86,20 +92,23 @@ impl<'a> NodeWalker<'a> {
             ASTNode::Chain {..} => {
                 last_status = self.handle_chain(node)?;
             }
-            ASTNode::IfThen {..} => {
+            ASTNode::If {..} => {
                 last_status = self.handle_if(node)?;
             }
-            ASTNode::ForDo {..} => {
-                todo!("handle for loops")
+            ASTNode::For {..} => {
+                last_status = self.handle_for(node)?;
             }
-            ASTNode::WhileDo {..} | ASTNode::UntilDo { .. } => {
-                last_status = self.handle_while_and_until(node)?;
+            ASTNode::Loop {..} => {
+                last_status = self.handle_loop(node)?;
             }
-            ASTNode::CaseIn {..} => {
+            ASTNode::Case {..} => {
                 todo!("handle case-in")
             }
             ASTNode::FuncDef {..} => {
                 todo!("handle function definition")
+            }
+            ASTNode::Assignment {..} => {
+                last_status = self.handle_assignment(node)?;
             }
             _ => unreachable!()
         }
@@ -107,7 +116,7 @@ impl<'a> NodeWalker<'a> {
     }
 
     // One for checking conditions and one for executing code bodies
-    pub fn walk_condition(&mut self, commands: VecDeque<ASTNode>) -> Result<RshExitStatus,ShellError> {
+    fn walk_condition(&mut self, commands: VecDeque<ASTNode>) -> Result<RshExitStatus,ShellError> {
         let mut last_status = RshExitStatus::Success;
         for command in commands {
             last_status = self.walk(command,None,None)?;
@@ -117,7 +126,7 @@ impl<'a> NodeWalker<'a> {
         }
         Ok(last_status)
     }
-    pub fn walk_body(&mut self, commands: VecDeque<ASTNode>) -> Result<RshExitStatus,ShellError> {
+    fn walk_body(&mut self, commands: VecDeque<ASTNode>) -> Result<RshExitStatus,ShellError> {
         let mut last_status = RshExitStatus::Success;
         for command in commands {
             last_status = self.walk(command,None,None)?;
@@ -125,57 +134,104 @@ impl<'a> NodeWalker<'a> {
         Ok(last_status)
     }
 
-    pub fn handle_for(&mut self, node: ASTNode) -> Result<RshExitStatus, ShellError> {
+    /// For loops in bash can have multiple loop variables, e.g. `for a b c in 1 2 3 4 5 6`
+    /// In this case, loop_vars are also iterated through, e.g. a = 1, b = 2, c = 3, etc
+    /// Here, we use the modulo operator to figure out which variable to set on each iteration.
+    fn handle_for(&mut self, node: ASTNode) -> Result<RshExitStatus, ShellError> {
         let mut last_status = RshExitStatus::Success;
-        if let ASTNode::ForDo { vars, array, body } = node {
 
+        if let ASTNode::For { vars, mut array, body } = node {
+            let var_count = vars.len();
+            let mut var_index = 0;
+            let mut iteration_count = 0;
+
+            while !array.is_empty() {
+                // Clear variables at the start of each iteration
+                self.clear_variables(&vars);
+
+                // Get the current value from the array
+                let current_value = array.pop_front().unwrap().text().to_string();
+
+                // Set the current variable to the current value
+                let current_var = vars[var_index].text().to_string();
+                self.shellenv.set_variable(current_var, current_value);
+
+                // Update the variable index for the next iteration
+                iteration_count += 1;
+                var_index = iteration_count % var_count;
+
+                // Execute the body of the loop
+                last_status = self.walk_body(body.get_body())?;
+            }
         }
-        todo!()
+
+        Ok(last_status)
     }
 
-    pub fn handle_while_and_until(&mut self, node: ASTNode) -> Result<RshExitStatus, ShellError> {
-        let mut last_status = RshExitStatus::Success;
-        match node {
-            ASTNode::WhileDo { body } => {
-                while let Ok(RshExitStatus::Success) = self.walk_condition(body.get_cond()) {
-                    last_status = self.walk_body(body.get_body())?;
-                }
-                Ok(last_status)
-            }
-            ASTNode::UntilDo { body } => {
-                while let Ok(RshExitStatus::Fail(_code)) = self.walk_condition(body.get_cond()) {
-                    last_status = self.walk_body(body.get_body())?;
-                }
-                Ok(last_status)
-            }
-            _ => unreachable!()
+    // Helper function to clear all variables
+    fn clear_variables(&mut self, vars: &VecDeque<Token>) {
+        for var in vars {
+            self.shellenv.set_variable(var.text().into(), "".into());
         }
     }
 
-    pub fn handle_if(&mut self, node: ASTNode) -> Result<RshExitStatus, ShellError> {
-        if let ASTNode::IfThen { if_block, elif_blocks, else_block } = node {
-            let if_result = self.walk_condition(if_block.get_cond());
+    fn handle_loop(&mut self, node: ASTNode) -> Result<RshExitStatus, ShellError> {
+        let mut last_status = RshExitStatus::Success;
 
-            if let Ok(RshExitStatus::Success) = if_result {
-                return self.walk_body(if_block.get_body())
+        if let ASTNode::Loop { condition, body } = node {
+            loop {
+                // Evaluate the loop condition
+                let condition_status = self.walk_condition(body.get_cond())?;
 
-            } else if !elif_blocks.is_empty() {
-                let mut elif_result;
-                for path in elif_blocks {
-                    elif_result = self.walk_condition(path.get_cond());
-                    if let Ok(RshExitStatus::Success) = elif_result {
-                        return self.walk_body(path.get_body())
+                match condition {
+                    true => {
+                        if !matches!(condition_status,RshExitStatus::Success) {
+                            break; // Exit for a `while` loop when condition is false
+                        }
+                    }
+                    false => {
+                        if matches!(condition_status,RshExitStatus::Success) {
+                            break; // Exit for an `until` loop when condition is true
+                        }
                     }
                 }
 
-            } else if let Some(path) = else_block {
-                return self.walk_body(path.get_body())
+                // Execute the body of the loop
+                last_status = self.walk_body(body.get_body())?;
+
+                // Check for break or continue signals
+                // match last_status {
+                    // RshExitStatus::Break => return Ok(RshExitStatus::Break),
+                    // RshExitStatus::Continue => continue,
+                    // _ => {}
+                // }
+            }
+            Ok(last_status)
+        } else {
+            Err(ShellError::InvalidSyntax(
+                "Expected a loop node in handle_loop".to_string(),
+            ))
+        }
+    }
+
+    fn handle_if(&mut self, node: ASTNode) -> Result<RshExitStatus, ShellError> {
+        let mut last_result;
+
+        if let ASTNode::If { mut cond_blocks, else_block } = node {
+            while let Some(block) = cond_blocks.pop_front() {
+                last_result = self.walk_condition(block.get_cond());
+                if let Ok(RshExitStatus::Success) = last_result {
+                    return self.walk_body(block.get_body())
+                }
+            }
+            if else_block.is_some() {
+                return self.walk_body(else_block.unwrap().get_body())
             }
         }
         Ok(RshExitStatus::Fail(1))
     }
 
-    pub fn handle_chain(&mut self, node: ASTNode) -> Result<RshExitStatus, ShellError> {
+    fn handle_chain(&mut self, node: ASTNode) -> Result<RshExitStatus, ShellError> {
         let mut last_status = RshExitStatus::from(0);
 
         if let ASTNode::Chain { left, right, operator } = node {
@@ -196,11 +252,11 @@ impl<'a> NodeWalker<'a> {
         Ok(last_status)
     }
 
-    pub fn handle_pipeline(&mut self, node: ASTNode, stdin: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
+    fn handle_pipeline(&mut self, node: ASTNode, stdin: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
         let mut last_status = RshExitStatus::from(0);
 
         // Create the pipe
-        let (read, write) = nix::unistd::pipe().map_err(|e| {
+        let (read, write) = pipe().map_err(|e| {
             ShellError::ExecFailed(format!("Failed to create pipe: {}", e), 1)
         })?;
         let (read, write) = (read.as_raw_fd(), write.as_raw_fd());
@@ -211,6 +267,10 @@ impl<'a> NodeWalker<'a> {
             last_status = self.walk(*left, stdin, Some(write))
                 .expect("Failed to walk left side of pipeline");
 
+            if let RshExitStatus::Fail(_) = last_status {
+                return Ok(last_status)
+            }
+
             debug!("Walking right side of pipeline: {:?}", right);
             last_status = self.walk(*right, Some(read), None)
                 .expect("Failed to walk right side of pipeline");
@@ -219,33 +279,89 @@ impl<'a> NodeWalker<'a> {
         Ok(last_status)
     }
 
-    pub fn extract_args(&self, node: ASTNode) -> (Vec<CString>, VecDeque<Token>) {
+    fn handle_assignment(&mut self, node: ASTNode) -> Result<RshExitStatus,ShellError> {
+        if let ASTNode::Assignment { var, val } = node {
+            self.shellenv.set_variable(var, val);
+        }
+        Ok(RshExitStatus::Success)
+    }
+
+    fn handle_builtin(&mut self, node: ASTNode, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
+        let (argv,_redirs) = self.extract_args(node);
+        match argv[0].to_str().unwrap() {
+            "echo" => echo(argv.into(), stdout),
+            "cd" => cd(self.shellenv, argv.into()),
+            _ => unimplemented!()
+        }
+    }
+
+    /// Extracts arguments and redirections from an AST node.
+    ///
+    /// This function processes an AST node of type `Command`, `Builtin`, or `Function`
+    /// and extracts the arguments and redirections from it. The arguments are converted
+    /// to `CString` and collected into a vector, while the redirections are collected
+    /// into a `VecDeque`.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The AST node to extract arguments and redirections from.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// * A vector of `CString` representing the extracted arguments.
+    /// * A `VecDeque` of `Token` representing the extracted redirections.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the provided `node` is not of type `Command`, `Builtin`,
+    /// or `Function`.
+    ///
+    /// # Example
+    ///
+    /// let node = ASTNode::Command { argv: vec![...].into_iter().collect() };
+    /// let (args, redirs) = shell.extract_args(node);
+    ///
+    /// # Notes
+    ///
+    /// - The function uses `trace!` and `debug!` macros for logging purposes.
+    /// - Variable substitutions (`$var`) are resolved using the `shellenv`'s `get_variable` method.
+    /// - If a variable substitution is not found, an empty `CString` is added to the arguments.
+    ///
+    fn extract_args(&mut self, node: ASTNode) -> (Vec<CString>, VecDeque<Token>) {
         let mut args = vec![];
         let mut redirs = VecDeque::new();
-        if let ASTNode::Command { mut argv } = node {
-            trace!("Extracting arguments from command node: {:?}", args);
-            while let Some(word) = argv.pop_front() {
-                match word.class() {
-                    TokenType::Redir { .. } => {
-                        trace!("Found redirection token: {:?}", word);
-                        redirs.push_back(word);
-                        redirs.extend(argv.into_iter());
-                        break;
-                    }
-                    _ => {
-                        trace!("Adding argument: {}", word.text());
-                        args.push(CString::new(word.text()).unwrap());
+        match node {
+            ASTNode::Command { mut argv } | ASTNode::Builtin { mut argv } | ASTNode::Function { mut argv } => {
+                trace!("Extracting arguments from command node: {:?}", args);
+                while let Some(word) = argv.pop_front() {
+                    trace!("checking word: {}",word.text());
+                    match word.class() {
+                        TokenType::Redir { .. } => {
+                            trace!("Found redirection token: {:?}", word);
+                            redirs.push_back(word);
+                            redirs.extend(argv.into_iter());
+                            break;
+                        }
+                        _ => {
+                            // Expand arguments, only expand braces if arguments is not empty
+                            let mut expanded = parser::expand(self.shellenv, word.clone());
+
+                            while let Some(expanded_token) = expanded.pop_front() {
+                                let cstring = CString::new(expanded_token.text()).unwrap();
+                                args.push(cstring);
+                            }
+                        }
                     }
                 }
             }
-        } else {
-            panic!("Unexpected ASTNode variant: {:?}", node);
+            _ => panic!("Unexpected ASTNode variant: {:?}", node),
         }
         debug!("Extracted args: {:?}, redirs: {:?}", args, redirs);
         (args, redirs)
     }
 
-    pub fn handle_redirs(&self, mut redirs: VecDeque<Token>) -> Result<(), ShellError> {
+    fn handle_redirs(&self, mut redirs: VecDeque<Token>) -> Result<(), ShellError> {
         let mut fd_queue: VecDeque<i32> = VecDeque::new();
         debug!("Handling redirections: {:?}", redirs);
 
@@ -282,17 +398,7 @@ impl<'a> NodeWalker<'a> {
         Ok(())
     }
 
-    pub fn handle_builtin(&self, node: ASTNode, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
-        if let ASTNode::Builtin { argv } = node {
-            match argv[0].text() {
-                "echo" => return echo(argv, stdout),
-                _ => unimplemented!()
-            };
-        };
-        unreachable!()
-    }
-
-    pub fn handle_command(&self, node: ASTNode, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
+    fn handle_command(&mut self, node: ASTNode, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
         info!("Handling command: {:?}", node);
 
         let original_stdin = dup(0).unwrap();
@@ -316,6 +422,7 @@ impl<'a> NodeWalker<'a> {
         }
 
         let (argv, redirs) = self.extract_args(node);
+
         let command = argv[0].clone();
         debug!("Command to execute: {:?}, argv: {:?}", command, argv);
 
@@ -411,7 +518,7 @@ where
 /// Note that the command name is the first argument in argv
 /// execvpe will handle path crawling for you
 /// just make sure that the path env var is set up
-pub fn hello_world() -> Result<(), String> {
+fn hello_world() -> Result<(), String> {
     // Command and arguments
     let command = "echo";
     let args = ["echo", "hello", "world"];

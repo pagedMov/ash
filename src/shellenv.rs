@@ -1,41 +1,59 @@
 use std::env;
 use std::collections::{HashSet,VecDeque,HashMap};
 use std::ffi::CString;
-use std::path::PathBuf;
+use std::os::fd::RawFd;
+use std::path::{Path, PathBuf};
 
-use crate::parser::ASTNode;
+use log::{trace,debug};
+
+use crate::parser2::ASTNode;
 
 #[derive(Debug, Clone)]
 pub struct ShellEnv {
     interactive: bool,
+    login: bool,
     env_vars: HashMap<String, String>,
     variables: HashMap<String, String>,
     aliases: HashMap<String, String>,
     functions: HashMap<String, VecDeque<ASTNode>>,
     parameters: HashMap<String, String>,
-    file_descriptors: HashSet<i32>
+    open_fds: HashSet<i32>
 }
 
 impl ShellEnv {
     // Constructor
-    pub fn new(interactive: bool) -> Self {
-        let mut file_descriptors = HashSet::new();
-        file_descriptors.insert(0);
-        file_descriptors.insert(1);
-        file_descriptors.insert(2);
+    pub fn new(login: bool, interactive: bool) -> Self {
+        let mut open_fds = HashSet::new();
+        open_fds.insert(0);
+        open_fds.insert(1);
+        open_fds.insert(2);
         Self {
             interactive,
+            login,
             env_vars: std::env::vars().collect::<HashMap<String,String>>(),
             variables: HashMap::new(),
             aliases: HashMap::new(),
             functions: HashMap::new(),
             parameters: HashMap::new(),
-            file_descriptors
+            open_fds
         }
     }
 
     pub fn source_file(&self, path: PathBuf) {
         todo!("implement logic for sourcing files");
+    }
+
+    pub fn change_director(&mut self, path: &Path) {
+        self.export_variable("PWD".into(), path.to_str().unwrap().to_string());
+        let _ = env::set_current_dir(path);
+    }
+
+    pub fn open_fd(&mut self, fd: RawFd) {
+        self.open_fds.insert(fd);
+    }
+
+    pub fn close_fd(&mut self, fd: RawFd) {
+        self.open_fds.remove(&fd);
     }
 
     // Getters and Setters for `interactive`
@@ -53,7 +71,13 @@ impl ShellEnv {
 
     // Getters and Setters for `variables`
     pub fn get_variable(&self, key: &str) -> Option<&String> {
-        self.variables.get(key)
+        if let Some(value) = self.variables.get(key) {
+            Some(value)
+        } else if let Some(value) = self.env_vars.get(key) {
+            Some(value)
+        } else {
+            None
+        }
     }
 
     /// For C FFI calls
@@ -67,7 +91,14 @@ impl ShellEnv {
     }
 
     pub fn set_variable(&mut self, key: String, value: String) {
-        self.variables.insert(key, value);
+        debug!("inserted var: {} with value: {}",key,value);
+        self.variables.insert(key.clone(), value);
+        trace!("testing variable get: {} = {}", key, self.get_variable(key.as_str()).unwrap())
+    }
+
+    pub fn export_variable(&mut self, key: String, value: String) {
+        self.variables.insert(key.clone(),value.clone());
+        self.env_vars.insert(key,value);
     }
 
     pub fn remove_variable(&mut self, key: &str) -> Option<String> {
