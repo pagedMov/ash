@@ -10,6 +10,24 @@ use nix::NixPath;
 use crate::shellenv::ShellEnv;
 
 type TokenDeck = VecDeque<Token>;
+type NodeDeck = VecDeque<ASTNode>;
+
+const BUILTINS: [&str; 14] = [
+    "echo", "set", "shift", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node",
+    "exec", "source", "wait",
+];
+
+const FUNCTIONS: [&str; 1] = [
+    // Will replace this with an actual functions implementation later
+    // Used for now for word flags
+    "PLACEHOLDER_TEXT",
+];
+
+const ALIASES: [&str; 1] = [
+    // Will replace this with an actual aliases implementation later
+    // Used for now for word flags
+    "PLACEHOLDER_TEXT",
+];
 
 macro_rules! define_patterns {
     ($($name:expr => $pattern:expr),* $(,)?) => {{
@@ -172,17 +190,17 @@ impl fmt::Display for RshParseError {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ASTNode {
     Command {
-        argv: VecDeque<Token>,
+        argv: TokenDeck,
     },
     Builtin {
-        argv: VecDeque<Token>,
+        argv: TokenDeck,
+    },
+    Function {
+        argv: TokenDeck,
     },
     Assignment {
         var: String,
         val: String,
-    },
-    Function {
-        argv: VecDeque<Token>,
     },
     Chain {
         left: Box<ASTNode>,
@@ -194,26 +212,26 @@ pub enum ASTNode {
         right: Box<ASTNode>,
     },
     If {
-        cond_blocks: VecDeque<Conditional>,
-        else_block: Option<Conditional>,
+        cond_blocks: VecDeque<ASTConditional>,
+        else_block: Option<NodeDeck>,
     },
     Loop {
         condition: bool,
-        body: Conditional,
+        body: ASTConditional,
     },
     For {
-        vars: VecDeque<Token>,
-        array: VecDeque<Token>,
-        body: Conditional,
+        vars: TokenDeck,
+        array: TokenDeck,
+        body: NodeDeck,
     },
     Case {
-        var: WordDesc,
-        cases: Vec<(String, ASTNode)>,
+        var: Token,
+        cases: VecDeque<(Token, NodeDeck)>,
     },
     Select {
-        var: WordDesc,
-        options: Vec<(String, ASTNode)>,
-        body: TokenDeck,
+        var: Token,
+        options: TokenDeck,
+        body: NodeDeck,
     },
     FuncDef {
         func_name: WordDesc,
@@ -268,7 +286,6 @@ pub enum TokenType {
         structure: Structure,
     },
     Loop {
-        condition: bool,
         structure: Structure,
     },
     Case {
@@ -572,11 +589,13 @@ impl fmt::Display for Token {
             let connector = if is_last { "└── " } else { "├── " };
 
             // Get the token name, handling the special case for Loop tokens.
-            let token_name = if let TokenType::Loop { condition, structure: _ } = &token.token_type {
-                match condition {
-                    true => "While",
-                    false => "Until"
-                }
+            let token_name = if let TokenType::Loop { structure } = &token.token_type {
+                if let Structure::Loop { condition, logic: _ } = structure {
+                    match condition {
+                        true => "While",
+                        false => "Until"
+                    }
+                } else { unreachable!() }
             } else {
                 token_type_name(&token.token_type)
             };
@@ -766,14 +785,29 @@ impl Conditional {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ASTConditional {
+    condition: NodeDeck,
+    body: NodeDeck,
+}
+
+impl ASTConditional {
+    pub fn get_cond(&self) -> NodeDeck {
+        self.condition.clone()
+    }
+    pub fn get_body(&self) -> NodeDeck {
+        self.body.clone()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Structure {
     If {
         cond_blocks: VecDeque<Conditional>,
         else_block: Option<TokenDeck>,
     },
     For {
-        loop_vars: VecDeque<Token>,
-        loop_arr: VecDeque<Token>,
+        loop_vars: TokenDeck,
+        loop_arr: TokenDeck,
         body: TokenDeck,
     },
     Loop {
@@ -1105,11 +1139,9 @@ impl<'a> RshInputManager<'a> {
             Context::If => TokenType::If { structure },
             Context::For => TokenType::For { structure },
             Context::While => TokenType::Loop {
-                condition: true,
                 structure,
             },
             Context::Until => TokenType::Loop {
-                condition: false,
                 structure,
             },
             Context::Case => TokenType::Case { structure },
@@ -1293,6 +1325,12 @@ impl<'a> RshInputManager<'a> {
         Ok(())
     }
 
+    pub fn build_ast(&mut self) -> Result<NodeDeck,RshParseError> {
+        let tokens = self.interpret(None, true)?;
+        let ast = self.parse(tokens)?;
+        Ok(ast)
+    }
+
     fn break_interpretation(&self, current_word: &String, break_patterns: &Vec<String>) -> bool {
         break_patterns.contains(current_word)
     }
@@ -1456,6 +1494,7 @@ impl<'a> RshInputManager<'a> {
                                 self.lx.advance();
                             }
                         }
+                        is_cmd = true;
                     }
                 }
                 '&' if matches!(*self.lx.chars.front().unwrap(), '&') => {
@@ -1472,6 +1511,7 @@ impl<'a> RshInputManager<'a> {
                     self.create_and_push_token(&current_word, is_cmd, &mut current_deck)?;
                     self.lx.span_start = self.lx.abs_pos;
                     current_word.clear();
+                    is_cmd = true;
                 }
                 '&' | '0'..='9' | '>' | '<' => {
                     debug!("tokenize(): Maybe found redirection?");
@@ -1522,5 +1562,160 @@ impl<'a> RshInputManager<'a> {
         }
         self.clean_deck(&mut current_deck);
         Ok(current_deck)
+    }
+
+    pub fn parse(&mut self,mut tokens: TokenDeck) -> Result<NodeDeck,RshParseError> {
+        let mut node_deck: NodeDeck = VecDeque::new();
+        while let Some(token) = tokens.pop_front() {
+            match token.class() {
+                TokenType::Ident | TokenType::String { .. } | TokenType::Path { .. } => {
+                    tokens.push_front(token);
+                    let node = self.parse_invocation(&mut tokens)?;
+                    node_deck.push_back(node);
+                }
+                TokenType::If { structure } => {
+                    let mut node_cond_blocks = VecDeque::new();
+                    let mut node_else_block = None;
+                    if let Structure::If { cond_blocks, else_block } = structure {
+                        for block in cond_blocks {
+                            let node_conditional = ASTConditional {
+                                condition: self.parse(block.get_cond())?,
+                                body: self.parse(block.get_body())?
+                            };
+                            node_cond_blocks.push_back(node_conditional);
+                        }
+                        if let Some(block) = else_block {
+                            node_else_block = Some(self.parse(block.clone())?);
+                        }
+                    } else { unreachable!() }
+                    let node = ASTNode::If { cond_blocks: node_cond_blocks, else_block: node_else_block };
+                    node_deck.push_back(node);
+                }
+                TokenType::For { structure } => {
+                    let vars: TokenDeck;
+                    let array: TokenDeck;
+                    let node_body: NodeDeck;
+                    if let Structure::For { loop_vars, loop_arr, body } = structure {
+                        vars = loop_vars.clone();
+                        array = loop_arr.clone();
+                        node_body = self.parse(body.clone())?;
+                    } else { unreachable!() }
+                    let node = ASTNode::For { vars, array, body: node_body };
+                    node_deck.push_back(node);
+                }
+                TokenType::Loop { structure } => {
+                    let loop_type;
+                    let node_body;
+                    if let Structure::Loop { condition, logic } = structure {
+                        let token_condition = logic.get_cond();
+                        let token_body = logic.get_body();
+                        loop_type = condition;
+                        node_body = ASTConditional {
+                            condition: self.parse(token_condition)?,
+                            body: self.parse(token_body)?
+                        };
+                    } else { unreachable!() }
+                    let node = ASTNode::Loop { condition: *loop_type, body: node_body };
+                    node_deck.push_back(node);
+                }
+                TokenType::Case { structure } => {
+                    let var: Token;
+                    let mut node_cases: VecDeque<(Token, NodeDeck)> = VecDeque::new();
+                    if let Structure::Case { check_string, cases } = structure {
+                        var = *check_string.clone();
+                        for case in cases {
+                            let pattern = case.0.clone();
+                            let node_deck = self.parse(case.1.clone())?;
+                            let new_case = (pattern,node_deck);
+                            node_cases.push_back(new_case);
+                        }
+                    } else { unreachable!() }
+                    let node = ASTNode::Case { var, cases: node_cases };
+                    node_deck.push_back(node);
+                }
+                TokenType::Select { structure } => {
+                    let node_var;
+                    let node_options;
+                    let node_body;
+                    if let Structure::Select { target_var, options, body } = structure {
+                        node_var = *target_var.clone();
+                        node_options = options;
+                        node_body = self.parse(body.clone())?;
+                    } else { unreachable!() }
+                    let node = ASTNode::Select { var: node_var, options: node_options.clone(), body: node_body };
+                    node_deck.push_back(node);
+                }
+                _ => unimplemented!("Logic not yet implemented for this token: {}",token)
+            }
+        }
+        todo!()
+    }
+    fn parse_invocation(&mut self, tokens: &mut TokenDeck) -> Result<ASTNode,RshParseError> {
+        // This function uses two double-ended queues to parse the tokens efficiently.
+        // Nodes are popped from tokens, checked for a condition, then popped into the buffer
+        // If the condition is met, the loop breaks and the two resulting 'sides' are operated on.
+        let mut buffer: TokenDeck = VecDeque::new();
+        while let Some(token) = tokens.pop_front() {
+            match token.class() {
+                TokenType::And => {
+                    return Ok(ASTNode::Chain {
+                        left: Box::new(self.parse_invocation(&mut buffer)?),
+                        right: Box::new(self.parse_invocation(tokens)?),
+                        operator: ChainOp::And
+                    })
+                },
+                TokenType::Or => {
+                    return Ok(ASTNode::Chain {
+                        left: Box::new(self.parse_invocation(&mut buffer)?),
+                        right: Box::new(self.parse_invocation(tokens)?),
+                        operator: ChainOp::Or
+                    })
+                },
+                TokenType::Cmdsep => break,
+                _ => continue
+            }
+        }
+        buffer.extend(tokens.drain(..)); // Reset the token deck for the next check
+        tokens.extend(buffer.drain(..)); // Do it like this to keep the tokens in the right order
+
+        while let Some(token) = tokens.pop_front() {
+            match token.class() {
+                TokenType::Pipe => {
+                    return Ok(ASTNode::Pipeline {
+                        left: Box::new(self.parse_invocation(&mut buffer)?),
+                        right: Box::new(self.parse_invocation(tokens)?)
+                    })
+                },
+                TokenType::Cmdsep => break,
+                _ => continue
+            }
+        }
+        buffer.extend(tokens.drain(..));
+        tokens.extend(buffer.drain(..));
+
+        let mut argv: TokenDeck = VecDeque::new();
+        while let Some(token) = tokens.pop_front() {
+            match token.class() {
+                TokenType::Cmdsep => {
+                    let cmd_name = argv.front().unwrap().text();
+                    match cmd_name {
+                        _ if BUILTINS.contains(&cmd_name) => {
+                            return Ok(ASTNode::Builtin { argv })
+                        }
+                        _ if FUNCTIONS.contains(&cmd_name) => {
+                            return Ok(ASTNode::Function { argv })
+                        }
+                        _ => {
+                            return Ok(ASTNode::Command { argv })
+                        }
+                    }
+                }
+                TokenType::Ident | TokenType::String {..} | TokenType::Path {..} => {
+                    argv.push_back(token);
+                }
+                _ => return Err(self.parse_error(format!("Found this while looking for arguments: {}", token.text())))
+            }
+        }
+        Err(self.parse_error("Reached bottom of invocation parsing without discovering a valid pattern".into()))
     }
 }

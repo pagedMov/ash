@@ -43,13 +43,13 @@ use crate::shellenv::ShellEnv;
 
 fn main() {
     env_logger::init();
-    let input = "/path/to/thing";
+    let input = "pipeline1 with arg && pipeline2 with arg";
     let mut shellenv = ShellEnv::new(false,false);
     let mut input_man = RshInputManager::new(input,&mut shellenv);
     let tokens = input_man.interpret(None,true);
     match tokens {
         Ok(tree) => for token in tree {
-            println!("{}",token);
+            println!("{:?}",token);
         },
         Err(e) => println!("{}",e)
     }
