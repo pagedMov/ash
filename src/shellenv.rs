@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use log::{trace,debug};
 
-use crate::parser2::ASTNode;
+use crate::parser2::Node;
 
 #[derive(Debug, Clone)]
 pub struct ShellEnv {
@@ -15,7 +15,7 @@ pub struct ShellEnv {
     env_vars: HashMap<String, String>,
     variables: HashMap<String, String>,
     aliases: HashMap<String, String>,
-    functions: HashMap<String, VecDeque<ASTNode>>,
+    functions: HashMap<String, VecDeque<Node>>,
     parameters: HashMap<String, String>,
     open_fds: HashSet<i32>
 }
@@ -119,15 +119,15 @@ impl ShellEnv {
     }
 
     // Getters and Setters for `functions`
-    pub fn get_function(&self, name: &str) -> Option<&VecDeque<ASTNode>> {
+    pub fn get_function(&self, name: &str) -> Option<&VecDeque<Node>> {
         self.functions.get(name)
     }
 
-    pub fn set_function(&mut self, name: String, body: VecDeque<ASTNode>) {
+    pub fn set_function(&mut self, name: String, body: VecDeque<Node>) {
         self.functions.insert(name, body);
     }
 
-    pub fn remove_function(&mut self, name: &str) -> Option<VecDeque<ASTNode>> {
+    pub fn remove_function(&mut self, name: &str) -> Option<VecDeque<Node>> {
         self.functions.remove(name)
     }
 

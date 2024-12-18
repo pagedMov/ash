@@ -26,11 +26,15 @@ pub mod parser2;
 //pub mod event;
 //pub mod execute;
 pub mod shellenv;
+pub mod interp;
 //pub mod builtin;
 
-use crate::parser2::RshInputManager;
+use interp::parse::descend;
+use interp::debug;
+
 //use crate::event::EventLoop;
 use crate::shellenv::ShellEnv;
+use im::Vector;
 
 
 //#[tokio::main]
@@ -43,14 +47,9 @@ use crate::shellenv::ShellEnv;
 
 fn main() {
     env_logger::init();
-    let input = "pipeline1 with arg && pipeline2 with arg";
-    let mut shellenv = ShellEnv::new(false,false);
-    let mut input_man = RshInputManager::new(input,&mut shellenv);
-    let tokens = input_man.interpret(None,true);
-    match tokens {
-        Ok(tree) => for token in tree {
-            println!("{:?}",token);
-        },
-        Err(e) => println!("{}",e)
-    }
+    let input = "select opt in opt1 opt2 opt3; do case opt in; opt1) echo option 1;;opt2) echo option 2;;opt3) echo option 3;;esac; done";
+    let shellenv = ShellEnv::new(false,false);
+    let state = descend(input,&shellenv);
+    println!("printing tree");
+    println!("{}",state.ast);
 }
