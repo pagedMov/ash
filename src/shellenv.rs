@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use log::{trace,debug};
 
-use crate::parser2::Node;
+use crate::interp::parse::Node;
 
 #[derive(Debug, Clone)]
 pub struct ShellEnv {

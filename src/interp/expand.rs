@@ -1,12 +1,12 @@
 use glob::glob;
 use log::{trace,debug};
-use im::Vector;
+use std::collections::VecDeque;
 use crate::interp::token::{TkType,Tk,WordDesc};
 use crate::interp::parse::ParseState;
 use crate::interp::helper;
 
 pub fn expand(state: ParseState) -> ParseState {
-    let mut buffer = Vector::new();
+    let mut buffer = VecDeque::new();
     let mut tokens = state.tokens.clone();
     while let Some(tk) = tokens.pop_front() {
         for token in expand_token(tk) {
@@ -26,10 +26,10 @@ pub fn check_globs(string: String) -> bool {
     string.chars().any(|t| matches!(t, '?' | '*' | '[' | ']' | '!' | '-'))
 }
 
-pub fn expand_token(token: Tk) -> Vector<Tk> {
-    debug!("expand(): Starting expansion with token: {:?}", token);
-    let mut working_buffer: Vector<Tk> = Vector::new();
-    let mut product_buffer: Vector<Tk> = Vector::new();
+pub fn expand_token(token: Tk) -> VecDeque<Tk> {
+    trace!("expand(): Starting expansion with token: {:?}", token);
+    let mut working_buffer: VecDeque<Tk> = VecDeque::new();
+    let mut product_buffer: VecDeque<Tk> = VecDeque::new();
 
     working_buffer.push_back(token.clone());
     while let Some(token) = working_buffer.pop_front() {
@@ -73,9 +73,9 @@ pub fn expand_token(token: Tk) -> Vector<Tk> {
     product_buffer
 }
 
-pub fn expand_braces(word: String) -> Vector<String> {
-    let mut results = Vector::new();
-    let mut buffer = Vector::from(vec![word]);
+pub fn expand_braces(word: String) -> VecDeque<String> {
+    let mut results = VecDeque::new();
+    let mut buffer = VecDeque::from(vec![word]);
 
     while let Some(current) = buffer.pop_front() {
         if let Some((prefix, amble, postfix)) = parse_first_brace(&current) {
@@ -97,7 +97,7 @@ fn parse_first_brace(word: &str) -> Option<(String, String, String)> {
     let mut amble = String::new();
     let mut postfix = String::new();
     let mut char_iter = word.chars().peekable();
-    let mut brace_stack = Vector::new();
+    let mut brace_stack = VecDeque::new();
 
     // Parse prefix
     while let Some(&c) = char_iter.peek() {
@@ -144,7 +144,7 @@ fn parse_first_brace(word: &str) -> Option<(String, String, String)> {
     }
 }
 
-fn expand_amble(amble: String) -> Vector<String> {
+fn expand_amble(amble: String) -> VecDeque<String> {
     if amble.contains("..") {
         // Handle range expansion
         if let Some(expanded) = expand_range(&amble) {
@@ -152,13 +152,13 @@ fn expand_amble(amble: String) -> Vector<String> {
         }
     } else if amble.contains(',') {
         // Handle comma-separated values
-        return amble.split(',').map(|s| s.to_string()).collect::<Vector<String>>();
+        return amble.split(',').map(|s| s.to_string()).collect::<VecDeque<String>>();
     }
 
-    Vector::from(vec![amble]) // If no expansion is needed, return as-is
+    VecDeque::from(vec![amble]) // If no expansion is needed, return as-is
 }
 
-fn expand_range(range: &str) -> Option<Vector<String>> {
+fn expand_range(range: &str) -> Option<VecDeque<String>> {
     let parts: Vec<&str> = range.trim_matches('{').trim_matches('}').split("..").collect();
     if let [start, end] = parts.as_slice() {
         if let (Ok(start_num), Ok(end_num)) = (start.parse::<i32>(), end.parse::<i32>()) {

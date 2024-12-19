@@ -3,7 +3,7 @@ use once_cell::sync::Lazy;
 use log::{trace,debug};
 use regex::Regex;
 use std::collections::HashMap;
-use im::Vector;
+use std::collections::VecDeque;
 use crate::interp::parse::ParseState;
 use crate::interp::helper;
 
@@ -34,11 +34,11 @@ pub const WHITESPACE: [char;2] = [
 ];
 
 bitflags! {
-    #[derive(Debug,Clone,Copy,PartialEq)]
+    #[derive(Debug,Clone,Copy,PartialEq,Eq)]
     pub struct FnFlags: u32 {
         const RECURSE = 0b0001;
     }
-    #[derive(Debug,Clone,Copy,PartialEq)]
+    #[derive(Debug,Hash,Clone,Copy,PartialEq,Eq)]
     pub struct WdFlags: u32 {
         const KEYWORD =    0b00000000000001;
         const BUILTIN =    0b00000000000010;
@@ -52,8 +52,6 @@ bitflags! {
         const IN_PAREN =   0b00001000000000;
         const IS_SUB =     0b00010000000000;
         const IS_OP =      0b00100000000000;
-        const IN_CASE1 =   0b01000000000000; // After keyword, i.e. 'case var in'
-        const IN_CASE2 =   0b10000000000000; // After 'in', i.e pattern)block;;pattern)block;;
     }
 }
 
@@ -63,37 +61,6 @@ macro_rules! define_patterns {
         $(m.insert($name, Regex::new($pattern).unwrap());)*
         m
     }};
-}
-
-macro_rules! match_token {
-    ($word_desc:expr, $($key:expr => $token:expr,)* _ => $default:expr $(,)?) => {
-        {
-            let text = &$word_desc.text;
-            if false { unreachable!() } // Ensures the chain starts cleanly
-            $(
-                else if REGEX[$key].is_match(text) {
-                    $token
-                }
-            )*
-            else {
-                $default
-            }
-        }
-    };
-    ($word_desc:expr, $($key:expr => $token:expr,)* $(,)?) => {
-        {
-            let text = &$word_desc.text;
-            if false { unreachable!() }
-            $(
-                else if REGEX[$key].is_match(text) {
-                    $token
-                }
-            )*
-            else {
-                panic!("Unrecognized token: {}", text);
-            }
-        }
-    };
 }
 
 pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
@@ -115,13 +82,13 @@ pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
     }
 });
 
-#[derive(Debug,Clone,PartialEq)]
+#[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub struct Tk {
     pub tk_type: TkType,
     pub wd: WordDesc
 }
 
-#[derive(Debug,Clone,PartialEq)]
+#[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub enum TkType {
     // Control Flow Keywords
     If,
@@ -189,22 +156,22 @@ impl Tk {
             wd: WordDesc { text: "".into(), span: (0,0), flags: WdFlags::empty() }
         }
     }
-    pub fn end_of_input() -> Self {
+    pub fn end_of_input(end: usize) -> Self {
         Tk {
             tk_type: TkType::EOI,
-            wd: WordDesc { text: "".into(), span: (0,0), flags: WdFlags::empty() }
+            wd: WordDesc { text: "".into(), span: (0,end), flags: WdFlags::empty() }
         }
     }
     pub fn cmdsep(pos: usize) -> Self {
         Tk {
             tk_type: TkType::Cmdsep,
-            wd: WordDesc { text: ";".into(), span: (pos,pos), flags: WdFlags::empty() }
+            wd: WordDesc { text: ";".into(), span: (pos - 1,pos - 1), flags: WdFlags::empty() }
         }
     }
     pub fn casesep(pos: usize) -> Self {
         Tk {
             tk_type: TkType::CaseSep,
-            wd: WordDesc { text: ")".into(), span: (pos,pos), flags: WdFlags::empty() }
+            wd: WordDesc { text: ")".into(), span: (pos + 1,pos + 1), flags: WdFlags::empty() }
         }
     }
     pub fn case_delim(pos: usize) -> Self {
@@ -233,22 +200,22 @@ impl Tk {
             },
             _ if REGEX["process_sub"].is_match(text) => {
                 trace!("Matched process substitution: {}", text);
-                wd = wd.set_flags(|f| f | WdFlags::IS_SUB);
+                wd = wd.add_flag(WdFlags::IS_SUB);
                 TkType::ProcessSub
             },
             _ if REGEX["command_sub"].is_match(text) => {
                 trace!("Matched command substitution: {}", text);
-                wd = wd.set_flags(|f| f | WdFlags::IS_SUB);
+                wd = wd.add_flag(WdFlags::IS_SUB);
                 TkType::CommandSub
             },
             _ if REGEX["arithmetic"].is_match(text) => {
                 trace!("Matched arithmetic substitution: {}", text);
-                wd = wd.set_flags(|f| f | WdFlags::IS_SUB);
+                wd = wd.add_flag(WdFlags::IS_SUB);
                 TkType::ArithmeticSub
             },
             _ if REGEX["var_sub"].is_match(text) => {
                 trace!("Matched variable substitution: {}", text);
-                wd = wd.set_flags(|f| f | WdFlags::IS_SUB);
+                wd = wd.add_flag(WdFlags::IS_SUB);
                 TkType::VariableSub
             },
             _ if REGEX["rsh_shebang"].is_match(text) => {
@@ -346,7 +313,7 @@ impl Tk {
 }
 
 
-#[derive(Debug,Clone,PartialEq)]
+#[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub struct Redir {
     pub fd_out: usize,
     pub op: RedirType,
@@ -354,7 +321,7 @@ pub struct Redir {
     pub file_target: Option<Box<Tk>>
 }
 
-#[derive(Debug,Clone,PartialEq)]
+#[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub enum RedirType {
     Output,
     Append,
@@ -363,7 +330,7 @@ pub enum RedirType {
     Herestring
 }
 
-#[derive(Debug,Clone,PartialEq)]
+#[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub struct WordDesc {
     pub text: String,
     pub span: (usize,usize),
@@ -390,16 +357,38 @@ impl WordDesc {
             flags: self.flags
         }
     }
-    pub fn set_flags<F>(&self, expr: F) -> Self
-    where
-        F: FnOnce(WdFlags) -> WdFlags,
-    {
-        let flags = expr(self.flags);
-        let text = self.text.clone();
-        let span = self.span;
+    pub fn contains_flag(&self, flag: WdFlags) -> bool {
+        self.flags.contains(flag)
+    }
+
+    pub fn add_flag(&self, flag: WdFlags) -> Self {
+        let mut flags = self.flags;
+        flags |= flag;
+        let new = Self {
+            text: self.text.clone(),
+            span: self.span,
+            flags
+        };
+        trace!("added flag: {:?}, new flags {:?}",flag,new.flags);
+        new
+    }
+
+    pub fn remove_flag(&self, flag: WdFlags) -> Self {
+        let mut flags = self.flags;
+        flags &= !flag;
         Self {
-            text,
-            span,
+            text: self.text.clone(),
+            span: self.span,
+            flags
+        }
+    }
+
+    pub fn toggle_flag(&self, flag: WdFlags) -> Self {
+        let mut flags = self.flags;
+        flags ^= flag;
+        Self {
+            text: self.text.clone(),
+            span: self.span,
             flags
         }
     }
@@ -423,11 +412,11 @@ impl WordDesc {
             '(' => WdFlags::IN_PAREN,
             _ => unreachable!()
         };
-        self.reset_flags().set_flags(|f| f | flag)
+        self.reset_flags().add_flag(flag)
     }
 }
 
-pub fn test_redirection(c: char, mut chars: Vector<char>, mut word_desc: WordDesc) -> Option<(Vector<char>,WordDesc)> {
+pub fn test_redirection(c: char, mut chars: VecDeque<char>, mut word_desc: WordDesc) -> Option<(VecDeque<char>,WordDesc)> {
     debug!("nodeize(): Maybe found redirection?");
     let mut redir_test_stack = chars.clone();
     let mut redir_test_string: String = c.into();
@@ -467,19 +456,19 @@ pub fn tokenize(state: ParseState) -> ParseState {
         span: (0, 0),
         flags: WdFlags::empty(),
     };
-    let mut chars = state.input.chars().collect::<Vector<char>>();
-    let mut tokens: Vector<Tk> = Vector::from(vec![Tk::start_of_input()]);
+    let mut chars = state.input.chars().collect::<VecDeque<char>>();
+    let mut tokens: VecDeque<Tk> = VecDeque::from(vec![Tk::start_of_input()]);
     let mut is_arg = false; // Start in "command mode" since SOI implies a command
     trace!("Initialized state: word_desc: {:?}, tokens: {:?}", word_desc, tokens);
 
     while let Some(c) = chars.pop_front() {
         trace!("Processing character: {:?}", c);
-        if matches!(c,'&' | '0'..='9' | '>' | '<') { // Test for redirection
-            trace!("got something that looks like a redirection: {}",c);
+        if matches!(c, '&' | '0'..='9' | '>' | '<') { // Test for redirection
+            trace!("got something that looks like a redirection: {}", c);
             if let Some(data) = test_redirection(c, chars.clone(), word_desc.clone()) {
                 chars = data.0; // Update chars and word_desc if test is successful
                 word_desc = data.1;
-                continue
+                continue;
             }
         }
         word_desc = match c {
@@ -500,31 +489,33 @@ pub fn tokenize(state: ParseState) -> ParseState {
                     trace!("Finalizing delimited word");
                     if is_arg {
                         trace!("Current word is a command; resetting IS_ARG flag");
-                        word_desc = word_desc.set_flags(|f| f | WdFlags::IS_ARG);
+                        word_desc = word_desc.add_flag(WdFlags::IS_ARG);
                     }
-                    word_desc = word_desc.add_char(c);
-                    match word_desc {
-                        _ if word_desc.flags.contains(WdFlags::IN_BRACE) => word_desc.set_flags(|f| f & !WdFlags::IN_BRACE),
-                        _ if word_desc.flags.contains(WdFlags::IN_PAREN) => word_desc.set_flags(|f| f & !WdFlags::IN_PAREN),
-                        _ if word_desc.flags.contains(WdFlags::IN_BRACKET) => word_desc.set_flags(|f| f & !WdFlags::IN_BRACKET),
-                        _ => unreachable!()
+                    word_desc.add_char(c);
+                    if word_desc.contains_flag(WdFlags::IN_BRACE) {
+                        word_desc.remove_flag(WdFlags::IN_BRACE)
+                    } else if word_desc.contains_flag(WdFlags::IN_PAREN) {
+                        word_desc.remove_flag(WdFlags::IN_PAREN)
+                    } else if word_desc.contains_flag(WdFlags::IN_BRACKET) {
+                        word_desc.remove_flag(WdFlags::IN_BRACKET)
+                    } else {
+                        unreachable!()
                     }
                 }
             }
             '(' | '{' | '[' => {
-                word_desc = word_desc.add_char(c);
-                word_desc.delimit(c)
+                word_desc.add_char(c).delimit(c)
             }
             _ if helper::quoted(&word_desc) => {
                 trace!("Inside quoted context: {:?}", word_desc.flags);
                 match c {
-                    '"' if !word_desc.flags.contains(WdFlags::SNG_QUOTED) => {
+                    '"' if !word_desc.contains_flag(WdFlags::SNG_QUOTED) => {
                         trace!("Closing double quote found");
                         let word_desc = helper::finalize_word(&word_desc, &mut tokens);
                         is_arg = true; // After a quote, it's part of a command argument
                         word_desc
                     }
-                    '\'' if !word_desc.flags.contains(WdFlags::DUB_QUOTED) => {
+                    '\'' if !word_desc.contains_flag(WdFlags::DUB_QUOTED) => {
                         trace!("Closing single quote found");
                         let word_desc = helper::finalize_word(&word_desc, &mut tokens);
                         is_arg = true;
@@ -541,9 +532,9 @@ pub fn tokenize(state: ParseState) -> ParseState {
                             word_desc
                         }
                     }
-                    '$' if !word_desc.flags.contains(WdFlags::SNG_QUOTED) => {
+                    '$' if !word_desc.contains_flag(WdFlags::SNG_QUOTED) => {
                         trace!("Substitution found inside double quotes");
-                        word_desc.set_flags(|f| f | WdFlags::IS_SUB).add_char(c)
+                        word_desc.add_flag(WdFlags::IS_SUB).add_char(c)
                     }
                     _ => {
                         trace!("Adding character {:?} to quoted word", c);
@@ -562,44 +553,44 @@ pub fn tokenize(state: ParseState) -> ParseState {
             }
             '"' => {
                 if is_arg {
-                    word_desc = word_desc.set_flags(|f| f | WdFlags::IS_ARG);
+                    word_desc = word_desc.add_flag(WdFlags::IS_ARG);
                 }
                 trace!("Double quote found, toggling DUB_QUOTED flag");
-                word_desc.set_flags(|f| f | WdFlags::DUB_QUOTED).push_span(1)
+                word_desc.toggle_flag(WdFlags::DUB_QUOTED).push_span(1)
             }
             '\'' => {
                 if is_arg {
-                    word_desc = word_desc.set_flags(|f| f | WdFlags::IS_ARG);
+                    word_desc = word_desc.add_flag(WdFlags::IS_ARG);
                 }
                 trace!("Single quote found, toggling SNG_QUOTED flag");
-                word_desc.set_flags(|f| f | WdFlags::SNG_QUOTED).push_span(1)
+                word_desc.toggle_flag(WdFlags::SNG_QUOTED).push_span(1)
             }
             '&' | '|' => {
                 word_desc = helper::finalize_word(&word_desc, &mut tokens);
                 word_desc = word_desc.add_char(c);
                 if let Some(ch) = chars.pop_front() {
                     trace!("checking operator");
-                    trace!("found this: {}, checked against this: {}, found {}",c,ch, c==ch);
+                    trace!("found this: {}, checked against this: {}, found {}", c, ch, c == ch);
                     match ch {
                         '|' | '&' if ch == c => { word_desc = word_desc.add_char(ch); }
                         _ => { chars.push_front(ch); }
                     }
-                    trace!("returning word_desc with this word: {}",word_desc.text);
-                    trace!("word_desc: {:?}",word_desc);
+                    trace!("returning word_desc with this word: {}", word_desc.text);
+                    trace!("word_desc: {:?}", word_desc);
                 } else {
                     match c {
                         '&' => { word_desc = word_desc.add_char(c); }, // Background operator
-                        _ => panic!("Expected an expression after this operator '{}'",c)
+                        _ => panic!("Expected an expression after this operator '{}'", c)
                     }
                 };
                 is_arg = false;
-                word_desc = word_desc.set_flags(|f| f | WdFlags::IS_OP);
+                word_desc = word_desc.add_flag(WdFlags::IS_OP);
                 helper::finalize_word(&word_desc, &mut tokens)
             }
             _ if helper::cmdsep(&c) => {
                 trace!("Command separator found: {:?}", c);
                 if is_arg {
-                    word_desc = word_desc.set_flags(|f| f | WdFlags::IS_ARG);
+                    word_desc = word_desc.add_flag(WdFlags::IS_ARG);
                 }
                 word_desc = helper::finalize_word(&word_desc, &mut tokens);
                 if let Some(ch) = chars.front() {
@@ -617,7 +608,7 @@ pub fn tokenize(state: ParseState) -> ParseState {
             }
             ')' => {
                 trace!("Case separator found: {:?}", c);
-                word_desc.set_flags(|f| f | WdFlags::IS_ARG); // Make sure this doesn't get interpreted as a keyword
+                word_desc = word_desc.add_flag(WdFlags::IS_ARG); // Make sure this doesn't get interpreted as a keyword
                 word_desc = helper::finalize_word(&word_desc, &mut tokens);
                 tokens.push_back(Tk::casesep(word_desc.span.1 + 1));
                 is_arg = false; // Next word is part of a new command
@@ -625,12 +616,13 @@ pub fn tokenize(state: ParseState) -> ParseState {
             }
             _ if helper::wspace(&c) => {
                 trace!("Whitespace found: {:?}", c);
-                trace!("is_arg: {}",is_arg);
+                trace!("is_arg: {}", is_arg);
                 if !word_desc.text.is_empty() {
                     let keywd = helper::keywd(&word_desc);
                     if is_arg {
                         trace!("Setting IS_ARG flag after whitespace");
-                        word_desc = word_desc.set_flags(|f| f | WdFlags::IS_ARG);
+                        word_desc = word_desc.add_flag(WdFlags::IS_ARG);
+                        trace!("new flags: {:?}",word_desc.flags);
                     }
                     let word_desc = helper::finalize_word(&word_desc, &mut tokens);
                     if !keywd {
@@ -652,7 +644,7 @@ pub fn tokenize(state: ParseState) -> ParseState {
 
     // Finalize any remaining word
     if !word_desc.text.is_empty() {
-        trace!("finalizing word: {:?}",word_desc);
+        trace!("finalizing word: {:?}", word_desc);
         if helper::delimited(&word_desc) {
             panic!("unclosed delimiter")
         }
@@ -660,13 +652,13 @@ pub fn tokenize(state: ParseState) -> ParseState {
             panic!("unclosed quotation")
         }
         if is_arg {
-            word_desc = word_desc.set_flags(|f| f | WdFlags::IS_ARG);
+            word_desc = word_desc.add_flag(WdFlags::IS_ARG);
         }
         let _ = helper::finalize_word(&word_desc, &mut tokens);
     }
 
-    tokens.push_back(Tk::end_of_input());
-    debug!("Tkization complete. Tks: {:?}", tokens);
+    tokens.push_back(Tk::end_of_input(state.input.len()));
+    trace!("Tokenization complete. Tks: {:?}", tokens);
 
     ParseState {
         input: state.input,

@@ -1,5 +1,6 @@
 use crate::interp::token::{Tk, WdFlags, WordDesc, CMDSEP, KEYWORDS, REGEX, WHITESPACE};
-use im::Vector;
+use log::trace;
+use std::collections::VecDeque;
 
 pub fn get_delimiter(wd: &WordDesc) -> char {
     let flags = wd.flags;
@@ -31,12 +32,13 @@ pub fn wspace(c: &char) -> bool {
 pub fn quoted(wd: &WordDesc) -> bool {
     wd.flags.contains(WdFlags::SNG_QUOTED) || wd.flags.contains(WdFlags::DUB_QUOTED)
 }
-pub fn finalize_word(word_desc: &WordDesc, tokens: &mut Vector<Tk>) -> WordDesc {
+pub fn finalize_word(word_desc: &WordDesc, tokens: &mut VecDeque<Tk>) -> WordDesc {
     let mut word_desc = word_desc.clone();
     let span = (word_desc.span.1,word_desc.span.1);
+    trace!("finalizing word `{}` with flags `{:?}`",word_desc.text,word_desc.flags);
     if !word_desc.text.is_empty() {
         if keywd(&word_desc) && !word_desc.flags.contains(WdFlags::IS_ARG) {
-            word_desc = word_desc.set_flags(|f| f | WdFlags::KEYWORD);
+            word_desc = word_desc.add_flag(WdFlags::KEYWORD);
         }
         tokens.push_back(Tk::from(word_desc));
     }

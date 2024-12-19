@@ -21,7 +21,6 @@
 //}
 
 
-pub mod parser2;
 //pub mod prompt;
 //pub mod event;
 //pub mod execute;
@@ -47,9 +46,15 @@ use im::Vector;
 
 fn main() {
     env_logger::init();
-    let input = "select opt in opt1 opt2 opt3; do case opt in; opt1) echo option 1;;opt2) echo option 2;;opt3) echo option 3;;esac; done";
+    //let input = "for var in 1 2 3; do case var in;1) if until until until echo; do echo; done; do if echo; then echo; elif echo; then if echo; then echo; elif echo; then echo; fi; fi; done; do for i in 1 2 3; do echo; done; done; then until if until echo; do echo; done; then if echo; then echo; elif echo; then echo; fi; elif for i in 1 2 3; do echo; done; then until echo; do echo; done; fi; do if echo; then echo; elif echo; then echo; fi; done; fi;;2) until echo; do echo; done;;3) for i in 1 2 3; do echo; done ;;esac; done";
+    let input = "while while echo; do echo; done; do echo; done";
     let shellenv = ShellEnv::new(false,false);
     let state = descend(input,&shellenv);
-    println!("printing tree");
-    println!("{}",state.ast);
+    println!("printing debug tree");
+    println!("input: {}",input);
+    println!();
+    match state {
+        Ok(parse_state) => println!("{}",parse_state.ast),
+        Err(e) => println!("{}",e)
+    }
 }
