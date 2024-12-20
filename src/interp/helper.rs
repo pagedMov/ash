@@ -37,6 +37,19 @@ pub fn wspace(c: &char) -> bool {
 pub fn quoted(wd: &WordDesc) -> bool {
     wd.flags.contains(WdFlags::SNG_QUOTED) || wd.flags.contains(WdFlags::DUB_QUOTED)
 }
+pub fn clean_var_sub(wd: WordDesc) -> WordDesc {
+	let mut text = wd.text.clone();
+	text = text.strip_prefix('$').unwrap().to_string();
+	if text.starts_with('{') && text.ends_with('}') {
+		text.strip_prefix('{').unwrap();
+		text.strip_prefix('}').unwrap();
+	}
+	WordDesc {
+		text,
+		span: wd.span,
+		flags: wd.flags
+	}
+}
 pub fn finalize_word(word_desc: &WordDesc, tokens: &mut VecDeque<Tk>) -> Result<WordDesc,RshErr> {
     let mut word_desc = word_desc.clone();
     let span = (word_desc.span.1,word_desc.span.1);

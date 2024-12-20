@@ -219,6 +219,7 @@ impl Tk {
             _ if REGEX["var_sub"].is_match(text) => {
                 trace!("Matched variable substitution: {}", text);
                 wd = wd.add_flag(WdFlags::IS_SUB);
+								wd = helper::clean_var_sub(wd);
                 TkType::VariableSub
             },
             _ if REGEX["rsh_shebang"].is_match(text) => {
@@ -341,8 +342,12 @@ pub struct WordDesc {
 
 impl WordDesc {
     pub fn add_char(&self, c: char) -> Self {
+			trace!("cloning text: {}",self.text);
         let mut text = self.text.clone();
+			trace!("cloned text: {}",text);
+			trace!("pushing char: {}",c);
         text.push(c);
+			trace!("after pushing: {}",text);
 
         Self {
             text,
@@ -480,7 +485,7 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,RshErr> {
                 if c != closer {
                     word_desc.add_char(c)
                 } else if c == '\\' {
-                    let word_desc = word_desc.add_char(c);
+                    word_desc = word_desc.add_char(c);
                     if let Some(ch) = chars.pop_front() {
                         trace!("Adding escaped character: {:?}", ch);
                         word_desc.add_char(ch)
@@ -490,11 +495,14 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,RshErr> {
                     }
                 } else {
                     trace!("Finalizing delimited word");
-                    if is_arg {
+                    if !is_arg {
                         trace!("Current word is a command; resetting IS_ARG flag");
                         word_desc = word_desc.add_flag(WdFlags::IS_ARG);
                     }
-                    word_desc.add_char(c);
+										trace!("adding character: {}",c);
+										trace!("current text: {}",word_desc.text);
+                    word_desc = word_desc.add_char(c);
+										trace!("text after adding: {}",word_desc.text);
                     if word_desc.contains_flag(WdFlags::IN_BRACE) {
                         word_desc.remove_flag(WdFlags::IN_BRACE)
                     } else if word_desc.contains_flag(WdFlags::IN_PAREN) {
@@ -502,7 +510,7 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,RshErr> {
                     } else if word_desc.contains_flag(WdFlags::IN_BRACKET) {
                         word_desc.remove_flag(WdFlags::IN_BRACKET)
                     } else {
-                        unreachable!()
+												word_desc
                     }
                 }
             }

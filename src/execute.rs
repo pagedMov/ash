@@ -29,14 +29,14 @@ pub const GLOB_OPTS: MatchOptions = MatchOptions {
 #[derive(Debug)]
 pub enum RshExitStatus {
     Success,
-    Fail(i32),
+    Fail { code: i32, cmd: String },
 }
 
 impl RshExitStatus {
-    pub fn from(code: i32) -> Self {
+    pub fn from(code: i32, cmd: String) -> Self {
         match code {
             0 => RshExitStatus::Success,
-            _ => RshExitStatus::Fail(code)
+            _ => RshExitStatus::Fail { code, cmd }
         }
     }
 }
@@ -56,7 +56,7 @@ impl<'a> NodeWalker<'a> {
     }
     pub fn start_walk(&mut self) -> Result<RshExitStatus,ShellError> {
         info!("Going on a walk...");
-        let mut exit_status = RshExitStatus::from(0);
+        let mut exit_status = RshExitStatus::Success;
         let mut nodes;
         if let NdType::Root { ref mut deck } = self.ast.nd_type {
             nodes = std::mem::take(deck);
@@ -128,7 +128,7 @@ impl<'a> NodeWalker<'a> {
                 if let Some(condition) = break_condition {
                     match condition {
                         true => {
-                            if let RshExitStatus::Fail(_) = last_status {
+                            if let RshExitStatus::Fail {..} = last_status {
                                 break
                             }
                         }
@@ -233,11 +233,11 @@ impl<'a> NodeWalker<'a> {
                 return self.walk_root(*block,None)
             }
         }
-        Ok(RshExitStatus::Fail(1))
+				unreachable!()
     }
 
     fn handle_chain(&mut self, node: Node) -> Result<RshExitStatus, ShellError> {
-        let mut last_status = RshExitStatus::from(0);
+        let mut last_status = RshExitStatus::Success;
 
         if let NdType::Chain { left, right, op } = node.nd_type {
             match self.walk(*left, None, None)? {
@@ -246,7 +246,7 @@ impl<'a> NodeWalker<'a> {
                         last_status = self.walk(*right, None, None)?;
                     }
                 }
-                RshExitStatus::Fail(_code) => {
+                RshExitStatus::Fail {..} => {
                     if let NdType::Or = op.nd_type {
                         last_status = self.walk(*right, None, None)?;
                     }
@@ -258,7 +258,7 @@ impl<'a> NodeWalker<'a> {
     }
 
     fn handle_pipeline(&mut self, node: Node, stdin: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
-        let mut last_status = RshExitStatus::from(0);
+        let mut last_status = RshExitStatus::Success;
 
         // Create the pipe
         let (read, write) = pipe().map_err(|e| {
@@ -272,7 +272,7 @@ impl<'a> NodeWalker<'a> {
             last_status = self.walk(*left, stdin, Some(write))
                 .expect("Failed to walk left side of pipeline");
 
-            if let RshExitStatus::Fail(_) = last_status {
+            if let RshExitStatus::Fail {..} = last_status {
                 return Ok(last_status)
             }
 
@@ -396,6 +396,9 @@ impl<'a> NodeWalker<'a> {
 
     fn handle_command(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
         info!("Handling command: {:?}", node);
+				let cmd_name = if let NdType::Command { argv, redirs: _ } = &node.nd_type {
+					argv[0].text().to_string()
+				} else { "".to_string() };
 
         let original_stdin = dup(0).unwrap();
         let original_stdout = dup(1).unwrap();
@@ -431,7 +434,7 @@ impl<'a> NodeWalker<'a> {
                     info!("Handling redirections in child process");
                     self.handle_redirs(redirs)?;
                 }
-                eprintln!("Execution failed: {:?}", execvpe(&command, &argv, &envp));
+                execvpe(&command, &argv, &envp);
                 std::process::exit(127);
             }
             Ok(ForkResult::Parent { child }) => {
@@ -439,7 +442,7 @@ impl<'a> NodeWalker<'a> {
                 let result = match waitpid(child, None) {
                     Ok(WaitStatus::Exited(_, status)) => {
                         info!("Child process exited with status {}", status);
-                        Ok(RshExitStatus::from(status))
+                        Ok(RshExitStatus::from(status,cmd_name))
                     }
                     Ok(WaitStatus::Signaled(_, signal, _)) => {
                         error!("Child process terminated by signal {}", signal);
@@ -481,34 +484,34 @@ impl<'a> NodeWalker<'a> {
     }
 }
 
-pub fn run_subshell<F>(func: F) -> Result<RshExitStatus,ShellError>
-where
-    F: FnOnce() -> Result<RshExitStatus,ShellError>
-{
-    let mut last_status = RshExitStatus::Success;
-    match unsafe { fork() } {
-        Ok(ForkResult::Child) => {
-            if let Err(e) = func() {
-                eprintln!("Subshell failed: {}",e);
-                std::process::exit(1);
-            }
-            std::process::exit(0);
-        }
-        Ok(ForkResult::Parent { child }) => {
-            match waitpid(child,None) {
-                Ok(WaitStatus::Exited(_,status)) => {
-                    if status == 0 {
-                        return Ok(RshExitStatus::Success);
-                    } else {
-                        return Ok(RshExitStatus::Fail(status));
-                    }
-                }
-                _ => panic!()
-            }
-        }
-        Err(e) => Err(ShellError::ExecFailed(format!("Subshell failed"), 1))
-    }
-}
+//pub fn run_subshell<F>(func: F) -> Result<RshExitStatus,ShellError>
+//where
+    //F: FnOnce() -> Result<RshExitStatus,ShellError>
+//{
+    //let mut last_status = RshExitStatus::Success;
+    //match unsafe { fork() } {
+        //Ok(ForkResult::Child) => {
+            //if let Err(e) = func() {
+                //eprintln!("Subshell failed: {}",e);
+                //std::process::exit(1);
+            //}
+            //std::process::exit(0);
+        //}
+        //Ok(ForkResult::Parent { child }) => {
+            //match waitpid(child,None) {
+                //Ok(WaitStatus::Exited(_,status)) => {
+                    //if status == 0 {
+                        //return Ok(RshExitStatus::Success);
+                    //} else {
+                        //return Ok(RshExitStatus::Fail { code: status, cmd: cmd_name });
+                    //}
+                //}
+                //_ => panic!()
+            //}
+        //}
+        //Err(e) => Err(ShellError::ExecFailed(format!("Subshell failed"), 1))
+    //}
+//}
 
 /// Example command invocation using system calls
 /// Note that the command name is the first argument in argv

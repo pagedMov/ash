@@ -1,8 +1,12 @@
+use std::os::fd::{AsRawFd, BorrowedFd};
+
+use nix::unistd::write;
 use tokio::sync::mpsc;
 use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};
 use thiserror::Error;
 
+use crate::execute::RshExitStatus;
 use crate::interp::parse::{ParseErrFull,Node};
 use crate::{execute, prompt};
 use crate::shellenv::ShellEnv;
@@ -18,7 +22,7 @@ pub enum ShellError {
     #[error("{0}")]
     ParsingError(ParseErrFull),
 
-    #[error("Execution faiiled for command '{0}' with exit code {1}")]
+    #[error("Execution failed for command '{0}' with exit code {1}")]
     ExecFailed(String,i32),
 
     #[error("I/o error: {0}")]
@@ -135,6 +139,12 @@ impl<'a> EventLoop<'a> {
                     match walker.start_walk() {
                         Ok(code) => {
                             info!("Last exit status: {:?}",code);
+														if let RshExitStatus::Fail { code, cmd } = code {
+															let stderr = unsafe { BorrowedFd::borrow_raw(2) };
+															if code == 127 {
+																 write(stderr, format!("Command not found: {}\n",cmd).as_bytes()).unwrap();
+															};
+														};
                         },
                         Err(e) => self.inbox().send(ShellEvent::CatchError(e)).await.unwrap()
                     }
