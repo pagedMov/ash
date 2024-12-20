@@ -293,9 +293,9 @@ impl<'a> NodeWalker<'a> {
     }
 
     fn handle_builtin(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
-        let (argv,_redirs) = self.extract_args(node);
+        let (argv,redirs) = self.extract_args(node);
         match argv[0].to_str().unwrap() {
-            "echo" => echo(argv.into(), stdout),
+            "echo" => echo(argv.into(), redirs, stdout),
             "cd" => cd(self.shellenv, argv.into()),
             _ => unimplemented!()
         }
@@ -367,9 +367,9 @@ impl<'a> NodeWalker<'a> {
 
         while let Some(redir) = redirs.pop_front() {
             if let TkType::Redirection { redir } = redir.class() {
-                let Redir { fd_out, op, fd_target, file_target } = redir;
+                let Redir { fd_source, op, fd_target, file_target } = redir;
                 if let Some(target) = fd_target {
-                    dup2(target, fd_out).unwrap();
+                    dup2(target, fd_source).unwrap();
                     fd_queue.push_back(target);
                 } else if let Some(file_path) = file_target {
                     info!("Opening file for redirection: {:?}", file_path);
@@ -380,8 +380,8 @@ impl<'a> NodeWalker<'a> {
                         _ => unimplemented!("Heredocs and herestrings are not implemented yet."),
                     };
                     let file_fd: RawFd = open(file_path.text(), flags, Mode::from_bits(0o644).unwrap()).unwrap();
-                    info!("Duping file FD {} to FD {}", file_fd, fd_out);
-                    dup2(file_fd, fd_out).unwrap();
+                    info!("Duping file FD {} to FD {}", file_fd, fd_source);
+                    dup2(file_fd, fd_source).unwrap();
                     fd_queue.push_back(file_fd);
                 }
             }

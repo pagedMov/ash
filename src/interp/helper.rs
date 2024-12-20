@@ -37,6 +37,60 @@ pub fn wspace(c: &char) -> bool {
 pub fn quoted(wd: &WordDesc) -> bool {
     wd.flags.contains(WdFlags::SNG_QUOTED) || wd.flags.contains(WdFlags::DUB_QUOTED)
 }
+pub fn check_redirection(c: &char, chars: &mut VecDeque<char>) -> bool {
+	chars.push_front(*c);
+    let mut test_chars = chars.clone();
+    let mut test_string = String::new();
+
+    while let Some(c) = test_chars.pop_front() {
+        if c.is_whitespace() || !matches!(c, '&' | '0'..='9' | '>' | '<') {
+            break;
+        }
+        test_string.push(c);
+    }
+
+    if REGEX["redirection"].is_match(&test_string) {
+			true
+		} else {
+			chars.pop_front();
+			false
+		}
+}
+
+pub fn process_redirection(
+    word_desc: &mut WordDesc,
+    chars: &mut VecDeque<char>,
+) -> Result<WordDesc, RshErr> {
+    let mut redirection_text = String::new();
+    while let Some(c) = chars.pop_front() {
+			debug!("found this char in redirection: {}",c);
+				if !matches!(c, '&' | '0'..='9' | '>' | '<') {
+					chars.push_front(c);
+            break;
+        }
+        redirection_text.push(c);
+    }
+
+		debug!("returning this word_desc text: {}",redirection_text);
+    Ok(WordDesc {
+        text: redirection_text,
+        span: word_desc.span,
+        flags: WdFlags::IS_OP,
+    })
+}
+pub fn finalize_delimiter(word_desc: &WordDesc) -> Result<WordDesc, RshErr> {
+    let mut updated_word_desc = word_desc.clone();
+
+    if word_desc.contains_flag(WdFlags::IN_BRACE) {
+        updated_word_desc = updated_word_desc.remove_flag(WdFlags::IN_BRACE);
+    } else if word_desc.contains_flag(WdFlags::IN_PAREN) {
+        updated_word_desc = updated_word_desc.remove_flag(WdFlags::IN_PAREN);
+    } else if word_desc.contains_flag(WdFlags::IN_BRACKET) {
+        updated_word_desc = updated_word_desc.remove_flag(WdFlags::IN_BRACKET);
+    }
+
+    Ok(updated_word_desc)
+}
 pub fn clean_var_sub(wd: WordDesc) -> WordDesc {
 	let mut text = wd.text.clone();
 	text = text.strip_prefix('$').unwrap().to_string();

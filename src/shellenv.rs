@@ -43,7 +43,7 @@ impl ShellEnv {
         todo!("implement logic for sourcing files");
     }
 
-    pub fn change_director(&mut self, path: &Path) {
+    pub fn change_dir(&mut self, path: &Path) {
         self.export_variable("PWD".into(), path.to_str().unwrap().to_string());
         let _ = env::set_current_dir(path);
     }
