@@ -8,6 +8,8 @@ use crate::shellenv::ShellEnv;
 use crate::interp::token::{tokenize, Tk, TkType};
 use crate::interp::expand::expand;
 
+use super::token::WdFlags;
+
 pub static EXPECT: Lazy<HashMap<TkType, Vec<TkType>>> = Lazy::new(|| {
   let mut m = HashMap::new();
   m.insert(TkType::If,     vec![TkType::Then]);
@@ -40,6 +42,11 @@ enum Phase {
   Body,
   Vars,
   Array,
+}
+
+enum CmdType {
+  Builtin,
+  Command
 }
 
 /// Used in contexts that dont have direct access to the original input.
@@ -200,6 +207,7 @@ pub enum NdType {
   FuncDef { name: String, body: Box<Node> },
   Assignment {name: String, value: Option<String> },
   Command { argv: VecDeque<Tk>, redirs: VecDeque<Tk> },
+  Builtin { argv: VecDeque<Tk>, redirs: VecDeque<Tk> },
   And,
   Or,
   Pipe,
@@ -425,6 +433,33 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> Result<DescentContex
         info!("End of Input token encountered, stopping parsing");
         break;
       }
+      Do => {
+        return Err(RshErr::from_parse("Found `do` outside of loop context".into(), tk.span()))
+      }
+      Done => {
+        return Err(RshErr::from_parse("Found `done` outside of loop context".into(), tk.span()))
+      }
+      Else => {
+        return Err(RshErr::from_parse("Found `else` outside of `if` context".into(), tk.span()))
+      }
+      Elif => {
+        return Err(RshErr::from_parse("Found `elif` outside of `if` context".into(), tk.span()))
+      }
+      Then => {
+        return Err(RshErr::from_parse("Found `then` outside of `if` context".into(), tk.span()))
+      }
+      Fi => {
+        return Err(RshErr::from_parse("Found `fi` outside of `if` context".into(), tk.span()))
+      }
+      Esac => {
+        return Err(RshErr::from_parse("Found `esac` outside of `case` context".into(), tk.span()))
+      }
+      CaseDelim => {
+        return Err(RshErr::from_parse("Double semicolons (`;;`) are reserved for delimiting case statement conditions".into(), tk.span()))
+      }
+      CaseSep => {
+        return Err(RshErr::from_parse("Found this unmatched close parenthesis".into(), tk.span()))
+      }
       Cmdsep | LogicAnd | LogicOr | Pipe => {
         info!("Found operator token: {:?}, preserving as node", tk.class());
         match tk.class() {
@@ -445,8 +480,8 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> Result<DescentContex
     trace!("Current nodes: {:?}", &ctx.root);
   }
 
-  trace!("Completed linear parsing, nodes: {:?}", &ctx.root);
   ctx = join_at_operators(ctx)?;
+  trace!("Completed linear parsing, nodes: {:?}", &ctx.root);
   Ok(ctx)
 }
 
@@ -470,12 +505,15 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, RshE
         }
       }
       NdType::Cmdsep => {
+        while !buffer.is_empty() {
+          ctx.root.push_front(buffer.pop_back().unwrap());
+        }
         break
       }
       _ => buffer.push_back(node)
     }
   }
-  ctx.root.extend(take(&mut buffer));
+  ctx.root.extend(buffer.drain(..));
   while let Some(node) = ctx.next_node() {
     match node.nd_type {
       NdType::And | NdType::Or => {
@@ -493,13 +531,16 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, RshE
         }
       }
       NdType::Cmdsep => {
+        while !buffer.is_empty() {
+          ctx.root.push_front(buffer.pop_back().unwrap());
+        }
         break
       }
       _ => buffer.push_back(node)
     }
   }
 
-  ctx.root = take(&mut buffer);
+  ctx.root.extend(buffer.drain(..));
   Ok(ctx)
 }
 
@@ -509,6 +550,21 @@ fn compute_span(tokens: &VecDeque<Tk>) -> (usize, usize) {
   } else {
     (tokens.front().unwrap().span().0, tokens.back().unwrap().span().1)
   }
+}
+
+fn parse_and_attach(mut tokens: VecDeque<Tk>, mut root: VecDeque<Node>) -> Result<VecDeque<Node>,RshErr> {
+  let mut sub_ctx = DescentContext::new(take(&mut tokens));
+  sub_ctx = parse_linear(sub_ctx,true)?;
+  while let Some(node) = sub_ctx.root.pop_back() {
+    root.push_back(node);
+  }
+  Ok(root)
+}
+
+fn get_conditional(cond_root: VecDeque<Node>, cond_span: (usize,usize), body_root: VecDeque<Node>, body_span: (usize,usize)) -> Conditional {
+  let condition = Box::new(Node { nd_type: NdType::Root { deck: cond_root }, span: cond_span });
+  let body = Box::new(Node { nd_type: NdType::Root { deck: body_root }, span: body_span });
+  Conditional { condition, body }
 }
 
 pub fn build_if(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
@@ -526,6 +582,7 @@ pub fn build_if(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
   debug!("Starting build_if, initial tokens: {:?}", ctx.get_tk_texts());
 
   while let Some(tk) = ctx.next_tk() {
+    let err_span = ctx.mark_start();
     debug!(
       "build_if: processing token {:?}, current phase: {:?}, context: {:?}",
       tk.text(),
@@ -577,11 +634,21 @@ pub fn build_if(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
         );
       }
       TkType::Then => {
+        if if_context == TkType::Then {
+          return Err(RshErr::from_parse("Did not find a condition for this `then` block".into(), (err_span,ctx.mark_end())))
+        }
+        if if_context == TkType::Else {
+          return Err(RshErr::from_parse("Else blocks do not get a `then` statement; give the body directly after the else keyword".into(), (err_span,ctx.mark_end())))
+        }
+        if_context = TkType::Then;
         debug!("build_if: processing 'then', switching to Body phase");
         phase = Phase::Body;
       }
       TkType::Else => {
         debug!("build_if: processing 'else', switching context...");
+        if if_context != TkType::Then {
+          return Err(RshErr::from_parse("Was expecting a `then` block, get an else block instead".into(), (err_span,ctx.mark_end())))
+        }
         if_context = TkType::Else;
         let cond_span = compute_span(&cond_tokens);
         cond_root = parse_and_attach(take(&mut cond_tokens), cond_root)?;
@@ -599,6 +666,9 @@ pub fn build_if(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
         );
       }
       TkType::Fi => {
+        if !matches!(if_context,TkType::Then | TkType::Else) {
+          return Err(RshErr::from_parse("Was expecting a `then` block, get an else block instead".into(), (err_span,ctx.mark_end())))
+        }
         debug!("build_if: processing 'fi', finalizing if block");
         debug!("cond tokens: {:?}",cond_tokens);
         debug!("body tokens: {:?}",body_tokens);
@@ -661,16 +731,28 @@ pub fn build_for(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
   while let Some(tk) = ctx.next_tk() {
     match tk.class() {
       TkType::In => {
+        if loop_vars.is_empty() {
+          return Err(RshErr::from_parse("This for loop didn't get any loop variables".into(), (span_start,ctx.mark_end())))
+        }
         phase = Phase::Array
       }
       TkType::Do => {
         if loop_arr.back().is_some_and(|tk| tk.class() == TkType::Cmdsep) {
           loop_arr.pop_back();
         }
+        if loop_arr.is_empty() {
+          return Err(RshErr::from_parse("This for loop got an empty array".into(), (span_start,ctx.mark_end())))
+        }
         body_start = ctx.mark_start();
         phase = Phase::Body
       }
       TkType::Done => {
+        if phase == Phase::Vars {
+          return Err(RshErr::from_parse("This for loop has an unterminated variable definition".into(), (span_start,ctx.mark_end())))
+        }
+        if phase == Phase::Array {
+          return Err(RshErr::from_parse("This for loop has an unterminated array definition".into(), (span_start,ctx.mark_end())))
+        }
         break;
       }
       _ => match phase {
@@ -730,9 +812,17 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> Result<DescentCon
     debug!("checking token: {}",tk.text());
     match tk.class() {
       TkType::Do => {
+        cond_tokens.pop_back(); // Cut separator
+        if cond_tokens.is_empty() {
+          return Err(RshErr::from_parse("Did not find a condition for this loop".into(), tk.span()))
+        }
         phase = Phase::Body
       }
       TkType::Done => {
+        body_tokens.pop_back(); // Cut separator
+        if body_tokens.is_empty() {
+          return Err(RshErr::from_parse("Did not find a body for this loop".into(), tk.span()))
+        }
         break
       }
       _ if OPENERS.contains(&tk.class()) => {
@@ -789,21 +879,6 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> Result<DescentCon
   Ok(ctx)
 }
 
-fn parse_and_attach(mut tokens: VecDeque<Tk>, mut root: VecDeque<Node>) -> Result<VecDeque<Node>,RshErr> {
-  let mut sub_ctx = DescentContext::new(take(&mut tokens));
-  sub_ctx = parse_linear(sub_ctx,true)?;
-  if let Some(node) = sub_ctx.root.pop_back() {
-    root.push_back(node);
-  }
-  Ok(root)
-}
-
-fn get_conditional(cond_root: VecDeque<Node>, cond_span: (usize,usize), body_root: VecDeque<Node>, body_span: (usize,usize)) -> Conditional {
-  let condition = Box::new(Node { nd_type: NdType::Root { deck: cond_root }, span: cond_span });
-  let body = Box::new(Node { nd_type: NdType::Root { deck: body_root }, span: body_span });
-  Conditional { condition, body }
-}
-
 pub fn build_case(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
   let mut cases = HashMap::new();
   let mut block_string = String::new();
@@ -839,6 +914,12 @@ pub fn build_case(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
           let block_node = Node::from(take(&mut block_root), block_span);
           cases.insert(block_string.clone(), block_node);
         }
+        if cases.is_empty() {
+          return Err(RshErr::from_parse(
+              "Did not find any cases for this case statement".into(),
+              tk.span(),
+          ));
+        }
         break;
       }
       TkType::CaseSep => {
@@ -857,6 +938,15 @@ pub fn build_case(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
           block_root = parse_and_attach(take(&mut block_tokens), block_root)?;
           let block_node = Node::from(take(&mut block_root), block_span);
           cases.insert(take(&mut block_string), block_node);
+
+          if ctx.front_tk().is_some_and(|tk| tk.class() == TkType::Cmdsep) {
+            while let Some(tk) = ctx.next_tk() {
+              if tk.class() != TkType::Cmdsep {
+                ctx.tokens.push_front(tk); // Handle pesky newlines
+                break
+              }
+            }
+          }
 
           inner_phase = Phase::Condition;
         } else {
@@ -884,7 +974,7 @@ pub fn build_case(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
                 block_string = tk.text().into();
               } else {
                 return Err(RshErr::from_parse(
-                    "Found a second token for this case pattern".into(),
+                    format!("Found a second token for this case pattern: {}",tk.text()),
                     tk.span(),
                 ));
               }
@@ -1053,6 +1143,12 @@ pub fn build_command(mut ctx: DescentContext) -> Result<DescentContext, RshErr> 
   let mut argv = VecDeque::new(); // Temporary mutable Vec to collect arguments
   let mut redirs = VecDeque::new(); // Temporary mutable Vec to collect redirections
 
+  let cmd_type = if ctx.front_tk().unwrap().flags().contains(WdFlags::BUILTIN) {
+    CmdType::Builtin
+  } else {
+    CmdType::Command
+  };
+
   while let Some(tk) = ctx.next_tk() {
 
     match tk.class() {
@@ -1061,7 +1157,7 @@ pub fn build_command(mut ctx: DescentContext) -> Result<DescentContext, RshErr> 
         ctx.tokens.push_front(tk);
         break;
       }
-      TkType::Ident | TkType::String => {
+      TkType::Ident | TkType::String | TkType::VariableSub => {
         // Add to argv
         argv.push_back(tk.clone());
       }
@@ -1099,7 +1195,7 @@ pub fn build_command(mut ctx: DescentContext) -> Result<DescentContext, RshErr> 
       _ => {
         error!("ran into EOI while building command, with these tokens: {:?}",ctx.get_tk_texts());
         return Err(RshErr::from_parse(
-            format!("Unexpected token: {:?}", tk),
+            format!("Unexpected token: {:?}", tk.text()),
             tk.span(),
         ));
       }
@@ -1109,10 +1205,155 @@ pub fn build_command(mut ctx: DescentContext) -> Result<DescentContext, RshErr> 
   debug!("returning from build_command with tokens: {:?}", ctx.tokens);
 
   let span = compute_span(&argv);
-  let node = Node {
-    nd_type: NdType::Command { argv, redirs },
-    span,
+  let node = match cmd_type {
+    CmdType::Command => {
+      Node {
+        nd_type: NdType::Command { argv, redirs },
+        span,
+      }
+    }
+    CmdType::Builtin => {
+      Node {
+        nd_type: NdType::Builtin { argv, redirs },
+        span,
+      }
+    }
   };
+  debug!("attaching node: {:?}",node);
   ctx.attach_node(node);
+  debug!("ast state: {:?}",ctx.root);
   Ok(ctx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_if() -> Result<(), ParseErrFull> {
+        let input = "if true; then echo \"first\"; elif true; then echo \"second\"; elif true; then echo \"third\"; else echo \"fourth\"; fi";
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_for() -> Result<(), ParseErrFull> {
+        let input = "for a b c in 1 2 3; do echo \"correct syntax\"; done";
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_while() -> Result<(), ParseErrFull> {
+        let input = "while true; do echo while loop; done";
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_until() -> Result<(), ParseErrFull> {
+        let input = "until true; do echo until loop; done";
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_case() -> Result<(), ParseErrFull> {
+        let input = "case var in var) echo here;; car) echo vroom vroom;; bar) echo not here;; esac";
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_select() -> Result<(), ParseErrFull> {
+        let input = "select a in 1 2 3; do echo select!; done";
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_command_invocation() -> Result<(), ParseErrFull> {
+        let input = "echo \"Hello, world!\"";
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_pipeline() -> Result<(), ParseErrFull> {
+        let input = "echo \"Hello\" | grep \"H\" | wc -l";
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_command_chain_and() -> Result<(), ParseErrFull> {
+        let input = "echo \"Hello\" && echo \"World\" && echo \"Chain\"";
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_command_chain_or() -> Result<(), ParseErrFull> {
+        let input = "false || echo \"Recovered\" || echo \"Fallback\"";
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_mixed_chain_and_pipeline() -> Result<(), ParseErrFull> {
+        let input = "echo \"Start\" && echo \"Middle\" | grep \"M\" || echo \"End\"";
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_nested_commands() -> Result<(), ParseErrFull> {
+        let input = "if true; then for a in 1 2; do echo $a | grep \"1\"; done; elif false; then echo \"Nothing\"; else echo \"Default\"; fi";
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_complex_script() -> Result<(), ParseErrFull> {
+        let input = r#"
+        for i in 1 2 3; do
+            case i in
+                1) echo "One";;
+                2) echo "Two" && echo "Second";;
+                3) if true; then echo "Three"; fi;;
+            esac
+        done
+        "#;
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_redirection() -> Result<(), ParseErrFull> {
+        let input = "echo \"Hello\" > output.txt && cat < output.txt | wc -l";
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_nested_pipelines_and_chains() -> Result<(), ParseErrFull> {
+        let input = "echo \"Hello\" | echo \"Nested\" && echo \"Pipeline\" || echo \"Fallback\"";
+        let shellenv = ShellEnv::new(false, true);
+        descend(input, &shellenv)?;
+        Ok(())
+    }
 }

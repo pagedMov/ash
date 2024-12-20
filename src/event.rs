@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use tokio::sync::mpsc;
 use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};
@@ -8,7 +6,6 @@ use thiserror::Error;
 use crate::interp::parse::{ParseErrFull,Node};
 use crate::{execute, prompt};
 use crate::shellenv::ShellEnv;
-//use crate::execute::NodeWalker;
 
 #[derive(Debug,Error,PartialEq)]
 pub enum ShellError {
@@ -134,7 +131,7 @@ impl<'a> EventLoop<'a> {
                 ShellEvent::NewAST(tree) => {
                     // Log and process a new AST node.
                     debug!("new tree:\n {:#?}", tree);
-                    let mut walker = execute::NodeWalker::new(tree,&mut self.shellenv);
+                    let mut walker = execute::NodeWalker::new(tree,self.shellenv);
                     match walker.start_walk() {
                         Ok(code) => {
                             info!("Last exit status: {:?}",code);
@@ -156,7 +153,7 @@ impl<'a> EventLoop<'a> {
                         error!("Fatal: {}", err);
                         std::process::exit(1);
                     } else {
-                        error!("Error: {}", err);
+                        println!("{}",err);
                     }
                 }
             }

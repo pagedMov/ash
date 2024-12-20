@@ -85,9 +85,9 @@ impl<'a> NodeWalker<'a> {
                 trace!("Found command: {:?}",node);
                 last_status = self.handle_command(node, stdin, stdout)?;
             }
-            //NdType::Builtin { .. } => {
-                //last_status = self.handle_builtin(node, stdin, stdout)?;
-            //}
+            NdType::Builtin {..} => {
+                last_status = self.handle_builtin(node, stdin, stdout)?;
+            }
             //NdType::Function { .. } => {
                 //todo!("handle simple commands")
             //}
@@ -338,7 +338,7 @@ impl<'a> NodeWalker<'a> {
         let mut args = vec![];
         let cmd_redirs;
         match node.nd_type {
-            NdType::Command { mut argv, redirs } => {
+            NdType::Command { mut argv, redirs } | NdType::Builtin { mut argv, redirs } => {
                 trace!("Extracting arguments from command node: {:?}", args);
                 while let Some(mut word) = argv.pop_front() {
                     trace!("checking word: {}",word.text());

@@ -89,7 +89,7 @@ impl fmt::Display for Node {
                 NdType::Assignment { name, value } => {
                     writeln!(f, "{}Assignment (name: {}, value: {:?})", prefix, name, value)?;
                 }
-                NdType::Command { argv, redirs } => {
+                NdType::Command { argv, redirs } | NdType::Builtin { argv, redirs } => {
                     let argv_texts: Vec<_> = argv.iter().map(|arg| arg.text()).collect();
                     writeln!(
                         f,

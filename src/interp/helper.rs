@@ -1,4 +1,4 @@
-use crate::interp::token::{Tk, WdFlags, WordDesc, CMDSEP, KEYWORDS, REGEX, WHITESPACE};
+use crate::interp::token::{Tk, WdFlags, WordDesc, CMDSEP, KEYWORDS, BUILTINS, REGEX, WHITESPACE};
 use log::{debug,trace};
 use std::collections::VecDeque;
 
@@ -26,6 +26,9 @@ pub fn cmdsep(c: &char) -> bool {
 pub fn keywd(wd: &WordDesc) -> bool {
     KEYWORDS.contains(&wd.text.as_str()) && !wd.flags.contains(WdFlags::IS_ARG)
 }
+pub fn builtin(wd: &WordDesc) -> bool {
+    BUILTINS.contains(&wd.text.as_str()) && !wd.flags.contains(WdFlags::IS_ARG)
+}
 pub fn wspace(c: &char) -> bool {
     WHITESPACE.contains(c)
 }
@@ -37,8 +40,10 @@ pub fn finalize_word(word_desc: &WordDesc, tokens: &mut VecDeque<Tk>) -> WordDes
     let span = (word_desc.span.1,word_desc.span.1);
     trace!("finalizing word `{}` with flags `{:?}`",word_desc.text,word_desc.flags);
     if !word_desc.text.is_empty() {
-        if keywd(&word_desc) && !word_desc.flags.contains(WdFlags::IS_ARG) {
+        if keywd(&word_desc) {
             word_desc = word_desc.add_flag(WdFlags::KEYWORD);
+        } else if builtin(&word_desc) {
+            word_desc = word_desc.add_flag(WdFlags::BUILTIN);
         }
         if word_desc.flags.contains(WdFlags::EXPECT_IN) && matches!(word_desc.text.as_str(), "in") {
             debug!("setting in flag to keyword");
