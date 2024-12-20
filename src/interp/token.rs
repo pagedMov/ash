@@ -217,12 +217,6 @@ impl Tk {
 				wd = wd.add_flag(WdFlags::IS_SUB);
 				TkType::ArithmeticSub
 			},
-			_ if REGEX["var_sub"].is_match(text) => {
-				trace!("Matched variable substitution: {}", text);
-				wd = wd.add_flag(WdFlags::IS_SUB);
-				wd = helper::clean_var_sub(wd);
-				TkType::VariableSub
-			},
 			_ if REGEX["rsh_shebang"].is_match(text) => {
 				trace!("Matched rsh_shebang: {}", text);
 				TkType::Shebang

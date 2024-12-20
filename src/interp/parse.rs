@@ -315,11 +315,6 @@ pub fn descend<'a>(input: &'a str, shellenv: &'a ShellEnv) -> Result<ParseState<
 		Err(e) => return Err(ParseErrFull::from(e, input))
 	}
 
-	match expand(state) {
-		Ok(parse_state) => state = parse_state,
-		Err(e) => return Err(ParseErrFull::from(e, input))
-	}
-
 	match parse(state) {
 		Ok(parse_state) => state = parse_state,
 		Err(e) => return Err(ParseErrFull::from(e, input))

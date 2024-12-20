@@ -13,9 +13,9 @@ pub fn get_delimiter(wd: &WordDesc) -> char {
         _ => unreachable!("No active delimiter found in WordDesc flags"),
     }
 }
-pub fn is_brace_expansion(token: &Tk) -> bool {
-    REGEX["brace_expansion"].is_match(token.text())
-    && REGEX["brace_expansion"].captures(token.text()).unwrap()[1].is_empty()
+pub fn is_brace_expansion(text: &str) -> bool {
+    REGEX["brace_expansion"].is_match(text)
+    && REGEX["brace_expansion"].captures(text).unwrap()[1].is_empty()
 }
 pub fn delimited(wd: &WordDesc) -> bool {
     wd.flags.contains(WdFlags::IN_BRACKET) ||
@@ -90,19 +90,6 @@ pub fn finalize_delimiter(word_desc: &WordDesc) -> Result<WordDesc, RshErr> {
     }
 
     Ok(updated_word_desc)
-}
-pub fn clean_var_sub(wd: WordDesc) -> WordDesc {
-	let mut text = wd.text.clone();
-	text = text.strip_prefix('$').unwrap().to_string();
-	if text.starts_with('{') && text.ends_with('}') {
-		text.strip_prefix('{').unwrap();
-		text.strip_prefix('}').unwrap();
-	}
-	WordDesc {
-		text,
-		span: wd.span,
-		flags: wd.flags
-	}
 }
 pub fn finalize_word(word_desc: &WordDesc, tokens: &mut VecDeque<Tk>) -> Result<WordDesc,RshErr> {
     let mut word_desc = word_desc.clone();

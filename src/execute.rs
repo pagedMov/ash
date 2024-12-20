@@ -11,6 +11,7 @@ use glob::MatchOptions;
 
 use crate::builtin::{cd, echo};
 use crate::event::ShellError;
+use crate::interp::{expand, helper};
 use crate::interp::token::{self, Redir, RedirType, Tk, TkType, WdFlags};
 use crate::interp::parse::{NdType,Node};
 use crate::shellenv::ShellEnv;
@@ -340,22 +341,18 @@ impl<'a> NodeWalker<'a> {
         match node.nd_type {
             NdType::Command { mut argv, redirs } | NdType::Builtin { mut argv, redirs } => {
                 trace!("Extracting arguments from command node: {:?}", args);
-                while let Some(mut word) = argv.pop_front() {
-                    trace!("checking word: {}",word.text());
-                    if word.wd.contains_flag(WdFlags::IS_SUB) {
-                        word.wd.text = self
-                            .shellenv
-                            .get_variable(word.text())
-                            .map(|s| s.to_string())
-                            .unwrap_or_default();
-                    }
-
-                    let cstring = CString::new(word.text()).unwrap();
+                while let Some(word) = argv.pop_front() {
+                    debug!("checking word: {}",word.text());
+										let tokens = expand::expand_token(self.shellenv, word);
+										debug!("got expanded tokens: {:?}",tokens);
+									for token in tokens {
+                    let cstring = CString::new(token.text()).unwrap();
                     args.push(cstring);
+									}
                 }
                 cmd_redirs = redirs;
             }
-            _ => panic!("Unexpected Node variant: {:?}", node),
+            _ => unreachable!()
         }
         debug!("Extracted args: {:?}, redirs: {:?}", args, cmd_redirs);
         (args, cmd_redirs)

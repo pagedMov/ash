@@ -4,13 +4,14 @@ use std::collections::VecDeque;
 use crate::interp::token::{TkType,Tk,WordDesc};
 use crate::interp::parse::ParseState;
 use crate::interp::helper;
+use crate::shellenv::ShellEnv;
 
 use super::parse::RshErr;
 
 pub fn expand(mut state: ParseState) -> Result<ParseState,RshErr> {
     let mut buffer = VecDeque::new();
     while let Some(tk) = state.tokens.pop_front() {
-        for token in expand_token(tk) {
+        for token in expand_token(state.shellenv, tk) {
             buffer.push_back(token);
         }
     }
@@ -27,23 +28,32 @@ pub fn check_globs(string: String) -> bool {
     string.chars().any(|t| matches!(t, '?' | '*' | '[' | ']'))
 }
 
-pub fn expand_token(token: Tk) -> VecDeque<Tk> {
+pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
     trace!("expand(): Starting expansion with token: {:?}", token);
     let mut working_buffer: VecDeque<Tk> = VecDeque::new();
     let mut product_buffer: VecDeque<Tk> = VecDeque::new();
 
+		//TODO: find some way to clean up this surprisingly functional mess
+		// Escaping breaks this right now I think
+
     working_buffer.push_back(token.clone());
-    while let Some(token) = working_buffer.pop_front() {
+    while let Some(mut token) = working_buffer.pop_front() {
         let is_glob = check_globs(token.text().into());
-        let is_brace_expansion = helper::is_brace_expansion(&token);
-        if !is_glob && !is_brace_expansion {
-            // Expand variables - returns original string if none are found
-            product_buffer.push_back(token);
+        let is_brace_expansion = helper::is_brace_expansion(token.text());
+        if (!is_glob && !is_brace_expansion) || token.text().contains('$') {
+					debug!("expanding var for {}",token.text());
+					token.wd.text = expand_var(shellenv, token.text().into());
+					if helper::is_brace_expansion(token.text()) || token.text().contains('$') {
+						working_buffer.push_front(token);
+					} else {
+						product_buffer.push_back(token)
+					}
         } else if is_brace_expansion {
             trace!("expand(): Beginning brace expansion on {}", token.text());
             // Perform brace expansion
             let expanded = expand_braces(token.text().to_string());
-            for expanded_token in expanded {
+            for mut expanded_token in expanded {
+							expanded_token = expand_var(shellenv, expanded_token);
                 working_buffer.push_back(
                     Tk {
                         tk_type: TkType::String,
@@ -69,7 +79,7 @@ pub fn expand_token(token: Tk) -> VecDeque<Tk> {
                     }
                 );
             }
-        }
+				}
     }
     product_buffer
 }
@@ -178,4 +188,41 @@ fn expand_range(range: &str) -> Option<VecDeque<String>> {
     }
 
     None // Invalid range
+}
+
+pub fn expand_var(shellenv: &ShellEnv, string: String) -> String {
+	let mut left = String::new();
+	let mut right = String::new();
+	let mut chars = string.chars().collect::<VecDeque<char>>();
+	while let Some(ch) = chars.pop_front() {
+		match ch {
+			'\\' => left.push(if let Some(ch) = chars.pop_front() { ch } else { break }),
+			'$' => {
+				right.extend(chars.drain(..));
+				break
+			},
+			_ => left.push(ch)
+		}
+	}
+	if right.is_empty() {
+		return string.to_string()
+	}
+	let mut right_chars = right.chars().collect::<VecDeque<char>>();
+	let mut var_name = String::new();
+	while let Some(ch) = right_chars.pop_front() {
+		match ch {
+			_ if ch.is_alphanumeric() => {
+				var_name.push(ch);
+			}
+			'_' => {
+				var_name.push(ch);
+			}
+			'{' => {}
+			_ => break
+		}
+	}
+	let right = right_chars.iter().collect::<String>();
+
+	let value = shellenv.get_variable(&var_name).cloned().unwrap_or_default();
+	format!("{}{}{}",left,value,right)
 }
