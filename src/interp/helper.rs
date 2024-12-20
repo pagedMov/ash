@@ -2,6 +2,8 @@ use crate::interp::token::{Tk, WdFlags, WordDesc, CMDSEP, KEYWORDS, BUILTINS, RE
 use log::{debug,trace};
 use std::collections::VecDeque;
 
+use super::parse::RshErr;
+
 pub fn get_delimiter(wd: &WordDesc) -> char {
     let flags = wd.flags;
     match () {
@@ -35,7 +37,7 @@ pub fn wspace(c: &char) -> bool {
 pub fn quoted(wd: &WordDesc) -> bool {
     wd.flags.contains(WdFlags::SNG_QUOTED) || wd.flags.contains(WdFlags::DUB_QUOTED)
 }
-pub fn finalize_word(word_desc: &WordDesc, tokens: &mut VecDeque<Tk>) -> WordDesc {
+pub fn finalize_word(word_desc: &WordDesc, tokens: &mut VecDeque<Tk>) -> Result<WordDesc,RshErr> {
     let mut word_desc = word_desc.clone();
     let span = (word_desc.span.1,word_desc.span.1);
     trace!("finalizing word `{}` with flags `{:?}`",word_desc.text,word_desc.flags);
@@ -50,13 +52,13 @@ pub fn finalize_word(word_desc: &WordDesc, tokens: &mut VecDeque<Tk>) -> WordDes
             word_desc = word_desc.remove_flag(WdFlags::IS_ARG);
             word_desc = word_desc.add_flag(WdFlags::KEYWORD);
         }
-        tokens.push_back(Tk::from(word_desc));
+        tokens.push_back(Tk::from(word_desc)?);
     }
 
     // Always return a fresh WordDesc with reset state
-    WordDesc {
+    Ok(WordDesc {
         text: String::new(),
         span,
         flags: WdFlags::empty(),
-    }
+    })
 }

@@ -5,21 +5,22 @@ use crate::interp::token::{TkType,Tk,WordDesc};
 use crate::interp::parse::ParseState;
 use crate::interp::helper;
 
-pub fn expand(state: ParseState) -> ParseState {
+use super::parse::RshErr;
+
+pub fn expand(mut state: ParseState) -> Result<ParseState,RshErr> {
     let mut buffer = VecDeque::new();
-    let mut tokens = state.tokens.clone();
-    while let Some(tk) = tokens.pop_front() {
+    while let Some(tk) = state.tokens.pop_front() {
         for token in expand_token(tk) {
             buffer.push_back(token);
         }
     }
-    tokens = std::mem::take(&mut buffer);
-    ParseState {
+    let tokens = std::mem::take(&mut buffer);
+    Ok(ParseState {
         input: state.input,
         shellenv: state.shellenv,
         tokens,
         ast: state.ast
-    }
+    })
 }
 
 pub fn check_globs(string: String) -> bool {

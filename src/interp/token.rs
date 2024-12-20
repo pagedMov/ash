@@ -7,6 +7,8 @@ use std::collections::VecDeque;
 use crate::interp::parse::ParseState;
 use crate::interp::helper;
 
+use super::parse::RshErr;
+
 pub const KEYWORDS: [&str;14] = [
     "if", "while", "until", "for", "case", "select",
     "then", "elif", "else", "in",
@@ -181,7 +183,7 @@ impl Tk {
             wd: WordDesc { text: ";;".into(), span: (pos,pos+1), flags: WdFlags::empty() }
         }
     }
-    pub fn from(mut wd: WordDesc) -> Self {
+    pub fn from(mut wd: WordDesc) -> Result<Self,RshErr> {
         debug!("Tk::from(): Evaluating node type for: {}", wd.text);
 
         // TODO: Implement sub-shell substitutions
@@ -189,7 +191,7 @@ impl Tk {
         let text = wd.text.as_str();
         let tk_type = match text {
             _ if wd.flags.contains(WdFlags::KEYWORD) => {
-                Self::get_keyword_token(&wd)
+                Self::get_keyword_token(&wd)?
             }
             _ if REGEX["assignment"].is_match(text) => {
                 trace!("Matched assignment: {}", text);
@@ -197,7 +199,7 @@ impl Tk {
             },
             _ if REGEX["redirection"].is_match(text) => {
                 trace!("Matched redirection: {}", text);
-                Self::build_redir(&wd)
+                Self::build_redir(&wd)?
             },
             _ if REGEX["process_sub"].is_match(text) => {
                 trace!("Matched process substitution: {}", text);
@@ -240,33 +242,32 @@ impl Tk {
                 TkType::Ident
             },
             _ => {
-                trace!("Failed to classify text: {}", wd.text);
-                panic!("failed to classify this: {}", wd.text)
+                return Err(RshErr::from_parse(format!("Failed to classify this: {}",wd.text), wd.span))
             }
         };
-        Tk { tk_type, wd }
+        Ok(Tk { tk_type, wd })
     }
-    fn get_keyword_token(wd: &WordDesc) -> TkType {
+    fn get_keyword_token(wd: &WordDesc) -> Result<TkType,RshErr> {
         let text = wd.text.clone();
         match text.as_str() {
-            "if" => TkType::If,
-            "elif" => TkType::Elif,
-            "else" => TkType::Else,
-            "then" => TkType::Then,
-            "fi" => TkType::Fi,
-            "for" => TkType::For,
-            "while" => TkType::While,
-            "until" => TkType::Until,
-            "do" => TkType::Do,
-            "done" => TkType::Done,
-            "case" => TkType::Case,
-            "esac" => TkType::Esac,
-            "select" => TkType::Select,
-            "in" => TkType::In,
-            _ => panic!("Unrecognized keyword: {}", text),
+            "if" => Ok(TkType::If),
+            "elif" => Ok(TkType::Elif),
+            "else" => Ok(TkType::Else),
+            "then" => Ok(TkType::Then),
+            "fi" => Ok(TkType::Fi),
+            "for" => Ok(TkType::For),
+            "while" => Ok(TkType::While),
+            "until" => Ok(TkType::Until),
+            "do" => Ok(TkType::Do),
+            "done" => Ok(TkType::Done),
+            "case" => Ok(TkType::Case),
+            "esac" => Ok(TkType::Esac),
+            "select" => Ok(TkType::Select),
+            "in" => Ok(TkType::In),
+            _ => return Err(RshErr::from_parse(format!("Unrecognized keyword: {}",wd.text), wd.span))
         }
     }
-    fn build_redir(wd: &WordDesc) -> TkType {
+    fn build_redir(wd: &WordDesc) -> Result<TkType,RshErr> {
         let text = wd.text.clone();
         if let Some(caps) = REGEX["redirection"].captures(text.as_str()) {
             let fd_out = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(1);
@@ -279,7 +280,7 @@ impl Tk {
                 "<" => RedirType::Input,
                 "<<" => RedirType::Heredoc,
                 "<<<" => RedirType::Herestring,
-                _ => panic!("invalid redirection operator: {}",operator)
+                _ => return Err(RshErr::from_parse(format!("Invalid redirect operator: {}",wd.text), wd.span))
             };
             let redir = Redir {
                 fd_out,
@@ -287,7 +288,7 @@ impl Tk {
                 fd_target,
                 file_target: None // We will do this part in the parsing phase
             };
-            TkType::Redirection { redir }
+            Ok(TkType::Redirection { redir })
         } else { unreachable!() }
     }
     fn get_operator_type(word_desc: &WordDesc) -> TkType {
@@ -449,7 +450,7 @@ pub fn test_redirection(c: char, mut chars: VecDeque<char>, mut word_desc: WordD
     } else { None }
 }
 
-pub fn tokenize(state: ParseState) -> ParseState {
+pub fn tokenize(state: ParseState) -> Result<ParseState,RshErr> {
     debug!("Starting tokenization with input: {:?}", state.input);
 
     let mut word_desc = WordDesc {
@@ -513,13 +514,13 @@ pub fn tokenize(state: ParseState) -> ParseState {
                 match c {
                     '"' if !word_desc.contains_flag(WdFlags::SNG_QUOTED) => {
                         trace!("Closing double quote found");
-                        let word_desc = helper::finalize_word(&word_desc, &mut tokens);
+                        let word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
                         is_arg = true; // After a quote, it's part of a command argument
                         word_desc
                     }
                     '\'' if !word_desc.contains_flag(WdFlags::DUB_QUOTED) => {
                         trace!("Closing single quote found");
-                        let word_desc = helper::finalize_word(&word_desc, &mut tokens);
+                        let word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
                         is_arg = true;
                         word_desc
                     }
@@ -568,7 +569,7 @@ pub fn tokenize(state: ParseState) -> ParseState {
                 word_desc.toggle_flag(WdFlags::SNG_QUOTED).push_span(1)
             }
             '&' | '|' => {
-                word_desc = helper::finalize_word(&word_desc, &mut tokens);
+                word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
                 word_desc = word_desc.add_char(c);
                 if let Some(ch) = chars.pop_front() {
                     trace!("checking operator");
@@ -582,12 +583,12 @@ pub fn tokenize(state: ParseState) -> ParseState {
                 } else {
                     match c {
                         '&' => { word_desc = word_desc.add_char(c); }, // Background operator
-                        _ => panic!("Expected an expression after this operator '{}'", c)
+                        _ => return Err(RshErr::from_parse(format!("Expected an expression after this operator '{}'", c), word_desc.span))
                     }
                 };
                 is_arg = false;
                 word_desc = word_desc.add_flag(WdFlags::IS_OP);
-                helper::finalize_word(&word_desc, &mut tokens)
+                helper::finalize_word(&word_desc, &mut tokens)?
             }
             _ if helper::cmdsep(&c) => {
                 trace!("Command separator found: {:?}", c);
@@ -598,7 +599,7 @@ pub fn tokenize(state: ParseState) -> ParseState {
                     word_desc = word_desc.remove_flag(WdFlags::IS_ARG);
                     word_desc = word_desc.add_flag(WdFlags::KEYWORD);
                 }
-                word_desc = helper::finalize_word(&word_desc, &mut tokens);
+                word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
                 if let Some(ch) = chars.front() {
                     if *ch == ';' {
                         tokens.push_back(Tk::case_delim(word_desc.span.1 + 1));
@@ -615,7 +616,7 @@ pub fn tokenize(state: ParseState) -> ParseState {
             ')' => {
                 trace!("Case separator found: {:?}", c);
                 word_desc = word_desc.add_flag(WdFlags::IS_ARG); // Make sure this doesn't get interpreted as a keyword
-                word_desc = helper::finalize_word(&word_desc, &mut tokens);
+                word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
                 tokens.push_back(Tk::casesep(word_desc.span.1 + 1));
                 is_arg = false; // Next word is part of a new command
                 word_desc
@@ -639,7 +640,7 @@ pub fn tokenize(state: ParseState) -> ParseState {
                     if matches!(word_desc.text.as_str(), "in") && expect_in {
                         expect_in = false;
                     }
-                    let word_desc = helper::finalize_word(&word_desc, &mut tokens);
+                    let word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
                     if !keywd {
                         is_arg = true;
                     }
@@ -661,10 +662,10 @@ pub fn tokenize(state: ParseState) -> ParseState {
     if !word_desc.text.is_empty() {
         trace!("finalizing word: {:?}", word_desc);
         if helper::delimited(&word_desc) {
-            panic!("unclosed delimiter")
+            return Err(RshErr::from_parse("unclosed delimiter".into(), word_desc.span))
         }
         if helper::quoted(&word_desc) {
-            panic!("unclosed quotation")
+            return Err(RshErr::from_parse("unclosed quotation".into(), word_desc.span))
         }
         if is_arg {
             word_desc = word_desc.add_flag(WdFlags::IS_ARG);
@@ -675,10 +676,10 @@ pub fn tokenize(state: ParseState) -> ParseState {
     tokens.push_back(Tk::end_of_input(state.input.len()));
     trace!("Tokenization complete. Tks: {:?}", tokens);
 
-    ParseState {
+    Ok(ParseState {
         input: state.input,
         shellenv: state.shellenv,
         tokens,
         ast: state.ast,
-    }
+    })
 }

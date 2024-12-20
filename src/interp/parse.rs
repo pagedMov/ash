@@ -300,7 +300,7 @@ impl DescentContext {
 
 pub fn descend<'a>(input: &'a str, shellenv: &'a ShellEnv) -> Result<ParseState<'a>,ParseErrFull> {
   info!("Starting descent into parsing with input: {:?}", input);
-  let state = ParseState {
+  let mut state = ParseState {
     input,
     shellenv,
     tokens: VecDeque::new(),
@@ -310,13 +310,22 @@ pub fn descend<'a>(input: &'a str, shellenv: &'a ShellEnv) -> Result<ParseState<
     }
   };
 
-  let state = tokenize(state);
+  match tokenize(state) {
+    Ok(parse_state) => state = parse_state,
+    Err(e) => return Err(ParseErrFull::from(e, input))
+  }
 
-  let state = expand(state);
+  match expand(state) {
+    Ok(parse_state) => state = parse_state,
+    Err(e) => return Err(ParseErrFull::from(e, input))
+  }
 
-  let state = parse(state);
+  match parse(state) {
+    Ok(parse_state) => state = parse_state,
+    Err(e) => return Err(ParseErrFull::from(e, input))
+  }
 
-  state
+  Ok(state)
 }
 
 /// The purpose of this function is mainly just to be an entry point for the parsing logic
@@ -324,24 +333,18 @@ pub fn descend<'a>(input: &'a str, shellenv: &'a ShellEnv) -> Result<ParseState<
 /// propagated up here and then converted to a complete ParseErrFull using the context of
 /// ParseState. This is done because propagating errors upwards is probably
 /// cheaper (and definitely easier) than propagating the raw input text downwards.
-pub fn parse(state: ParseState) -> Result<ParseState,ParseErrFull> {
+pub fn parse(state: ParseState) -> Result<ParseState,RshErr> {
   let ctx = DescentContext::new(state.tokens.clone());
 
-  match get_tree(ctx) {
-    Ok(ast) => {
-      debug!("Generated AST: {:#?}", ast);
-
-      Ok(ParseState {
-        input: state.input,
-        shellenv: state.shellenv,
-        tokens: state.tokens,
-        ast
-      })
+  get_tree(ctx).map(|ast| {
+    debug!("Generated AST: {:#?}", ast);
+    ParseState {
+      input: state.input,
+      shellenv: state.shellenv,
+      tokens: state.tokens,
+      ast
     }
-    Err(e) => {
-      Err(ParseErrFull::from(e, state.input))
-    }
-  }
+  })
 }
 
 pub fn get_tree(ctx: DescentContext) -> Result<Node, RshErr> {
@@ -485,6 +488,11 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> Result<DescentContex
   Ok(ctx)
 }
 
+pub fn check_valid_operand(node: &Node) -> bool {
+  use crate::interp::parse::NdType::*;
+  matches!(node.nd_type, Pipeline {..} | Chain {..} | If {..} | For {..} | Loop {..} | Case {..} | Select {..} | Command {..} | Builtin {..})
+}
+
 pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
   // Second pass will collect nodes at operators and construct pipelines and chains
   let mut buffer = VecDeque::new();
@@ -494,6 +502,12 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, RshE
       NdType::Pipe => {
         if let Some(left) = buffer.pop_back() {
           if let Some(right) = ctx.next_node() {
+            if !check_valid_operand(&left) {
+              return Err(RshErr::from_parse("The left side of this pipeline is invalid".into(), node.span))
+            }
+            if !check_valid_operand(&right) {
+              return Err(RshErr::from_parse("The right side of this pipeline is invalid".into(), node.span))
+            }
             let left = Box::new(left);
             let right = Box::new(right);
             let pipeline = Node {
@@ -501,7 +515,11 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, RshE
               span: (0,0)
             };
             buffer.push_back(pipeline);
+          } else {
+            return Err(RshErr::from_parse("This pipeline is missing a right operand".into(), node.span))
           }
+        } else {
+          return Err(RshErr::from_parse("This pipeline is missing a left operand".into(), node.span))
         }
       }
       NdType::Cmdsep => {
@@ -519,6 +537,12 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, RshE
       NdType::And | NdType::Or => {
         if let Some(left) = buffer.pop_back() {
           if let Some(right) = ctx.next_node() {
+            if !check_valid_operand(&left) {
+              return Err(RshErr::from_parse("The left side of this chain is invalid".into(), node.span))
+            }
+            if !check_valid_operand(&right) {
+              return Err(RshErr::from_parse("The right side of this chain is invalid".into(), node.span))
+            }
             let left = Box::new(left);
             let right = Box::new(right);
             let op = Box::new(node);
@@ -527,7 +551,11 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, RshE
               span: (0,0)
             };
             buffer.push_back(chain);
+          } else {
+            return Err(RshErr::from_parse("This chain is missing a right operand".into(), node.span))
           }
+        } else {
+          return Err(RshErr::from_parse("This chain is missing a left operand".into(), node.span))
         }
       }
       NdType::Cmdsep => {
@@ -577,6 +605,7 @@ pub fn build_if(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
   let mut logic_blocks = VecDeque::new();
   let mut else_block = None;
   let mut phase = Phase::Condition;
+  let mut closed = false;
 
   let span_start = ctx.mark_start();
   debug!("Starting build_if, initial tokens: {:?}", ctx.get_tk_texts());
@@ -666,6 +695,7 @@ pub fn build_if(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
         );
       }
       TkType::Fi => {
+        closed = true;
         if !matches!(if_context,TkType::Then | TkType::Else) {
           return Err(RshErr::from_parse("Was expecting a `then` block, get an else block instead".into(), (err_span,ctx.mark_end())))
         }
@@ -706,6 +736,10 @@ pub fn build_if(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
   let span_end = ctx.mark_end();
   let span = (span_start, span_end);
 
+  if !closed {
+      return Err(RshErr::from_parse("This if statement didn't get an `fi`".into(), span))
+  }
+
   debug!("build_if: constructing final node...");
   let node = Node {
     nd_type: NdType::If { cond_blocks: logic_blocks, else_block },
@@ -727,6 +761,7 @@ pub fn build_for(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
   let mut body_root: VecDeque<Node> = VecDeque::new();
   let span_start = ctx.mark_start();
   let mut body_start = 0;
+  let mut closed = false;
 
   while let Some(tk) = ctx.next_tk() {
     match tk.class() {
@@ -753,6 +788,7 @@ pub fn build_for(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
         if phase == Phase::Array {
           return Err(RshErr::from_parse("This for loop has an unterminated array definition".into(), (span_start,ctx.mark_end())))
         }
+        closed = true;
         break;
       }
       _ => match phase {
@@ -782,14 +818,19 @@ pub fn build_for(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
     }
   }
 
+  let span_end = ctx.mark_end();
+  let span = (span_start,span_end);
+
+  if !closed {
+    return Err(RshErr::from_parse("This loop is missing a `done`.".into(), span))
+  }
+
   if !body_tokens.is_empty() {
     body_root = parse_and_attach(take(&mut body_tokens), body_root)?;
   }
   let body_end = ctx.mark_end();
   let body_span = (body_start,body_end);
   let loop_body = Box::new(Node::from(body_root,body_span));
-  let span_end = ctx.mark_end();
-  let span = (span_start,span_end);
   let node = Node {
     nd_type: NdType::For { loop_vars, loop_arr, loop_body },
     span
@@ -806,6 +847,7 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> Result<DescentCon
   let mut cond_root = VecDeque::new();
   let mut body_tokens = VecDeque::new();
   let mut body_root = VecDeque::new();
+  let mut closed = false;
   let span_start = ctx.mark_start();
 
   while let Some(tk) = ctx.next_tk() {
@@ -823,6 +865,7 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> Result<DescentCon
         if body_tokens.is_empty() {
           return Err(RshErr::from_parse("Did not find a body for this loop".into(), tk.span()))
         }
+        closed = true;
         break
       }
       _ if OPENERS.contains(&tk.class()) => {
@@ -859,8 +902,14 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> Result<DescentCon
     }
   }
 
+
   let span_end = ctx.mark_end();
   let span = (span_start,span_end);
+
+  if !closed {
+    return Err(RshErr::from_parse("This loop is missing a `done`".into(), span))
+  }
+
   let mut cond_span = (0,0);
   let mut body_span = (0,0);
   if !cond_tokens.is_empty() && !body_tokens.is_empty() {
@@ -887,6 +936,7 @@ pub fn build_case(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
   let mut input_var: Option<Tk> = None;
   let mut outer_phase = Phase::Vars;
   let mut inner_phase = Phase::Condition;
+  let mut closed = false;
 
   let span_start = ctx.mark_start();
 
@@ -920,6 +970,7 @@ pub fn build_case(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
               tk.span(),
           ));
         }
+        closed = true;
         break;
       }
       TkType::CaseSep => {
@@ -1005,6 +1056,10 @@ pub fn build_case(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
   let span_end = ctx.mark_end();
   let span = (span_start, span_end);
 
+  if !closed {
+    return Err(RshErr::from_parse("This case statement is missing an `esac`".into(), span))
+  }
+
   if input_var.is_none() {
     return Err(RshErr::from_parse(
         "Did not find a variable for this case statement".into(),
@@ -1031,6 +1086,7 @@ pub fn build_select(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
   let mut opts: VecDeque<Tk> = VecDeque::new();
   let mut body_tokens: VecDeque<Tk> = VecDeque::new();
   let mut body_root: VecDeque<Node> = VecDeque::new();
+  let mut closed = false;
   let span_start = ctx.mark_start();
   let body_start = 0;
 
@@ -1056,6 +1112,7 @@ pub fn build_select(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
           return Err(RshErr::from_parse("This select statement has an empty body".into(), tk.span()))
         }
         body_root = parse_and_attach(take(&mut body_tokens), body_root)?;
+        closed = true;
         break
       }
       _ => {
@@ -1088,6 +1145,10 @@ pub fn build_select(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
   }
   let span_end = ctx.mark_end();
   let span = (span_start,span_end);
+
+  if !closed {
+    return Err(RshErr::from_parse("This select statement is missing a `done`".into(), span))
+  }
 
   if !body_tokens.is_empty() {
     body_root = parse_and_attach(take(&mut body_tokens), body_root)?;
@@ -1355,5 +1416,103 @@ mod tests {
         let shellenv = ShellEnv::new(false, true);
         descend(input, &shellenv)?;
         Ok(())
+    }
+
+    #[test]
+    fn test_if_missing_fi() {
+        let input = "if true; then echo \"missing fi\"";
+        let shellenv = ShellEnv::new(false, true);
+        assert!(descend(input, &shellenv).is_err(), "Expected error for missing 'fi'");
+    }
+
+    #[test]
+    fn test_for_missing_done() {
+        let input = "for i in 1 2 3; do echo \"missing done\"";
+        let shellenv = ShellEnv::new(false, true);
+        assert!(descend(input, &shellenv).is_err(), "Expected error for missing 'done'");
+    }
+
+    #[test]
+    fn test_while_missing_do() {
+        let input = "while true echo \"missing do\"; done";
+        let shellenv = ShellEnv::new(false, true);
+        assert!(descend(input, &shellenv).is_err(), "Expected error for missing 'do'");
+    }
+
+    #[test]
+    fn test_case_missing_esac() {
+        let input = "case var in var) echo \"missing esac\";;";
+        let shellenv = ShellEnv::new(false, true);
+        assert!(descend(input, &shellenv).is_err(), "Expected error for missing 'esac'");
+    }
+
+    #[test]
+    fn test_case_invalid_syntax() {
+        let input = "case var in var) echo \"missing ;;\" esac";
+        let shellenv = ShellEnv::new(false, true);
+        assert!(descend(input, &shellenv).is_err(), "Expected error for invalid case syntax");
+    }
+
+    #[test]
+    fn test_pipeline_missing_command() {
+        let input = "| echo \"missing left command\"";
+        let shellenv = ShellEnv::new(false, true);
+        assert!(descend(input, &shellenv).is_err(), "Expected error for missing command in pipeline");
+    }
+
+    #[test]
+    fn test_and_chain_missing_right_command() {
+        let input = "echo \"left command\" &&";
+        let shellenv = ShellEnv::new(false, true);
+        assert!(descend(input, &shellenv).is_err(), "Expected error for missing right command in AND chain");
+    }
+
+    #[test]
+    fn test_or_chain_missing_left_command() {
+        let input = "|| echo \"right command\"";
+        let shellenv = ShellEnv::new(false, true);
+        assert!(descend(input, &shellenv).is_err(), "Expected error for missing left command in OR chain");
+    }
+
+    #[test]
+    fn test_unmatched_parentheses() {
+        let input = "echo $(echo \"unmatched parentheses\"";
+        let shellenv = ShellEnv::new(false, true);
+        assert!(descend(input, &shellenv).is_err(), "Expected error for unmatched parentheses");
+    }
+
+    #[test]
+    fn test_unclosed_quotes() {
+        let input = "echo \"unclosed string";
+        let shellenv = ShellEnv::new(false, true);
+        assert!(descend(input, &shellenv).is_err(), "Expected error for unclosed quotes");
+    }
+
+    #[test]
+    fn test_invalid_redirect_syntax() {
+        let input = "echo \"Hello\" >";
+        let shellenv = ShellEnv::new(false, true);
+        assert!(descend(input, &shellenv).is_err(), "Expected error for invalid redirect syntax");
+    }
+
+    #[test]
+    fn test_multiple_sequential_pipes() {
+        let input = "echo \"Hello\" ||| grep \"H\"";
+        let shellenv = ShellEnv::new(false, true);
+        assert!(descend(input, &shellenv).is_err(), "Expected error for multiple sequential pipes");
+    }
+
+    #[test]
+    fn test_nested_structure_mismatch() {
+        let input = "if true; then for i in 1 2 3; do echo $i; fi; done";
+        let shellenv = ShellEnv::new(false, true);
+        assert!(descend(input, &shellenv).is_err(), "Expected error for mismatched structure nesting");
+    }
+
+    #[test]
+    fn test_invalid_select_syntax() {
+        let input = "select in 1 2 3; do echo \"invalid syntax\"; done";
+        let shellenv = ShellEnv::new(false, true);
+        assert!(descend(input, &shellenv).is_err(), "Expected error for invalid select syntax");
     }
 }
