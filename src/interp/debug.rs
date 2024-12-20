@@ -48,8 +48,8 @@ impl fmt::Display for Node {
                 NdType::Case { input_var, cases } => {
                     writeln!(f, "{}Case (input: {:?})", prefix, input_var.text())?;
                     for case in cases {
-                        writeln!(f, "{}|--- Pattern: {:?}", prefix, case.pattern)?;
-                        write_tree(&case.logic, f, indent + 1)?;
+                        writeln!(f, "{}|--- Pattern: {:?}", prefix, case.0)?;
+                        write_tree(case.1, f, indent + 1)?;
                     }
                 }
                 NdType::Select { select_var, opts, body } => {

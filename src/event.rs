@@ -5,7 +5,7 @@ use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};
 use thiserror::Error;
 
-use crate::parser::{RshParseError,ASTNode};
+use crate::interp::parse::{ParseErrFull,Node};
 use crate::{execute, prompt};
 use crate::shellenv::ShellEnv;
 //use crate::execute::NodeWalker;
@@ -18,8 +18,8 @@ pub enum ShellError {
     #[error("Invalid syntax: {0}")]
     InvalidSyntax(String),
 
-    #[error("Parsing failed: {0}")]
-    ParsingError(RshParseError),
+    #[error("{0}")]
+    ParsingError(ParseErrFull),
 
     #[error("Execution faiiled for command '{0}' with exit code {1}")]
     ExecFailed(String,i32),
@@ -45,7 +45,7 @@ pub enum ShellEvent {
     Prompt,
     Signal(Signals),
     SubprocessExited(u32,i32),
-    NewAST(VecDeque<ASTNode>),
+    NewAST(Node),
     CatchError(ShellError),
     Exit(i32)
 }

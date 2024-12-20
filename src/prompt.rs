@@ -2,7 +2,7 @@ use tokio::{io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader}, sync::mpsc};
 use log::{trace,debug};
 
 use crate::{event::{ShellError,ShellEvent}, shellenv::ShellEnv};
-use crate::parser;
+use crate::interp::parse::descend;
 
 pub async fn prompt(sender: mpsc::Sender<ShellEvent>, shellenv: &mut ShellEnv) {
     debug!("Reached prompt");
@@ -19,12 +19,16 @@ pub async fn prompt(sender: mpsc::Sender<ShellEvent>, shellenv: &mut ShellEnv) {
 
     let trimmed_input = input.trim().to_string();
     trace!("Received input! {}",trimmed_input);
-    let mut parser = parser::Rsh::new(&trimmed_input,shellenv);
-    if let Err(e) = parser.tokenize() {
-        let _ = sender.send(ShellEvent::CatchError(ShellError::ParsingError(e))).await;
-        let _ = sender.send(ShellEvent::Prompt).await;
-    } else {
-        let _ = sender.send(ShellEvent::NewAST(parser.get_ast())).await;
-        let _ = sender.send(ShellEvent::Prompt).await;
+    let shellenv = ShellEnv::new(false,false);
+    let state = descend(&input,&shellenv);
+    match state {
+        Ok(parse_state) => {
+            let _ = sender.send(ShellEvent::NewAST(parse_state.ast)).await;
+            let _ = sender.send(ShellEvent::Prompt).await;
+        }
+        Err(e) => {
+            let _ = sender.send(ShellEvent::CatchError(ShellError::ParsingError(e))).await;
+            let _ = sender.send(ShellEvent::Prompt).await;
+        }
     }
 }

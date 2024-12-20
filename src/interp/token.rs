@@ -52,6 +52,7 @@ bitflags! {
         const IN_PAREN =   0b00001000000000;
         const IS_SUB =     0b00010000000000;
         const IS_OP =      0b00100000000000;
+        const EXPECT_IN =  0b01000000000000;
     }
 }
 
@@ -268,9 +269,9 @@ impl Tk {
     fn build_redir(wd: &WordDesc) -> TkType {
         let text = wd.text.clone();
         if let Some(caps) = REGEX["redirection"].captures(text.as_str()) {
-            let fd_out = caps.get(1).and_then(|m| m.as_str().parse::<usize>().ok()).unwrap_or(1);
+            let fd_out = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(1);
             let operator = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
-            let fd_target = caps.get(3).and_then(|m| m.as_str().parse::<usize>().ok());
+            let fd_target = caps.get(3).and_then(|m| m.as_str().parse::<i32>().ok());
 
             let redir_type = match operator {
                 ">" => RedirType::Output,
@@ -315,9 +316,9 @@ impl Tk {
 
 #[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub struct Redir {
-    pub fd_out: usize,
+    pub fd_out: i32,
     pub op: RedirType,
-    pub fd_target: Option<usize>,
+    pub fd_target: Option<i32>,
     pub file_target: Option<Box<Tk>>
 }
 
@@ -459,6 +460,7 @@ pub fn tokenize(state: ParseState) -> ParseState {
     let mut chars = state.input.chars().collect::<VecDeque<char>>();
     let mut tokens: VecDeque<Tk> = VecDeque::from(vec![Tk::start_of_input()]);
     let mut is_arg = false; // Start in "command mode" since SOI implies a command
+    let mut expect_in = false; // TODO: figure out a better way to make the 'in' keyword work
     trace!("Initialized state: word_desc: {:?}, tokens: {:?}", word_desc, tokens);
 
     while let Some(c) = chars.pop_front() {
@@ -592,6 +594,10 @@ pub fn tokenize(state: ParseState) -> ParseState {
                 if is_arg {
                     word_desc = word_desc.add_flag(WdFlags::IS_ARG);
                 }
+                if expect_in && word_desc.text == "in" {
+                    word_desc = word_desc.remove_flag(WdFlags::IS_ARG);
+                    word_desc = word_desc.add_flag(WdFlags::KEYWORD);
+                }
                 word_desc = helper::finalize_word(&word_desc, &mut tokens);
                 if let Some(ch) = chars.front() {
                     if *ch == ';' {
@@ -623,6 +629,15 @@ pub fn tokenize(state: ParseState) -> ParseState {
                         trace!("Setting IS_ARG flag after whitespace");
                         word_desc = word_desc.add_flag(WdFlags::IS_ARG);
                         trace!("new flags: {:?}",word_desc.flags);
+                    }
+                    if expect_in {
+                        word_desc = word_desc.add_flag(WdFlags::EXPECT_IN);
+                    }
+                    if matches!(word_desc.text.as_str(), "for" | "select" | "case") {
+                        expect_in = true;
+                    }
+                    if matches!(word_desc.text.as_str(), "in") && expect_in {
+                        expect_in = false;
                     }
                     let word_desc = helper::finalize_word(&word_desc, &mut tokens);
                     if !keywd {

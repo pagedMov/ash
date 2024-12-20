@@ -23,7 +23,7 @@ pub fn expand(state: ParseState) -> ParseState {
 }
 
 pub fn check_globs(string: String) -> bool {
-    string.chars().any(|t| matches!(t, '?' | '*' | '[' | ']' | '!' | '-'))
+    string.chars().any(|t| matches!(t, '?' | '*' | '[' | ']'))
 }
 
 pub fn expand_token(token: Tk) -> VecDeque<Tk> {

@@ -1,5 +1,5 @@
 use crate::interp::token::{Tk, WdFlags, WordDesc, CMDSEP, KEYWORDS, REGEX, WHITESPACE};
-use log::trace;
+use log::{debug,trace};
 use std::collections::VecDeque;
 
 pub fn get_delimiter(wd: &WordDesc) -> char {
@@ -38,6 +38,11 @@ pub fn finalize_word(word_desc: &WordDesc, tokens: &mut VecDeque<Tk>) -> WordDes
     trace!("finalizing word `{}` with flags `{:?}`",word_desc.text,word_desc.flags);
     if !word_desc.text.is_empty() {
         if keywd(&word_desc) && !word_desc.flags.contains(WdFlags::IS_ARG) {
+            word_desc = word_desc.add_flag(WdFlags::KEYWORD);
+        }
+        if word_desc.flags.contains(WdFlags::EXPECT_IN) && matches!(word_desc.text.as_str(), "in") {
+            debug!("setting in flag to keyword");
+            word_desc = word_desc.remove_flag(WdFlags::IS_ARG);
             word_desc = word_desc.add_flag(WdFlags::KEYWORD);
         }
         tokens.push_back(Tk::from(word_desc));

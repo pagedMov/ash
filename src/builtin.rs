@@ -9,7 +9,7 @@ use nix::unistd::write;
 
 use crate::execute::RshExitStatus;
 use crate::shellenv::ShellEnv;
-use crate::{event::ShellError, parser2::Token};
+use crate::event::ShellError;
 
 pub const BUILTINS: [&str; 14] = [
     "echo", "set", "shift", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node",

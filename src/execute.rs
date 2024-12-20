@@ -11,7 +11,8 @@ use glob::MatchOptions;
 
 use crate::builtin::{cd, echo};
 use crate::event::ShellError;
-use crate::parser::{self, ASTNode, ChainOp, RedirType, Token, TokenType};
+use crate::interp::token::{self, Redir, RedirType, Tk, TkType, WdFlags};
+use crate::interp::parse::{NdType,Node};
 use crate::shellenv::ShellEnv;
 
 // Allow both of these types to be handled by redirection
@@ -42,12 +43,12 @@ impl RshExitStatus {
 
 
 pub struct NodeWalker<'a> {
-    ast: VecDeque<ASTNode>,
+    ast: Node,
     shellenv: &'a mut ShellEnv,
 }
 
 impl<'a> NodeWalker<'a> {
-    pub fn new(ast: VecDeque<ASTNode>, shellenv: &'a mut ShellEnv) -> Self {
+    pub fn new(ast: Node, shellenv: &'a mut ShellEnv) -> Self {
         Self {
             ast,
             shellenv
@@ -56,13 +57,17 @@ impl<'a> NodeWalker<'a> {
     pub fn start_walk(&mut self) -> Result<RshExitStatus,ShellError> {
         info!("Going on a walk...");
         let mut exit_status = RshExitStatus::from(0);
-        while let Some(node) = self.ast.pop_front() {
-            exit_status = self.walk(node, None, None)?;
-        }
+        let mut nodes;
+        if let NdType::Root { ref mut deck } = self.ast.nd_type {
+            nodes = std::mem::take(deck);
+        } else { unreachable!() }
+            while let Some(node) = nodes.pop_front() {
+                exit_status = self.walk(node, None, None)?;
+            }
         Ok(exit_status)
     }
 
-    /// This function will walk through the ASTNode tree and direct nodes to the proper functions
+    /// This function will walk through the Node tree and direct nodes to the proper functions
     ///
     /// # Inputs:
     /// stdin: An optional arg containing a raw file descriptor. This file descriptor is used as an
@@ -72,42 +77,42 @@ impl<'a> NodeWalker<'a> {
     /// stdout to.
     ///
     /// # Outputs: An RshExitStatus or a shell error.
-    fn walk(&mut self, node: ASTNode, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
+    fn walk(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
         debug!("walking over node {:?} with these pipes: {:?},{:?}",node,stdin,stdout);
         let last_status;
-        match node {
-            ASTNode::Command {..} => {
+        match node.nd_type {
+            NdType::Command {..} => {
                 trace!("Found command: {:?}",node);
                 last_status = self.handle_command(node, stdin, stdout)?;
             }
-            ASTNode::Builtin { .. } => {
-                last_status = self.handle_builtin(node, stdin, stdout)?;
-            }
-            ASTNode::Function { .. } => {
-                todo!("handle simple commands")
-            }
-            ASTNode::Pipeline {..} => {
+            //NdType::Builtin { .. } => {
+                //last_status = self.handle_builtin(node, stdin, stdout)?;
+            //}
+            //NdType::Function { .. } => {
+                //todo!("handle simple commands")
+            //}
+            NdType::Pipeline {..} => {
                 last_status = self.handle_pipeline(node, stdin)?;
             }
-            ASTNode::Chain {..} => {
+            NdType::Chain {..} => {
                 last_status = self.handle_chain(node)?;
             }
-            ASTNode::If {..} => {
+            NdType::If {..} => {
                 last_status = self.handle_if(node)?;
             }
-            ASTNode::For {..} => {
+            NdType::For {..} => {
                 last_status = self.handle_for(node)?;
             }
-            ASTNode::Loop {..} => {
+            NdType::Loop {..} => {
                 last_status = self.handle_loop(node)?;
             }
-            ASTNode::Case {..} => {
+            NdType::Case {..} => {
                 todo!("handle case-in")
             }
-            ASTNode::FuncDef {..} => {
+            NdType::FuncDef {..} => {
                 todo!("handle function definition")
             }
-            ASTNode::Assignment {..} => {
+            NdType::Assignment {..} => {
                 last_status = self.handle_assignment(node)?;
             }
             _ => unreachable!()
@@ -115,21 +120,26 @@ impl<'a> NodeWalker<'a> {
         Ok(last_status)
     }
 
-    // One for checking conditions and one for executing code bodies
-    fn walk_condition(&mut self, commands: VecDeque<ASTNode>) -> Result<RshExitStatus,ShellError> {
+    fn walk_root(&mut self, node: Node, break_condition: Option<bool>) -> Result<RshExitStatus,ShellError> {
         let mut last_status = RshExitStatus::Success;
-        for command in commands {
-            last_status = self.walk(command,None,None)?;
-            if let RshExitStatus::Fail(_) = last_status {
-                break
+        if let NdType::Root { deck } = node.nd_type {
+            for node in deck {
+                last_status = self.walk(node,None,None)?;
+                if let Some(condition) = break_condition {
+                    match condition {
+                        true => {
+                            if let RshExitStatus::Fail(_) = last_status {
+                                break
+                            }
+                        }
+                        false => {
+                            if let RshExitStatus::Success = last_status {
+                                break
+                            }
+                        }
+                    }
+                }
             }
-        }
-        Ok(last_status)
-    }
-    fn walk_body(&mut self, commands: VecDeque<ASTNode>) -> Result<RshExitStatus,ShellError> {
-        let mut last_status = RshExitStatus::Success;
-        for command in commands {
-            last_status = self.walk(command,None,None)?;
         }
         Ok(last_status)
     }
@@ -137,23 +147,21 @@ impl<'a> NodeWalker<'a> {
     /// For loops in bash can have multiple loop variables, e.g. `for a b c in 1 2 3 4 5 6`
     /// In this case, loop_vars are also iterated through, e.g. a = 1, b = 2, c = 3, etc
     /// Here, we use the modulo operator to figure out which variable to set on each iteration.
-    fn handle_for(&mut self, node: ASTNode) -> Result<RshExitStatus, ShellError> {
+    fn handle_for(&mut self, node: Node) -> Result<RshExitStatus, ShellError> {
         let mut last_status = RshExitStatus::Success;
 
-        if let ASTNode::For { vars, mut array, body } = node {
-            let var_count = vars.len();
+        if let NdType::For { loop_vars, mut loop_arr, loop_body } = node.nd_type {
+            let var_count = loop_vars.len();
             let mut var_index = 0;
             let mut iteration_count = 0;
 
-            while !array.is_empty() {
-                // Clear variables at the start of each iteration
-                self.clear_variables(&vars);
+            while !loop_arr.is_empty() {
 
                 // Get the current value from the array
-                let current_value = array.pop_front().unwrap().text().to_string();
+                let current_value = loop_arr.pop_front().unwrap().text().to_string();
 
                 // Set the current variable to the current value
-                let current_var = vars[var_index].text().to_string();
+                let current_var = loop_vars[var_index].text().to_string();
                 self.shellenv.set_variable(current_var, current_value);
 
                 // Update the variable index for the next iteration
@@ -161,27 +169,22 @@ impl<'a> NodeWalker<'a> {
                 var_index = iteration_count % var_count;
 
                 // Execute the body of the loop
-                last_status = self.walk_body(body.get_body())?;
+                last_status = self.walk_root(*loop_body.clone(), None)?;
             }
         }
 
         Ok(last_status)
     }
 
-    // Helper function to clear all variables
-    fn clear_variables(&mut self, vars: &VecDeque<Token>) {
-        for var in vars {
-            self.shellenv.set_variable(var.text().into(), "".into());
-        }
-    }
-
-    fn handle_loop(&mut self, node: ASTNode) -> Result<RshExitStatus, ShellError> {
+    fn handle_loop(&mut self, node: Node) -> Result<RshExitStatus, ShellError> {
         let mut last_status = RshExitStatus::Success;
 
-        if let ASTNode::Loop { condition, body } = node {
+        if let NdType::Loop { condition, logic } = node.nd_type {
+            let cond= *logic.condition;
+            let body = *logic.body;
             loop {
                 // Evaluate the loop condition
-                let condition_status = self.walk_condition(body.get_cond())?;
+                let condition_status = self.walk_root(cond.clone(),Some(condition))?;
 
                 match condition {
                     true => {
@@ -197,7 +200,7 @@ impl<'a> NodeWalker<'a> {
                 }
 
                 // Execute the body of the loop
-                last_status = self.walk_body(body.get_body())?;
+                last_status = self.walk_root(body.clone(),None)?;
 
                 // Check for break or continue signals
                 // match last_status {
@@ -214,35 +217,37 @@ impl<'a> NodeWalker<'a> {
         }
     }
 
-    fn handle_if(&mut self, node: ASTNode) -> Result<RshExitStatus, ShellError> {
+    fn handle_if(&mut self, node: Node) -> Result<RshExitStatus, ShellError> {
         let mut last_result;
 
-        if let ASTNode::If { mut cond_blocks, else_block } = node {
+        if let NdType::If { mut cond_blocks, else_block } = node.nd_type {
             while let Some(block) = cond_blocks.pop_front() {
-                last_result = self.walk_condition(block.get_cond());
+                let cond = *block.condition;
+                let body = *block.body;
+                last_result = self.walk_root(cond,Some(false));
                 if let Ok(RshExitStatus::Success) = last_result {
-                    return self.walk_body(block.get_body())
+                    return self.walk_root(body,None)
                 }
             }
-            if else_block.is_some() {
-                return self.walk_body(else_block.unwrap().get_body())
+            if let Some(block) = else_block {
+                return self.walk_root(*block,None)
             }
         }
         Ok(RshExitStatus::Fail(1))
     }
 
-    fn handle_chain(&mut self, node: ASTNode) -> Result<RshExitStatus, ShellError> {
+    fn handle_chain(&mut self, node: Node) -> Result<RshExitStatus, ShellError> {
         let mut last_status = RshExitStatus::from(0);
 
-        if let ASTNode::Chain { left, right, operator } = node {
+        if let NdType::Chain { left, right, op } = node.nd_type {
             match self.walk(*left, None, None)? {
                 RshExitStatus::Success => {
-                    if let ChainOp::And = operator {
+                    if let NdType::And = op.nd_type {
                         last_status = self.walk(*right, None, None)?;
                     }
                 }
                 RshExitStatus::Fail(_code) => {
-                    if let ChainOp::Or = operator {
+                    if let NdType::Or = op.nd_type {
                         last_status = self.walk(*right, None, None)?;
                     }
                 }
@@ -252,7 +257,7 @@ impl<'a> NodeWalker<'a> {
         Ok(last_status)
     }
 
-    fn handle_pipeline(&mut self, node: ASTNode, stdin: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
+    fn handle_pipeline(&mut self, node: Node, stdin: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
         let mut last_status = RshExitStatus::from(0);
 
         // Create the pipe
@@ -261,7 +266,7 @@ impl<'a> NodeWalker<'a> {
         })?;
         let (read, write) = (read.as_raw_fd(), write.as_raw_fd());
 
-        if let ASTNode::Pipeline { left, right } = node {
+        if let NdType::Pipeline { left, right } = node.nd_type {
             // Walk the left side of the pipeline
             debug!("Walking left side of pipeline: {:?}", left);
             last_status = self.walk(*left, stdin, Some(write))
@@ -279,14 +284,15 @@ impl<'a> NodeWalker<'a> {
         Ok(last_status)
     }
 
-    fn handle_assignment(&mut self, node: ASTNode) -> Result<RshExitStatus,ShellError> {
-        if let ASTNode::Assignment { var, val } = node {
-            self.shellenv.set_variable(var, val);
+    fn handle_assignment(&mut self, node: Node) -> Result<RshExitStatus,ShellError> {
+        if let NdType::Assignment { name, value } = node.nd_type {
+            let value = value.unwrap_or_default();
+            self.shellenv.set_variable(name, value);
         }
         Ok(RshExitStatus::Success)
     }
 
-    fn handle_builtin(&mut self, node: ASTNode, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
+    fn handle_builtin(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
         let (argv,_redirs) = self.extract_args(node);
         match argv[0].to_str().unwrap() {
             "echo" => echo(argv.into(), stdout),
@@ -310,7 +316,7 @@ impl<'a> NodeWalker<'a> {
     ///
     /// A tuple containing:
     /// * A vector of `CString` representing the extracted arguments.
-    /// * A `VecDeque` of `Token` representing the extracted redirections.
+    /// * A `VecDeque` of `Tk` representing the extracted redirections.
     ///
     /// # Panics
     ///
@@ -319,7 +325,7 @@ impl<'a> NodeWalker<'a> {
     ///
     /// # Example
     ///
-    /// let node = ASTNode::Command { argv: vec![...].into_iter().collect() };
+    /// let node = Node::Command { argv: vec![...].into_iter().collect() };
     /// let (args, redirs) = shell.extract_args(node);
     ///
     /// # Notes
@@ -328,66 +334,56 @@ impl<'a> NodeWalker<'a> {
     /// - Variable substitutions (`$var`) are resolved using the `shellenv`'s `get_variable` method.
     /// - If a variable substitution is not found, an empty `CString` is added to the arguments.
     ///
-    fn extract_args(&mut self, node: ASTNode) -> (Vec<CString>, VecDeque<Token>) {
+    fn extract_args(&mut self, node: Node) -> (Vec<CString>, VecDeque<Tk>) {
         let mut args = vec![];
-        let mut redirs = VecDeque::new();
-        match node {
-            ASTNode::Command { mut argv } | ASTNode::Builtin { mut argv } | ASTNode::Function { mut argv } => {
+        let cmd_redirs;
+        match node.nd_type {
+            NdType::Command { mut argv, redirs } => {
                 trace!("Extracting arguments from command node: {:?}", args);
-                while let Some(word) = argv.pop_front() {
+                while let Some(mut word) = argv.pop_front() {
                     trace!("checking word: {}",word.text());
-                    match word.class() {
-                        TokenType::Redir { .. } => {
-                            trace!("Found redirection token: {:?}", word);
-                            redirs.push_back(word);
-                            redirs.extend(argv.into_iter());
-                            break;
-                        }
-                        _ => {
-                            // Expand arguments, only expand braces if arguments is not empty
-                            let mut expanded = parser::expand(self.shellenv, word.clone());
-
-                            while let Some(expanded_token) = expanded.pop_front() {
-                                let cstring = CString::new(expanded_token.text()).unwrap();
-                                args.push(cstring);
-                            }
-                        }
+                    if word.wd.contains_flag(WdFlags::IS_SUB) {
+                        word.wd.text = self
+                            .shellenv
+                            .get_variable(word.text())
+                            .map(|s| s.to_string())
+                            .unwrap_or_default();
                     }
+
+                    let cstring = CString::new(word.text()).unwrap();
+                    args.push(cstring);
                 }
+                cmd_redirs = redirs;
             }
-            _ => panic!("Unexpected ASTNode variant: {:?}", node),
+            _ => panic!("Unexpected Node variant: {:?}", node),
         }
-        debug!("Extracted args: {:?}, redirs: {:?}", args, redirs);
-        (args, redirs)
+        debug!("Extracted args: {:?}, redirs: {:?}", args, cmd_redirs);
+        (args, cmd_redirs)
     }
 
-    fn handle_redirs(&self, mut redirs: VecDeque<Token>) -> Result<(), ShellError> {
+    fn handle_redirs(&self, mut redirs: VecDeque<Tk>) -> Result<(), ShellError> {
         let mut fd_queue: VecDeque<i32> = VecDeque::new();
         debug!("Handling redirections: {:?}", redirs);
 
         while let Some(redir) = redirs.pop_front() {
-            match redir.class() {
-                TokenType::Redir { redir_type, fd_out, fd_target, file_target } => {
-                    if let Some(target) = fd_target {
-                        info!("Redirecting FD {} to {}", fd_out, target);
-                        dup2(*target, *fd_out).unwrap();
-                        fd_queue.push_back(*target);
-
-                    } else if let Some(file_path) = file_target {
-                        info!("Opening file for redirection: {:?}", file_path);
-                        let flags = match redir_type {
-                            RedirType::Input => OFlag::O_RDONLY,
-                            RedirType::Output => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
-                            RedirType::Append => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_APPEND,
-                            _ => unimplemented!("Heredocs and herestrings are not implemented yet."),
-                        };
-                        let file_fd: RawFd = open(file_path, flags, Mode::from_bits(0o644).unwrap()).unwrap();
-                        info!("Duping file FD {} to FD {}", file_fd, fd_out);
-                        dup2(file_fd, *fd_out).unwrap();
-                        fd_queue.push_back(file_fd);
-                    }
+            if let TkType::Redirection { redir } = redir.class() {
+                let Redir { fd_out, op, fd_target, file_target } = redir;
+                if let Some(target) = fd_target {
+                    dup2(target, fd_out).unwrap();
+                    fd_queue.push_back(target);
+                } else if let Some(file_path) = file_target {
+                    info!("Opening file for redirection: {:?}", file_path);
+                    let flags = match op {
+                        RedirType::Input => OFlag::O_RDONLY,
+                        RedirType::Output => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
+                        RedirType::Append => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_APPEND,
+                        _ => unimplemented!("Heredocs and herestrings are not implemented yet."),
+                    };
+                    let file_fd: RawFd = open(file_path.text(), flags, Mode::from_bits(0o644).unwrap()).unwrap();
+                    info!("Duping file FD {} to FD {}", file_fd, fd_out);
+                    dup2(file_fd, fd_out).unwrap();
+                    fd_queue.push_back(file_fd);
                 }
-                _ => unreachable!(),
             }
         }
 
@@ -398,7 +394,7 @@ impl<'a> NodeWalker<'a> {
         Ok(())
     }
 
-    fn handle_command(&mut self, node: ASTNode, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
+    fn handle_command(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
         info!("Handling command: {:?}", node);
 
         let original_stdin = dup(0).unwrap();
