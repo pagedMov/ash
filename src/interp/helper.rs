@@ -4,6 +4,22 @@ use std::collections::VecDeque;
 
 use super::parse::RshErr;
 
+pub trait StrExtension {
+    fn has_unescaped(&self, check_char: char) -> bool;
+}
+
+impl StrExtension for str {
+    fn has_unescaped(&self, check_char: char) -> bool {
+        let mut chars = self.chars();
+        let mut prev_char = None;
+        chars.any(|c| {
+            let check = c == check_char && prev_char != Some('\\');
+            prev_char = Some(c);
+            check
+        })
+    }
+}
+
 pub fn get_delimiter(wd: &WordDesc) -> char {
     let flags = wd.flags;
     match () {
@@ -14,8 +30,8 @@ pub fn get_delimiter(wd: &WordDesc) -> char {
     }
 }
 pub fn is_brace_expansion(text: &str) -> bool {
-    REGEX["brace_expansion"].is_match(text)
-    && REGEX["brace_expansion"].captures(text).unwrap()[1].is_empty()
+    REGEX["brace_expansion"].is_match(text) &&
+		REGEX["brace_expansion"].captures(text).unwrap()[1].is_empty()
 }
 pub fn delimited(wd: &WordDesc) -> bool {
     wd.flags.contains(WdFlags::IN_BRACKET) ||

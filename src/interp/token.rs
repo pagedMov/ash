@@ -439,18 +439,6 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,RshErr> {
 	while let Some(c) = chars.pop_front() {
 		trace!("Processing character: {:?}", c);
 
-		if c == '\\' {
-			// Escape character handling
-			if let Some(next_c) = chars.pop_front() {
-				trace!("Escape sequence: \\{}", next_c);
-				word_desc = word_desc.add_char(next_c);
-			} else {
-				trace!("Dangling escape character");
-				return Err(RshErr::from_parse("dangling escape character".into(), word_desc.span));
-			}
-			continue;
-		}
-
 		word_desc = match c {
 			// Redirection Operators
 			'>' | '<' | '&' | '0'..='9' if helper::check_redirection(&c,&mut chars) => {
@@ -534,17 +522,6 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,RshErr> {
 						let word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
 						is_arg = true;
 						word_desc
-					}
-					'\\' => {
-						trace!("Escape character found inside quoted context");
-						let word_desc = word_desc.add_char(c);
-						if let Some(ch) = chars.pop_front() {
-							trace!("Adding escaped character: {:?}", ch);
-							word_desc.add_char(ch)
-						} else {
-							trace!("No character after escape, returning unchanged word_desc");
-							word_desc
-						}
 					}
 					'$' if !word_desc.contains_flag(WdFlags::SNG_QUOTED) => {
 						trace!("Substitution found inside double quotes");
