@@ -1,4 +1,4 @@
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::BorrowedFd;
 
 use nix::unistd::write;
 use tokio::sync::mpsc;
@@ -142,7 +142,9 @@ impl<'a> EventLoop<'a> {
 							if let RshExitStatus::Fail { code, cmd } = code {
 								let stderr = unsafe { BorrowedFd::borrow_raw(2) };
 								if code == 127 {
-									write(stderr, format!("Command not found: {}\n",cmd).as_bytes()).unwrap();
+									if let Some(cmd) = cmd {
+										write(stderr, format!("Command not found: {}\n",cmd).as_bytes()).unwrap();
+									}
 								};
 							};
 						},

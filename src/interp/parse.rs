@@ -1,12 +1,11 @@
 use std::collections::{HashMap, VecDeque};
 use once_cell::sync::Lazy;
-use log::{error,debug,info,trace,warn};
+use log::{error,debug,info,trace};
 use thiserror::Error;
 use std::mem::take;
 
 use crate::shellenv::ShellEnv;
 use crate::interp::token::{tokenize, Tk, TkType};
-use crate::interp::expand::expand;
 
 use super::token::WdFlags;
 
@@ -422,6 +421,11 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> Result<DescentContex
 				ctx.tokens.push_front(tk);
 				ctx = build_command(ctx)?;
 				// Fall through
+			}
+			Subshell => {
+				info!("Found subshell");
+				ctx.tokens.push_front(tk);
+				ctx = build_subshell(ctx)?;
 			}
 			Assignment => {
 				ctx.tokens.push_front(tk);
@@ -1167,14 +1171,15 @@ pub fn build_select(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
 	Ok(ctx)
 }
 
-pub fn build_subshell(token: Tk) -> Result<Node, RshErr> {
+pub fn build_subshell(mut ctx: DescentContext) -> Result<DescentContext, RshErr> {
+	let token = ctx.next_tk().unwrap();
 	let span = token.span();
-	Ok(
-		Node {
+	let node = Node {
 			nd_type: NdType::Subshell { body: token.text().into() },
 			span
-		}
-	)
+	};
+	ctx.attach_node(node);
+	Ok(ctx)
 }
 
 pub fn build_func_def(tokens: VecDeque<Tk>) -> Result<(Node, VecDeque<Tk>), RshErr> {

@@ -78,12 +78,10 @@ impl ShellEnv {
     pub fn get_variable(&self, key: &str) -> Option<String> {
         if let Some(value) = self.variables.get(key) {
             Some(value.to_string())
-        } else if let Some(value) = self.env_vars.get(key) {
-            Some(value.to_string())
         } else {
-            None
+						self.env_vars.get(key).map(|value| value.to_string())
         }
-    }
+		}
 
     /// For C FFI calls
     pub fn get_cvars(&self) -> Vec<CString> {

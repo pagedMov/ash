@@ -1,8 +1,8 @@
-use nix::unistd::{close, dup, dup2, execvpe, fork, pipe, ForkResult};
+use nix::unistd::{close, dup, dup2, execvpe, fork, pipe, write, ForkResult};
 use nix::fcntl::{open,OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::wait::{waitpid, WaitStatus};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::ffi::CString;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -11,8 +11,8 @@ use glob::MatchOptions;
 
 use crate::builtin::{cd, echo};
 use crate::event::ShellError;
-use crate::interp::{expand, helper};
-use crate::interp::token::{self, Redir, RedirType, Tk, TkType, WdFlags};
+use crate::interp::{self, expand};
+use crate::interp::token::{Redir, RedirType, Tk, TkType};
 use crate::interp::parse::{NdType,Node};
 use crate::shellenv::ShellEnv;
 
@@ -30,11 +30,11 @@ pub const GLOB_OPTS: MatchOptions = MatchOptions {
 #[derive(Debug)]
 pub enum RshExitStatus {
     Success,
-    Fail { code: i32, cmd: String },
+    Fail { code: i32, cmd: Option<String> },
 }
 
 impl RshExitStatus {
-    pub fn from(code: i32, cmd: String) -> Self {
+    pub fn from(code: i32, cmd: Option<String>) -> Self {
         match code {
             0 => RshExitStatus::Success,
             _ => RshExitStatus::Fail { code, cmd }
@@ -110,13 +110,16 @@ impl<'a> NodeWalker<'a> {
             NdType::Case {..} => {
                 todo!("handle case-in")
             }
+						NdType::Subshell {..} => {
+							last_status = self.handle_subshell(node,stdin,stdout)?;
+						}
             NdType::FuncDef {..} => {
                 todo!("handle function definition")
             }
             NdType::Assignment {..} => {
                 last_status = self.handle_assignment(node)?;
             }
-            _ => unreachable!()
+            _ => unimplemented!()
         }
         Ok(last_status)
     }
@@ -219,14 +222,14 @@ impl<'a> NodeWalker<'a> {
     }
 
     fn handle_if(&mut self, node: Node) -> Result<RshExitStatus, ShellError> {
-        let mut last_result;
+        let mut last_result = RshExitStatus::Success;
 
         if let NdType::If { mut cond_blocks, else_block } = node.nd_type {
             while let Some(block) = cond_blocks.pop_front() {
                 let cond = *block.condition;
                 let body = *block.body;
-                last_result = self.walk_root(cond,Some(false));
-                if let Ok(RshExitStatus::Success) = last_result {
+                last_result = self.walk_root(cond,Some(false))?;
+                if let RshExitStatus::Success = last_result {
                     return self.walk_root(body,None)
                 }
             }
@@ -234,7 +237,7 @@ impl<'a> NodeWalker<'a> {
                 return self.walk_root(*block,None)
             }
         }
-				unreachable!()
+				Ok(last_result)
     }
 
     fn handle_chain(&mut self, node: Node) -> Result<RshExitStatus, ShellError> {
@@ -258,32 +261,6 @@ impl<'a> NodeWalker<'a> {
         Ok(last_status)
     }
 
-    fn handle_pipeline(&mut self, node: Node, stdin: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
-        let mut last_status = RshExitStatus::Success;
-
-        // Create the pipe
-        let (read, write) = pipe().map_err(|e| {
-            ShellError::ExecFailed(format!("Failed to create pipe: {}", e), 1)
-        })?;
-        let (read, write) = (read.as_raw_fd(), write.as_raw_fd());
-
-        if let NdType::Pipeline { left, right } = node.nd_type {
-            // Walk the left side of the pipeline
-            debug!("Walking left side of pipeline: {:?}", left);
-            last_status = self.walk(*left, stdin, Some(write))
-                .expect("Failed to walk left side of pipeline");
-
-            if let RshExitStatus::Fail {..} = last_status {
-                return Ok(last_status)
-            }
-
-            debug!("Walking right side of pipeline: {:?}", right);
-            last_status = self.walk(*right, Some(read), None)
-                .expect("Failed to walk right side of pipeline");
-        }
-
-        Ok(last_status)
-    }
 
     fn handle_assignment(&mut self, node: Node) -> Result<RshExitStatus,ShellError> {
         if let NdType::Assignment { name, value } = node.nd_type {
@@ -391,19 +368,137 @@ impl<'a> NodeWalker<'a> {
         Ok(())
     }
 
+		fn handle_subshell(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
+			let mut last_status = RshExitStatus::Success;
+			let input = if let NdType::Subshell { ref body } = node.nd_type {
+				body
+			} else { unreachable!() };
+			info!("Handling subshell: {:?}",node);
+			let original_stdin = dup(0).unwrap();
+			let original_stdout = dup(1).unwrap();
+			let original_stderr = dup(2).unwrap();
+			debug!(
+				"Saved original FDs: stdin={}, stdout={}, stderr={}",
+				original_stdin, original_stdout, original_stderr
+			);
+
+			if let Some(read_pipe) = stdin {
+				info!("Redirecting stdin to pipe FD {}", read_pipe);
+				dup2(read_pipe, 0).unwrap();
+				close(read_pipe).unwrap();
+			}
+
+			if let Some(write_pipe) = stdout {
+				info!("Redirecting stdout to pipe FD {}", write_pipe);
+				dup2(write_pipe, 1).unwrap();
+				close(write_pipe).unwrap();
+			}
+			match unsafe { fork() } {
+				Ok(ForkResult::Child) => {
+					info!("In child process");
+					let mut shellenv = self.shellenv.clone();
+					let input = input.strip_prefix('(').unwrap().strip_suffix(')').unwrap();
+					match interp::parse::descend(input,&shellenv) {
+						Ok(state) => {
+							let mut walker = NodeWalker::new(state.ast, &mut shellenv);
+							match walker.start_walk() {
+								Ok(code) => {
+									info!("Last exit status: {:?}",code);
+									if let RshExitStatus::Fail { code, cmd } = code {
+										let stderr = unsafe { BorrowedFd::borrow_raw(2) };
+										if code == 127 {
+											if let Some(cmd) = cmd {
+												write(stderr, format!("Command not found: {}\n",cmd).as_bytes()).unwrap();
+											}
+										};
+									};
+								},
+								Err(e) => eprintln!("{}",e)
+							}
+						}
+						Err(e) => eprintln!("{}",e)
+					}
+					std::process::exit(127);
+				}
+				Ok(ForkResult::Parent { child }) => {
+					info!("In parent process, waiting for child PID {}", child);
+					let result = match waitpid(child, None) {
+						Ok(WaitStatus::Exited(_, status)) => {
+							info!("Child process exited with status {}", status);
+							Ok(RshExitStatus::from(status,None))
+						}
+						Ok(WaitStatus::Signaled(_, signal, _)) => {
+							error!("Child process terminated by signal {}", signal);
+							Err(ShellError::ExecFailed(
+									format!("Child process terminated by signal: {}", signal),
+									signal as i32,
+							))
+						}
+						Err(err) => {
+							error!("Failed to wait for child process: {}", err);
+							Err(ShellError::ExecFailed(
+									format!("Failed to wait for child process: {}", err),
+									1,
+							))
+						}
+						_ => {
+							error!("Unexpected waitpid result");
+							Err(ShellError::ExecFailed("Unexpected waitpid result".to_string(), 1))
+						}
+					};
+
+					debug!("Restoring original FDs in parent process");
+					dup2(original_stdin, 0).ok();
+					dup2(original_stdout, 1).ok();
+					dup2(original_stderr, 2).ok();
+
+					debug!("Closing saved FDs in parent process");
+					close(original_stdin).ok();
+					close(original_stdout).ok();
+					close(original_stderr).ok();
+
+					result
+				}
+				Err(err) => {
+					error!("Fork failed: {}", err);
+					Err(ShellError::ExecFailed(format!("Fork failed: {}", err), 1))
+				}
+			}
+
+		}
+
+    fn handle_pipeline(&mut self, node: Node, stdin: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
+        let mut last_status = RshExitStatus::Success;
+
+        // Create the pipe
+        let (read, write) = pipe().map_err(|e| {
+            ShellError::ExecFailed(format!("Failed to create pipe: {}", e), 1)
+        })?;
+        let (read, write) = (read.as_raw_fd(), write.as_raw_fd());
+
+        if let NdType::Pipeline { left, right } = node.nd_type {
+            // Walk the left side of the pipeline
+            debug!("Walking left side of pipeline: {:?}", left);
+            last_status = self.walk(*left, stdin, Some(write))
+                .expect("Failed to walk left side of pipeline");
+
+            if let RshExitStatus::Fail {..} = last_status {
+                return Ok(last_status)
+            }
+
+            debug!("Walking right side of pipeline: {:?}", right);
+            last_status = self.walk(*right, Some(read), None)
+                .expect("Failed to walk right side of pipeline");
+        }
+
+        Ok(last_status)
+    }
+
     fn handle_command(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
         info!("Handling command: {:?}", node);
 				let cmd_name = if let NdType::Command { argv, redirs: _ } = &node.nd_type {
 					argv[0].text().to_string()
 				} else { "".to_string() };
-
-        let original_stdin = dup(0).unwrap();
-        let original_stdout = dup(1).unwrap();
-        let original_stderr = dup(2).unwrap();
-        debug!(
-            "Saved original FDs: stdin={}, stdout={}, stderr={}",
-            original_stdin, original_stdout, original_stderr
-        );
 
         if let Some(read_pipe) = stdin {
             info!("Redirecting stdin to pipe FD {}", read_pipe);
@@ -431,15 +526,15 @@ impl<'a> NodeWalker<'a> {
                     info!("Handling redirections in child process");
                     self.handle_redirs(redirs)?;
                 }
-                execvpe(&command, &argv, &envp);
+                println!("{:?}",execvpe(&command, &argv, &envp));
                 std::process::exit(127);
             }
             Ok(ForkResult::Parent { child }) => {
                 info!("In parent process, waiting for child PID {}", child);
-                let result = match waitpid(child, None) {
+                match waitpid(child, None) {
                     Ok(WaitStatus::Exited(_, status)) => {
                         info!("Child process exited with status {}", status);
-                        Ok(RshExitStatus::from(status,cmd_name))
+                        Ok(RshExitStatus::from(status,Some(cmd_name)))
                     }
                     Ok(WaitStatus::Signaled(_, signal, _)) => {
                         error!("Child process terminated by signal {}", signal);
@@ -459,19 +554,7 @@ impl<'a> NodeWalker<'a> {
                         error!("Unexpected waitpid result");
                         Err(ShellError::ExecFailed("Unexpected waitpid result".to_string(), 1))
                     }
-                };
-
-                debug!("Restoring original FDs in parent process");
-                dup2(original_stdin, 0).ok();
-                dup2(original_stdout, 1).ok();
-                dup2(original_stderr, 2).ok();
-
-                debug!("Closing saved FDs in parent process");
-                close(original_stdin).ok();
-                close(original_stdout).ok();
-                close(original_stderr).ok();
-
-                result
+                }
             }
             Err(err) => {
                 error!("Fork failed: {}", err);

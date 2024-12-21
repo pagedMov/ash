@@ -1,7 +1,7 @@
 use glob::glob;
 use log::{debug, info, trace};
 use std::collections::VecDeque;
-use crate::interp::token::{TkType,Tk,WordDesc};
+use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
 use crate::interp::parse::ParseState;
 use crate::interp::helper::{self,StrExtension};
 use crate::shellenv::ShellEnv;
@@ -44,7 +44,7 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 
 		if !is_glob && !is_brace_expansion {
 			debug!("expanding var for {}",token.text());
-			if token.text().has_unescaped('$') {
+			if token.text().has_unescaped('$') && !token.wd.contains_flag(WdFlags::SNG_QUOTED) {
 				info!("found unescaped dollar in: {}",token.text());
 				token.wd.text = expand_var(shellenv, token.text().into());
 			}
@@ -54,7 +54,7 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 				product_buffer.push_back(token)
 			}
 
-		} else if is_brace_expansion && token.text().has_unescaped('{') {
+		} else if is_brace_expansion && token.text().has_unescaped('{') && token.tk_type != TkType::String {
 			trace!("expand(): Beginning brace expansion on {}", token.text());
 			// Perform brace expansion
 			let expanded = expand_braces(token.text().to_string());

@@ -1,9 +1,8 @@
 use std::collections::VecDeque;
 use std::ffi::CString;
-use std::io::Write;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
-use std::{io, os::fd::RawFd};
+use std::os::fd::RawFd;
 use log::debug;
 use nix::fcntl::{open,OFlag};
 use nix::sys::stat::Mode;

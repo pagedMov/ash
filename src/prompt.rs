@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use tokio::{io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader}, sync::mpsc};
-use log::{info,trace,debug};
-use rustyline::{self, history::{DefaultHistory, History}, ColorMode, Config, EditMode, Editor, Helper};
+use tokio::sync::mpsc;
+use log::info;
+use rustyline::{self, history::{DefaultHistory, History}, ColorMode, Config, EditMode, Editor};
 
 use crate::{event::{ShellError,ShellEvent}, shellenv::ShellEnv};
 use crate::interp::parse::descend;

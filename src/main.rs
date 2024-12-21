@@ -29,14 +29,9 @@ pub mod interp;
 pub mod builtin;
 
 use event::EventLoop;
-use interp::parse::descend;
-use interp::debug;
 
 //use crate::event::EventLoop;
 use crate::shellenv::ShellEnv;
-use im::Vector;
-use tokio::{io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader}, sync::mpsc};
-use log::{trace,debug};
 
 
 #[tokio::main]

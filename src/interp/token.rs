@@ -1,7 +1,7 @@
 use bitflags::bitflags;
 use nix::NixPath;
 use once_cell::sync::Lazy;
-use log::{trace,debug};
+use log::{info,trace,debug};
 use regex::Regex;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -77,7 +77,8 @@ pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
 		"arithmetic" => r"^\$\(\([^\)]+\)\)$",
 		"subshell" => r"^\([^\)]+\)$",
 		"test" => r"^\[\s*(.*?)\s*\]$",
-		"string" => r#"^\"([^\"]*)\"$"#,
+		"sng_string" => r#"^\'([^\']*)\'$"#,
+		"dub_string" => r#"^\"([^\"]*)\"$"#,
 		"var_sub" => r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})",
 		"assignment" => r"^[A-Za-z_][A-Za-z0-9_]*=.*$",
 		"operator" => r"(?:&&|\|\||[><]=?|[|&])",
@@ -123,10 +124,6 @@ pub enum TkType {
 	Subshell, // `(`
 	BraceGroupStart, // `{`
 	BraceGroupEnd,   // `}`
-
-	// Arrays
-	ArrayStart, // `(` inside array declarations
-	ArrayEnd,   // `)`
 
 	// Strings and Identifiers
 	String, // Generic string literal
@@ -189,51 +186,57 @@ impl Tk {
 
 		// TODO: Implement sub-shell substitutions
 		// These must be evaluated here, and resolved into a string node containing their output
-		let text = wd.text.as_str();
+		let text = wd.text.clone();
 		let tk_type = match text {
 			_ if wd.flags.contains(WdFlags::KEYWORD) => {
 				Self::get_keyword_token(&wd)?
 			}
-			_ if REGEX["assignment"].is_match(text) => {
+			_ if REGEX["assignment"].is_match(&text) => {
 				trace!("Matched assignment: {}", text);
 				TkType::Assignment
 			},
-			_ if REGEX["redirection"].is_match(text) => {
+			_ if REGEX["redirection"].is_match(&text) => {
 				trace!("Matched redirection: {}", text);
 				Self::build_redir(&wd)?
 			},
-			_ if REGEX["process_sub"].is_match(text) => {
+			_ if REGEX["process_sub"].is_match(&text) => {
 				trace!("Matched process substitution: {}", text);
 				wd = wd.add_flag(WdFlags::IS_SUB);
 				TkType::ProcessSub
 			},
-			_ if REGEX["command_sub"].is_match(text) => {
+			_ if REGEX["command_sub"].is_match(&text) => {
 				trace!("Matched command substitution: {}", text);
 				wd = wd.add_flag(WdFlags::IS_SUB);
 				TkType::CommandSub
 			},
-			_ if REGEX["arithmetic"].is_match(text) => {
+			_ if REGEX["arithmetic"].is_match(&text) => {
 				trace!("Matched arithmetic substitution: {}", text);
 				wd = wd.add_flag(WdFlags::IS_SUB);
 				TkType::ArithmeticSub
 			},
-			_ if REGEX["rsh_shebang"].is_match(text) => {
+			_ if REGEX["rsh_shebang"].is_match(&text) => {
 				trace!("Matched rsh_shebang: {}", text);
 				TkType::Shebang
 			},
-			_ if REGEX["subshell"].is_match(text) => {
+			_ if REGEX["subshell"].is_match(&text) => {
 				trace!("Matched subshell: {}", text);
 				TkType::Subshell
 			},
-			_ if REGEX["string"].is_match(text) => {
+			_ if REGEX["sng_string"].is_match(&text) || REGEX["dub_string"].is_match(&text) => {
 				trace!("Matched string: {}", text);
+				wd = if REGEX["sng_string"].is_match(&text) {
+					wd.add_flag(WdFlags::SNG_QUOTED)
+				} else if REGEX["dub_string"].is_match(&text) {
+					wd.add_flag(WdFlags::DUB_QUOTED)
+				} else { wd.clone() };
+				wd.text = text[1..text.len()-1].into();
 				TkType::String
 			},
-			_ if REGEX["operator"].is_match(text) => {
+			_ if REGEX["operator"].is_match(&text) => {
 				trace!("Matched operator: {}", text);
 				Self::get_operator_type(&wd)
 			},
-			_ if REGEX["ident"].is_match(text) => {
+			_ if REGEX["ident"].is_match(&text) => {
 				trace!("Matched identifier: {}", text);
 				TkType::Ident
 			},
@@ -241,7 +244,9 @@ impl Tk {
 				return Err(RshErr::from_parse(format!("Parsing error on: {}",wd.text), wd.span))
 			}
 		};
-		Ok(Tk { tk_type, wd })
+		let token = Tk { tk_type, wd };
+		info!("returning token: {:?}",token);
+		Ok(token)
 	}
 	fn get_keyword_token(wd: &WordDesc) -> Result<TkType,RshErr> {
 		let text = wd.text.clone();
@@ -417,7 +422,7 @@ impl WordDesc {
 			'(' => WdFlags::IN_PAREN,
 			_ => unreachable!()
 		};
-		self.reset_flags().add_flag(flag)
+		self.add_flag(flag)
 	}
 	}
 
@@ -486,7 +491,7 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,RshErr> {
 					}
 				} else {
 					trace!("Finalizing delimited word");
-					if !is_arg {
+					if is_arg {
 						trace!("Current word is a command; resetting IS_ARG flag");
 						word_desc = word_desc.add_flag(WdFlags::IS_ARG);
 					}
@@ -513,12 +518,16 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,RshErr> {
 				match c {
 					'"' if !word_desc.contains_flag(WdFlags::SNG_QUOTED) => {
 						trace!("Closing double quote found");
+						word_desc = word_desc.add_char(c);
+						word_desc = word_desc.remove_flag(WdFlags::DUB_QUOTED);
 						let word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
 						is_arg = true; // After a quote, it's part of a command argument
 						word_desc
 					}
 					'\'' if !word_desc.contains_flag(WdFlags::DUB_QUOTED) => {
 						trace!("Closing single quote found");
+						word_desc = word_desc.add_char(c);
+						word_desc = word_desc.remove_flag(WdFlags::SNG_QUOTED);
 						let word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
 						is_arg = true;
 						word_desc
@@ -546,6 +555,7 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,RshErr> {
 				if is_arg {
 					word_desc = word_desc.add_flag(WdFlags::IS_ARG);
 				}
+				word_desc = word_desc.add_char(c);
 				trace!("Double quote found, toggling DUB_QUOTED flag");
 				word_desc.toggle_flag(WdFlags::DUB_QUOTED).push_span(1)
 			}
@@ -553,6 +563,7 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,RshErr> {
 				if is_arg {
 					word_desc = word_desc.add_flag(WdFlags::IS_ARG);
 				}
+				word_desc = word_desc.add_char(c);
 				trace!("Single quote found, toggling SNG_QUOTED flag");
 				word_desc.toggle_flag(WdFlags::SNG_QUOTED).push_span(1)
 			}
