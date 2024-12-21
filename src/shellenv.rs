@@ -15,6 +15,7 @@ pub struct ShellEnv {
     env_vars: HashMap<String, String>,
     variables: HashMap<String, String>,
     aliases: HashMap<String, String>,
+		shopts: HashMap<String,usize>,
     functions: HashMap<String, VecDeque<Node>>,
     parameters: HashMap<String, String>,
     open_fds: HashSet<i32>
@@ -24,15 +25,19 @@ impl ShellEnv {
     // Constructor
     pub fn new(login: bool, interactive: bool) -> Self {
         let mut open_fds = HashSet::new();
+				let shopts = init_shopts();
+				let mut env_vars = std::env::vars().collect::<HashMap<String,String>>();
+				env_vars.insert("HIST_FILE".into(),"${HOME}/.rsh_hist".into());
         open_fds.insert(0);
         open_fds.insert(1);
         open_fds.insert(2);
         Self {
             interactive,
             login,
-            env_vars: std::env::vars().collect::<HashMap<String,String>>(),
+            env_vars,
             variables: HashMap::new(),
             aliases: HashMap::new(),
+						shopts,
             functions: HashMap::new(),
             parameters: HashMap::new(),
             open_fds
@@ -70,11 +75,11 @@ impl ShellEnv {
     }
 
     // Getters and Setters for `variables`
-    pub fn get_variable(&self, key: &str) -> Option<&String> {
+    pub fn get_variable(&self, key: &str) -> Option<String> {
         if let Some(value) = self.variables.get(key) {
-            Some(value)
+            Some(value.to_string())
         } else if let Some(value) = self.env_vars.get(key) {
-            Some(value)
+            Some(value.to_string())
         } else {
             None
         }
@@ -95,6 +100,14 @@ impl ShellEnv {
         self.variables.insert(key.clone(), value);
         trace!("testing variable get: {} = {}", key, self.get_variable(key.as_str()).unwrap())
     }
+
+		pub fn get_shopt(&self, key: &str) -> usize {
+			self.shopts[key]
+		}
+
+		pub fn set_shopt(&mut self, key: &str, value: usize) {
+			self.shopts.insert(key.into(),value);
+		}
 
     pub fn export_variable(&mut self, key: String, value: String) {
         self.variables.insert(key.clone(),value.clone());
@@ -151,4 +164,19 @@ impl ShellEnv {
         self.functions.clear();
         self.parameters.clear();
     }
+}
+
+fn init_shopts() -> HashMap<String,usize> {
+	let mut shopts = HashMap::new();
+	shopts.insert("dotglob".into(),0);
+	shopts.insert("int_comments".into(),1);
+	shopts.insert("hist_ignore_dupes".into(),1);
+	shopts.insert("max_hist".into(),1000);
+	shopts.insert("edit_mode".into(),1);
+	shopts.insert("comp_limit".into(),100);
+	shopts.insert("auto_hist".into(),1);
+	shopts.insert("prompt_highlight".into(),1);
+	shopts.insert("tab_stop".into(),4);
+	shopts.insert("bell_style".into(),1);
+	shopts
 }

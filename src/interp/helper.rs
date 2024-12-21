@@ -9,15 +9,17 @@ pub trait StrExtension {
 }
 
 impl StrExtension for str {
-    fn has_unescaped(&self, check_char: char) -> bool {
-        let mut chars = self.chars();
-        let mut prev_char = None;
-        chars.any(|c| {
-            let check = c == check_char && prev_char != Some('\\');
-            prev_char = Some(c);
-            check
-        })
-    }
+	/// Checks to see if a string slice contains a specified unescaped character. This method assumes that '\\' is the escape character.
+	///
+	fn has_unescaped(&self, check_char: char) -> bool {
+		let mut chars = self.chars();
+		let mut prev_char = None;
+		chars.any(|c| {
+			let check = c == check_char && prev_char != Some('\\');
+			prev_char = Some(c);
+			check
+		})
+	}
 }
 
 pub fn get_delimiter(wd: &WordDesc) -> char {

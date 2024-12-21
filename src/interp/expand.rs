@@ -250,12 +250,21 @@ pub fn expand_var(shellenv: &ShellEnv, string: String) -> String {
 			'_' => {
 				var_name.push(ch);
 			}
-			'{' => {}
-			_ => break
+			'{' => continue,
+			'}' => break,
+			_ => {
+				right_chars.push_front(ch);
+				break
 			}
+		}
 	}
 	let right = right_chars.iter().collect::<String>();
 
-	let value = shellenv.get_variable(&var_name).cloned().unwrap_or_default();
-	format!("{}{}{}",left,value,right)
+	let value = shellenv.get_variable(&var_name).unwrap_or_default();
+	let expanded = format!("{}{}{}",left,value,right);
+	if expanded.has_unescaped('$') {
+		expand_var(shellenv,expanded)
+	} else {
+		expanded
+	}
 }

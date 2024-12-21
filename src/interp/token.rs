@@ -238,7 +238,7 @@ impl Tk {
 				TkType::Ident
 			},
 			_ => {
-				return Err(RshErr::from_parse(format!("Failed to classify this: {}",wd.text), wd.span))
+				return Err(RshErr::from_parse(format!("Parsing error on: {}",wd.text), wd.span))
 			}
 		};
 		Ok(Tk { tk_type, wd })
