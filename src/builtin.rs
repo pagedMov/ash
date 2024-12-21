@@ -107,6 +107,9 @@ fn close_file_descriptors(fd_stack: Vec<(i32, i32)>) {
 pub fn echo(mut argv: VecDeque<CString>, redirs: VecDeque<Tk>, stdout: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
     log::info!("Executing echo with argv: {:?}", argv);
 
+		let saved_in = dup(0).unwrap();
+		let saved_out = dup(1).unwrap();
+		let saved_err = dup(2).unwrap();
     argv.pop_front(); // Remove 'echo' from argv
     let output_str = catstr(argv, true);
 
@@ -123,7 +126,18 @@ pub fn echo(mut argv: VecDeque<CString>, redirs: VecDeque<Tk>, stdout: Option<Ra
         ShellError::ExecFailed(format!("Failed to write output in echo: {}", e), 1)
     });
 
+		if let Some(w_pipe) = stdout {
+			close(w_pipe).expect("failed to close stdout in echo");
+		}
+
     close_file_descriptors(fd_stack);
+
+		let _ = dup2(saved_in,0);
+		let _ = dup2(saved_out,1);
+		let _ = dup2(saved_err,2);
+		let _ = close(saved_in);
+		let _ = close(saved_out);
+		let _ = close(saved_err);
 
     result.map(|_| RshExitStatus::Success)
 }
