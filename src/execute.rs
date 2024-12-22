@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use log::{error,info,debug,trace};
 use glob::MatchOptions;
 
-use crate::builtin::{cd, echo};
+use crate::builtin::{cd, echo, source};
 use crate::event::ShellError;
 use crate::interp::{self, expand};
 use crate::interp::token::{Redir, RedirType, Tk, TkType};
@@ -31,33 +31,27 @@ pub struct SavedFDs {
 
 impl SavedFDs {
 	pub fn new(stdin: RawFd, stdout: RawFd, stderr: RawFd) -> Result<Self, std::io::Error> {
-		dbg!(stdin, stdout, stderr);
 			let saved = Self {
 					saved_stdin: dup(stdin)?,
 					saved_stdout: dup(stdout)?,
 					saved_stderr: dup(stderr)?,
 			};
-			dbg!(saved.saved_stdin,saved.saved_stdout,saved.saved_stderr);
 			Ok(saved)
 	}
 	pub fn restore(&mut self, stdin: RawFd, stdout: RawFd, stderr: RawFd) -> Result<(), std::io::Error> {
 			if self.saved_stdin >= 0 {
-				dbg!(self.saved_stdin);
 					dup2(self.saved_stdin, stdin).expect("failed to restore stdin");
 			}
 			if self.saved_stdout >= 0 {
-				dbg!(self.saved_stdout);
 					dup2(self.saved_stdout, stdout).expect("failed to restore stdout");
 			}
 			if self.saved_stderr >= 0 {
-				dbg!(self.saved_stderr);
 					dup2(self.saved_stderr, stderr).expect("failed to restore stderr");
 			}
 			self.close_all();
 			Ok(())
 	}
 	fn close_all(&mut self) {
-		dbg!("closing fds");
 			if self.saved_stdin >= 0 {
 					close(self.saved_stdin).expect("failed to close stdin");
 					self.saved_stdin = -1;
@@ -320,6 +314,7 @@ impl<'a> NodeWalker<'a> {
 		let (argv,redirs) = self.extract_args(node);
 		match argv[0].to_str().unwrap() {
 			"echo" => echo(argv.into(), redirs, stdout),
+			"source" => source(self.shellenv, argv),
 			"cd" => cd(self.shellenv, argv.into()),
 			_ => unimplemented!()
 		}

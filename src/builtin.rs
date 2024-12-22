@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
 use std::os::fd::{AsFd, BorrowedFd};
-use std::path::Path;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::os::fd::RawFd;
 use log::debug;
 use nix::fcntl::{open,OFlag};
@@ -102,6 +103,16 @@ fn close_file_descriptors(fd_stack: Vec<(i32, i32)>) {
             log::warn!("Failed to close backup FD {}: {}", backup_fd, e);
         }
     }
+}
+
+pub fn source(shellenv: &mut ShellEnv, argv: Vec<CString>) -> Result<RshExitStatus,ShellError> {
+	let paths = &argv[1..];
+	for path in paths {
+		dbg!(path.clone().into_string().unwrap());
+		let file_path = Path::new(OsStr::from_bytes(path.as_bytes()));
+		shellenv.source_file(file_path.to_path_buf())?
+	}
+	Ok(RshExitStatus::Success)
 }
 
 pub fn echo(mut argv: VecDeque<CString>, redirs: VecDeque<Tk>, stdout: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
