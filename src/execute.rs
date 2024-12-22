@@ -1,4 +1,4 @@
-use libc::{c_int, pipe};
+use libc::{STDOUT_FILENO,STDERR_FILENO,STDIN_FILENO,c_int, pipe};
 use nix::unistd::{close, dup, dup2, execvpe, fork, write, ForkResult};
 use nix::fcntl::{open,OFlag};
 use nix::sys::stat::Mode;
@@ -17,16 +17,61 @@ use crate::interp::token::{Redir, RedirType, Tk, TkType};
 use crate::interp::parse::{NdType,Node};
 use crate::shellenv::ShellEnv;
 
-// Allow both of these types to be handled by redirection
-pub trait RedirTarget {}
-impl RedirTarget for i32 {}
-impl RedirTarget for PathBuf {}
-
 pub const GLOB_OPTS: MatchOptions = MatchOptions {
 	case_sensitive: false,
 	require_literal_separator: true,
 	require_literal_leading_dot: false
 };
+
+pub struct SavedFDs {
+	saved_stdin: RawFd,
+	saved_stdout: RawFd,
+	saved_stderr: RawFd,
+}
+
+impl SavedFDs {
+	pub fn new(stdin: RawFd, stdout: RawFd, stderr: RawFd) -> Result<Self, std::io::Error> {
+		dbg!(stdin, stdout, stderr);
+			let saved = Self {
+					saved_stdin: dup(stdin)?,
+					saved_stdout: dup(stdout)?,
+					saved_stderr: dup(stderr)?,
+			};
+			dbg!(saved.saved_stdin,saved.saved_stdout,saved.saved_stderr);
+			Ok(saved)
+	}
+	pub fn restore(&mut self, stdin: RawFd, stdout: RawFd, stderr: RawFd) -> Result<(), std::io::Error> {
+			if self.saved_stdin >= 0 {
+				dbg!(self.saved_stdin);
+					dup2(self.saved_stdin, stdin).expect("failed to restore stdin");
+			}
+			if self.saved_stdout >= 0 {
+				dbg!(self.saved_stdout);
+					dup2(self.saved_stdout, stdout).expect("failed to restore stdout");
+			}
+			if self.saved_stderr >= 0 {
+				dbg!(self.saved_stderr);
+					dup2(self.saved_stderr, stderr).expect("failed to restore stderr");
+			}
+			self.close_all();
+			Ok(())
+	}
+	fn close_all(&mut self) {
+		dbg!("closing fds");
+			if self.saved_stdin >= 0 {
+					close(self.saved_stdin).expect("failed to close stdin");
+					self.saved_stdin = -1;
+			}
+			if self.saved_stdout >= 0 {
+					close(self.saved_stdout).expect("failed to close stdout");
+					self.saved_stdout = -1;
+			}
+			if self.saved_stderr >= 0 {
+					close(self.saved_stderr).expect("failed to close stderr");
+					self.saved_stderr = -1;
+			}
+	}
+}
 
 #[derive(Debug)]
 pub enum RshExitStatus {
@@ -64,7 +109,7 @@ impl<'a> NodeWalker<'a> {
 			nodes = std::mem::take(deck);
 		} else { unreachable!() }
 		while let Some(node) = nodes.pop_front() {
-			exit_status = self.walk(node, None, None)?;
+			exit_status = self.walk(node, None, None, None)?;
 		}
 		Ok(exit_status)
 	}
@@ -79,22 +124,22 @@ impl<'a> NodeWalker<'a> {
 	/// stdout to.
 	///
 	/// # Outputs: An RshExitStatus or a shell error.
-	fn walk(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
+	fn walk(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
 		debug!("walking over node {:?} with these pipes: {:?},{:?}",node,stdin,stdout);
 		let last_status;
 		match node.nd_type {
 			NdType::Command {..} => {
 				trace!("Found command: {:?}",node);
-				last_status = self.handle_command(node, stdin, stdout)?;
+				last_status = self.handle_command(node, stdin, stdout, stderr)?;
 			}
 			NdType::Builtin {..} => {
-				last_status = self.handle_builtin(node, stdin, stdout)?;
+				last_status = self.handle_builtin(node, stdin, stdout, stderr)?;
 			}
 			//NdType::Function { .. } => {
 			//todo!("handle simple commands")
 			//}
 			NdType::Pipeline {..} => {
-				last_status = self.handle_pipeline(node, stdin, stdout)?;
+				last_status = self.handle_pipeline(node, stdin, stdout, stderr)?;
 			}
 			NdType::Chain {..} => {
 				last_status = self.handle_chain(node)?;
@@ -112,7 +157,7 @@ impl<'a> NodeWalker<'a> {
 				todo!("handle case-in")
 			}
 			NdType::Subshell {..} => {
-				last_status = self.handle_subshell(node,stdin,stdout)?;
+				last_status = self.handle_subshell(node,stdin,stdout,stderr)?;
 			}
 			NdType::FuncDef {..} => {
 				todo!("handle function definition")
@@ -129,7 +174,7 @@ impl<'a> NodeWalker<'a> {
 		let mut last_status = RshExitStatus::Success;
 		if let NdType::Root { deck } = node.nd_type {
 			for node in deck {
-				last_status = self.walk(node,None,None)?;
+				last_status = self.walk(node,None,None,None)?;
 				if let Some(condition) = break_condition {
 					match condition {
 						true => {
@@ -245,15 +290,15 @@ impl<'a> NodeWalker<'a> {
 		let mut last_status = RshExitStatus::Success;
 
 		if let NdType::Chain { left, right, op } = node.nd_type {
-			match self.walk(*left, None, None)? {
+			match self.walk(*left, None, None, None)? {
 				RshExitStatus::Success => {
 					if let NdType::And = op.nd_type {
-						last_status = self.walk(*right, None, None)?;
+						last_status = self.walk(*right, None, None, None)?;
 					}
 				}
 				RshExitStatus::Fail {..} => {
 					if let NdType::Or = op.nd_type {
-						last_status = self.walk(*right, None, None)?;
+						last_status = self.walk(*right, None, None, None)?;
 					}
 				}
 			}
@@ -271,7 +316,7 @@ impl<'a> NodeWalker<'a> {
 		Ok(RshExitStatus::Success)
 	}
 
-	fn handle_builtin(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
+	fn handle_builtin(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
 		let (argv,redirs) = self.extract_args(node);
 		match argv[0].to_str().unwrap() {
 			"echo" => echo(argv.into(), redirs, stdout),
@@ -369,71 +414,79 @@ impl<'a> NodeWalker<'a> {
 		Ok(())
 	}
 
-	fn handle_subshell(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
+	fn handle_subshell(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
 		todo!()
 	}
 
-	fn handle_pipeline(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
-		let (left, right) = if let NdType::Pipeline { left, right } = node.nd_type {
-			(*left, *right)
+	fn handle_pipeline(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>, mut stderr: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
+		let (left, right, both) = if let NdType::Pipeline { left, right, both } = node.nd_type {
+			(*left, *right, both)
 		} else {
 			unreachable!()
 		};
-		dbg!(&left);
-		dbg!(&right);
 
 		let mut fds: [c_int;2] = [0;2];
 
-		unsafe { pipe(fds.as_mut_ptr()); }
+    let result = unsafe { pipe(fds.as_mut_ptr()) };
+    if result != 0 {
+        return Err(ShellError::IoError(std::io::Error::last_os_error().to_string()));
+    }
 
 		let r_pipe = fds[0];
 		let w_pipe = fds[1];
-		dbg!("got pipes", r_pipe, w_pipe);
+
+		let mut stderr_left = None;
+		if both {
+			stderr_left = Some(dup(w_pipe).unwrap());
+		}
 
 		// Walk left side of the pipeline
-		let left_status = self.walk(left, stdin, Some(w_pipe));
+		let left_status = self.walk(left, stdin, Some(w_pipe), stderr_left);
 
 		// Walk right side of the pipeline
-		let right_status = self.walk(right, Some(r_pipe), stdout);
+		let right_status = self.walk(right, Some(r_pipe), stdout, stderr);
 
 		// Return status of the last command
 		left_status?;
 		right_status
 	}
 
-	fn handle_command(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
+	fn handle_command(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
 		let (argv, redirs) = if let NdType::Command { argv, redirs } = node.nd_type {
 			(argv, redirs)
 		} else {
 			unreachable!()
 		};
-		let saved_in = dup(0).unwrap();
-		let saved_out = dup(1).unwrap();
-		let saved_err = dup(2).unwrap();
+		let mut saved_fds = SavedFDs::new(0,1,2).unwrap();
 
+
+		if let Some(err_pipe) = stderr {
+			if let Err(err) = dup2(err_pipe, 2) {
+				eprintln!("Failed to duplicate stderr: {}", err);
+				std::process::exit(1);
+			}
+			close(err_pipe).unwrap();
+		}
 		// Redirect stdout
 		if let Some(w_pipe) = stdout {
-			dbg!("Redirecting stdout to {}", w_pipe);
 			if let Err(err) = dup2(w_pipe, 1) {
 				eprintln!("Failed to duplicate stdout: {}", err);
 				std::process::exit(1);
 			}
-			close(w_pipe).expect("failed closing w_pipe in child");
+			close(w_pipe).unwrap();
 		}
 
 		// Redirect stdin
 		if let Some(r_pipe) = stdin {
-			dbg!("Redirecting stdin to {}", r_pipe);
 			if let Err(err) = dup2(r_pipe, 0) {
 				eprintln!("Failed to duplicate stdin: {}", err);
 				std::process::exit(1);
 			}
-			close(r_pipe).expect("failed closing r_pipe in child");
+			close(r_pipe).unwrap();
 		}
 
 
 		let cmd = Some(argv[0].text().to_string());
-		dbg!(&cmd);
 		let command = CString::new(argv[0].text()).unwrap();
 		let argv = argv
 			.into_iter()
@@ -443,7 +496,6 @@ impl<'a> NodeWalker<'a> {
 
 			match unsafe { fork() } {
 				Ok(ForkResult::Child) => {
-					dbg!("In child process");
 
 
 					// Handle redirections
@@ -457,13 +509,7 @@ impl<'a> NodeWalker<'a> {
 					std::process::exit(127);
 				}
 				Ok(ForkResult::Parent { child }) => {
-					dbg!("In parent process, waiting for child {}", child);
-					let _ = dup2(saved_in,0);
-					let _ = dup2(saved_out,1);
-					let _ = dup2(saved_err,2);
-					let _ = close(saved_in);
-					let _ = close(saved_out);
-					let _ = close(saved_err);
+					saved_fds.restore(0, 1, 2).unwrap();
 
 					// Wait for the child process to finish
 					match waitpid(child, None) {

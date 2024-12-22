@@ -199,7 +199,7 @@ pub enum NdType {
 	Loop { condition: bool, logic: Conditional },
 	Case { input_var: Tk, cases: HashMap<String,Node> },
 	Select { select_var: Tk, opts: VecDeque<Tk>, body: Box<Node> },
-	Pipeline { left: Box<Node>, right: Box<Node> },
+	Pipeline { left: Box<Node>, right: Box<Node>, both: bool },
 	Chain { left: Box<Node>, right: Box<Node>, op: Box<Node> },
 	BraceGroup { body: Box<Node> },
 	Subshell { body: String }, // It's a string because we're going to parse it in a subshell later
@@ -210,6 +210,7 @@ pub enum NdType {
 	And,
 	Or,
 	Pipe,
+	PipeBoth,
 	Cmdsep
 }
 
@@ -466,13 +467,14 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> Result<DescentContex
 			CaseSep => {
 				return Err(RshErr::from_parse("Found this unmatched close parenthesis".into(), tk.span()))
 			}
-			Cmdsep | LogicAnd | LogicOr | Pipe => {
+			Cmdsep | LogicAnd | LogicOr | Pipe | PipeBoth => {
 				info!("Found operator token: {:?}, preserving as node", tk.class());
 				match tk.class() {
 					Cmdsep => ctx.attach_node(Node { nd_type: NdType::Cmdsep, span: tk.span() }),
 					LogicAnd => ctx.attach_node(Node { nd_type: NdType::And, span: tk.span() }),
 					LogicOr => ctx.attach_node(Node { nd_type: NdType::Or, span: tk.span() }),
 					Pipe => ctx.attach_node(Node { nd_type: NdType::Pipe, span: tk.span() }),
+					PipeBoth => ctx.attach_node(Node { nd_type: NdType::PipeBoth, span: tk.span() }),
 					_ => unreachable!(),
 				}
 			}
@@ -502,7 +504,12 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, RshE
 
 	while let Some(node) = ctx.next_node() {
 		match node.nd_type {
-			NdType::Pipe => {
+			NdType::Pipe | NdType::PipeBoth => {
+				let both = match node.nd_type {
+					NdType::PipeBoth => true,
+					NdType::Pipe => false,
+					_ => unreachable!()
+				};
 				if let Some(left) = buffer.pop_back() {
 					if let Some(right) = ctx.next_node() {
 						if !check_valid_operand(&left) {
@@ -514,7 +521,7 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, RshE
 						let left = Box::new(left);
 						let right = Box::new(right);
 						let pipeline = Node {
-							nd_type: NdType::Pipeline { left, right },
+							nd_type: NdType::Pipeline { left, right, both },
 							span: (0,0)
 						};
 						buffer.push_back(pipeline);
@@ -1220,7 +1227,7 @@ pub fn build_command(mut ctx: DescentContext) -> Result<DescentContext, RshErr> 
 	while let Some(tk) = ctx.next_tk() {
 
 		match tk.class() {
-			TkType::Cmdsep | TkType::LogicAnd | TkType::LogicOr | TkType::Pipe => {
+			TkType:: PipeBoth | TkType::Cmdsep | TkType::LogicAnd | TkType::LogicOr | TkType::Pipe => {
 				debug!("build_command breaking on: {:?}", tk);
 				ctx.tokens.push_front(tk);
 				break;

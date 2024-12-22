@@ -117,6 +117,7 @@ pub enum TkType {
 	LogicAnd, // `&&`
 	LogicOr, // `||`
 	Pipe, // `|`
+	PipeBoth, // '|&'
 	Background, // `&`
 
 	// Grouping and Subshells
@@ -297,10 +298,11 @@ impl Tk {
 	}
 	fn get_operator_type(word_desc: &WordDesc) -> TkType {
 		match word_desc.text.as_str() {
+			"|&" => TkType::PipeBoth,
 			"&" => TkType::Background,
 			"&&" => TkType::LogicAnd,
-			"|" => TkType::Pipe,
 			"||" => TkType::LogicOr,
+			"|" => TkType::Pipe,
 			_ => unreachable!()
 		}
 	}
@@ -573,8 +575,10 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,RshErr> {
 				if let Some(ch) = chars.pop_front() {
 					trace!("checking operator");
 					trace!("found this: {}, checked against this: {}, found {}", c, ch, c == ch);
+					trace!("found this: {}, and the character is this: {}",ch,c);
 					match ch {
 						'|' | '&' if ch == c => { word_desc = word_desc.add_char(ch); }
+						'&' if c == '|' => { word_desc = word_desc.add_char(ch); }
 						_ => { chars.push_front(ch); }
 					}
 					trace!("returning word_desc with this word: {}", word_desc.text);

@@ -61,8 +61,8 @@ impl fmt::Display for Node {
                     )?;
                     write_tree(body, f, indent + 1)?;
                 }
-                NdType::Pipeline { left, right } => {
-                    writeln!(f, "{}Pipeline", prefix)?;
+                NdType::Pipeline { left, right, both} => {
+                    writeln!(f, "{}Pipeline (both: {})", prefix,both)?;
                     writeln!(f, "{}|--- Left", prefix)?;
                     write_tree(left, f, indent + 1)?;
                     writeln!(f, "{}|--- Right", prefix)?;
@@ -105,6 +105,9 @@ impl fmt::Display for Node {
                 }
                 NdType::Pipe => {
                     writeln!(f, "{}Pipe", prefix)?;
+                }
+                NdType::PipeBoth => {
+                    writeln!(f, "{}PipeBoth", prefix)?;
                 }
                 NdType::Cmdsep => {
                     writeln!(f, "{}Cmdsep", prefix)?;
