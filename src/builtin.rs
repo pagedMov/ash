@@ -120,23 +120,51 @@ pub fn source(shellenv: &mut ShellEnv, argv: Vec<CString>) -> Result<RshExitStat
 	Ok(RshExitStatus::Success)
 }
 
+fn do_test<T,F1,F2>(args: &mut VecDeque<String>, transform: F1, property: F2) -> Result<bool, ShellError>
+where
+	F1: FnOnce(String) -> Result<T,ShellError>,
+	F2: FnOnce(&T) -> bool
+{
+	if let Some(st) = args.pop_front() {
+		let transformed = transform(st)?;
+		Ok(property(&transformed))
+	} else {
+		Err(ShellError::InvalidSyntax("Did not find a comparison target for integer in test".into()))
+	}
+}
+
+fn do_cmp<T,F1,F2>(arg1: String, args: &mut VecDeque<String>, transform: F1, comparison: F2) -> Result<bool, ShellError>
+where
+	F1: Fn(String) -> Result<T,ShellError>,
+	F2: FnOnce(&T,&T) -> bool
+{
+	if let Some(st) = args.pop_front() {
+		let left = transform(arg1)?;
+		let right = transform(st)?;
+		Ok(comparison(&left,&right))
+	} else {
+		Err(ShellError::InvalidSyntax("Did not find a comparison target for integer in test".into()))
+	}
+}
+
+
 pub fn test(mut argv: Vec<CString>) -> Result<RshExitStatus,ShellError> {
 	info!("Starting builtin test");
 	let is_false = || -> Result<RshExitStatus,ShellError> { Ok(RshExitStatus::Fail { code: 1, cmd: Some("test".into()) }) };
 	let is_true = || -> Result<RshExitStatus,ShellError> { Ok(RshExitStatus::Success) };
 	let is_int = |s: &String| -> bool { s.parse::<i32>().is_ok() };
-	let is_path = |s: &String| -> bool { PathBuf::from(s).exists() };
-	let is_string = |s: &String| -> bool { !is_path(s) && !is_int(s) };
-	let is_file = |path: &String| -> bool {
-		if let Ok(metadata) = fs::metadata(path) {
-				metadata.is_file()
-		} else {
-				false
-		}
+	let to_int = |s: String| -> Result<i32,ShellError> {
+		s.parse::<i32>().map_err(|_| ShellError::InvalidSyntax("Expected an integer in test".into()))
 	};
+	let is_path = |s: &String| -> bool { PathBuf::from(s).exists() };
+	let to_meta = |s: String| -> Result<fs::Metadata,ShellError> {
+    fs::metadata(&s).map_err(|_| ShellError::InvalidSyntax(format!("Test: Path '{}' does not exist", s)))
+	};
+	let string_noop = |s: String| -> Result<String,ShellError> { Ok(s) };
 	let mut args = VecDeque::new();
 	args.extend(argv.into_iter().map(|s| s.into_string().unwrap()).collect::<Vec<String>>().drain(..));
-	let is_bracket = match args.pop_front().unwrap().as_str() {
+	let command = args.pop_front().unwrap();
+	let is_bracket = match command.as_str() {
 		"[" => true,
 		"test" => false,
 		_ => unreachable!()
@@ -155,6 +183,7 @@ pub fn test(mut argv: Vec<CString>) -> Result<RshExitStatus,ShellError> {
 	if let Some(arg) = args.pop_front() {
 		let result1 = match arg.as_str() {
 			"!" => {
+				args.push_front(command);
 				argv = args.into_iter().map(|s| CString::new(s).unwrap()).collect::<Vec<CString>>();
 				let result = test(argv)?;
 				match result {
@@ -162,345 +191,37 @@ pub fn test(mut argv: Vec<CString>) -> Result<RshExitStatus,ShellError> {
 					RshExitStatus::Fail {..} => { return is_true() },
 				}
 			}
-			"-n" => {
-				if let Some(st) = args.pop_front() {
-					if !is_string(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a string after `-n` flag in test".into()));
-					} else {
-						st.is_empty()
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a string after `-n` flag in test".into()));
-				}
-			},
-			"-z" => {
-				if let Some(st) = args.pop_front() {
-					if !is_string(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a string after `-n` flag in test".into()));
-					} else {
-						st.is_empty()
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a string after `-n` flag in test".into()));
-				}
-			},
-			"-b" => {
-				if let Some(st) = args.pop_front() {
-					if !is_file(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else if let Ok(metadata) = fs::metadata(st) {
-						metadata.file_type().is_block_device()
-					} else {
-						return Err(ShellError::IoError("Failed to get file metadata in test".into()));
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-c" => {
-				if let Some(st) = args.pop_front() {
-					if !is_file(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -c flag".into()));
-					} else if let Ok(metadata) = fs::metadata(st) {
-						metadata.file_type().is_char_device()
-					} else {
-						return Err(ShellError::IoError("Failed to get file metadata in test".into()));
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -c flag".into()));
-				}
-			},
-			"-d" => {
-				if let Some(st) = args.pop_front() {
-					if !is_path(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -d flag".into()));
-					} else if let Ok(metadata) = fs::metadata(st) {
-						metadata.file_type().is_dir()
-					} else {
-						return Err(ShellError::IoError("Failed to get file metadata in test".into()));
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -d flag".into()));
-				}
-			},
-			"-e" => {
-				if let Some(st) = args.pop_front() {
-					Path::new(&st).exists()
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-f" => {
-				if let Some(st) = args.pop_front() {
-					is_file(&st)
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-g" => {
-				if let Some(st) = args.pop_front() {
-					if !is_path(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else {
-						let mode = fs::metadata(&st).unwrap().mode();
-						mode & 0o2000 != 0
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-G" => {
-				if let Some(st) = args.pop_front() {
-					if !is_path(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else {
-						let gid = fs::metadata(&st).unwrap().gid();
-						let process_gid = unsafe { getegid() };
-						gid == process_gid
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-h" | "-L" => {
-				if let Some(st) = args.pop_front() {
-					if !is_path(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else if let Ok(metadata) = fs::metadata(&st) {
-						metadata.file_type().is_symlink()
-					} else {
-						return Err(ShellError::IoError("Failed to get file metadata in test".into()));
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-k" => {
-				if let Some(st) = args.pop_front() {
-					if !is_path(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else if let Ok(metadata) = fs::metadata(&st) {
-						let mode = metadata.mode();
-						mode & 0o1000 != 0
-					} else {
-						return Err(ShellError::IoError("Failed to get file metadata in test".into()));
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-N" => {
-				if let Some(st) = args.pop_front() {
-					if !is_file(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else if let Ok(metadata) = fs::metadata(&st) {
-						let mtime = metadata.mtime();
-						let atime = metadata.atime();
-						mtime > atime
-					} else {
-						return Err(ShellError::IoError("Failed to get file metadata in test".into()));
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-O" => {
-				if let Some(st) = args.pop_front() {
-					if !is_path(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else if let Ok(metadata) = fs::metadata(&st) {
-						let file_uid = metadata.uid();
-						let proc_uid = unsafe{ geteuid() };
-						file_uid == proc_uid
-					} else {
-						return Err(ShellError::IoError("Failed to get file metadata in test".into()));
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-p" => {
-				if let Some(st) = args.pop_front() {
-					if !is_file(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else if let Ok(metadata) = fs::metadata(&st) {
-						metadata.file_type().is_fifo()
-					} else {
-						return Err(ShellError::IoError("Failed to get file metadata in test".into()));
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-r" => {
-				if let Some(st) = args.pop_front() {
-					if !is_path(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else {
-						let path = Path::new(&st);
-						access(path, AccessFlags::R_OK).is_ok()
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-s" => {
-				if let Some(st) = args.pop_front() {
-					if !is_file(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else if let Ok(metadata) = fs::metadata(&st) {
-						metadata.len() > 0
-					} else {
-						return Err(ShellError::IoError("Failed to get file metadata in test".into()));
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-S" => {
-				if let Some(st) = args.pop_front() {
-					if !is_file(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else if let Ok(metadata) = fs::metadata(&st) {
-						metadata.file_type().is_socket()
-					} else {
-						return Err(ShellError::IoError("Failed to get file metadata in test".into()));
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-t" => {
-				if let Some(st) = args.pop_front() {
-					if !is_int(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else {
-						let fd = st.parse::<i32>().unwrap().as_raw_fd();
-						isatty(fd).is_ok()
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-u" => {
-				if let Some(st) = args.pop_front() {
-					if !is_file(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else if let Ok(metadata) = fs::metadata(&st) {
-						let mode = metadata.mode();
-						mode & 0o4000 != 0
-					} else {
-						return Err(ShellError::IoError("Failed to get file metadata in test".into()));
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-w" => {
-				if let Some(st) = args.pop_front() {
-					if !is_path(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else {
-						let path = Path::new(&st);
-						access(path, AccessFlags::W_OK).is_ok()
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
-			"-x" => {
-				if let Some(st) = args.pop_front() {
-					if !is_path(&st) {
-						return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-					} else {
-						let path = Path::new(&st);
-						access(path, AccessFlags::X_OK).is_ok()
-					}
-				} else {
-					return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-				}
-			},
+			"-t" => do_test(&mut args, to_int, |int| isatty(*int).is_ok())?,
+			"-b" => do_test(&mut args, to_meta, |meta| meta.file_type().is_block_device())?,
+			"-c" => do_test(&mut args, to_meta, |meta| meta.file_type().is_char_device())?,
+			"-d" => do_test(&mut args, to_meta, |meta| meta.is_dir())?,
+			"-f" => do_test(&mut args, to_meta, |meta| meta.is_file())?,
+			"-g" => do_test(&mut args, to_meta, |meta| meta.mode() & 0o2000 != 0)?,
+			"-G" => do_test(&mut args, to_meta, |meta| meta.gid() == unsafe { getegid() })?,
+			"-h" => do_test(&mut args, to_meta, |meta| meta.is_symlink())?,
+			"-L" => do_test(&mut args, to_meta, |meta| meta.is_symlink())?,
+			"-k" => do_test(&mut args, to_meta, |meta| meta.mode() & 0o1000 != 0)?,
+			"-N" => do_test(&mut args, to_meta, |meta| meta.mtime() > meta.atime())?,
+			"-O" => do_test(&mut args, to_meta, |meta| meta.uid() == unsafe { geteuid() })?,
+			"-p" => do_test(&mut args, to_meta, |meta| meta.file_type().is_fifo())?,
+			"-s" => do_test(&mut args, to_meta, |meta| meta.len() > 0)?,
+			"-S" => do_test(&mut args, to_meta, |meta| meta.file_type().is_socket())?,
+			"-u" => do_test(&mut args, to_meta, |meta| meta.mode() & 0o4000 != 0)?,
+			"-n" => do_test(&mut args, string_noop, |st: &String| !st.is_empty())?,
+			"-z" => do_test(&mut args, string_noop, |st| st.is_empty())?,
+			"-e" => do_test(&mut args, string_noop, |st| Path::new(st).exists())?,
+			"-r" => do_test(&mut args, string_noop, |st| access(Path::new(st),AccessFlags::R_OK).is_ok())?,
+			"-w" => do_test(&mut args, string_noop, |st| access(Path::new(st),AccessFlags::W_OK).is_ok())?,
+			"-x" => do_test(&mut args, string_noop, |st| access(Path::new(st),AccessFlags::X_OK).is_ok())?,
 			_ if is_int(&arg) => {
 				if let Some(cmp) = args.pop_front() {
 					match cmp.as_str() {
-						"-eq" => {
-							if let Some(arg2) = args.pop_front() {
-								if !is_int(&arg2) {
-									return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-								} else {
-									let left = arg.parse::<i32>().unwrap();
-									let right = arg2.parse::<i32>().unwrap();
-									left == right
-								}
-							} else {
-								return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-							}
-						}
-						"-ge" => {
-							if let Some(arg2) = args.pop_front() {
-								if !is_int(&arg2) {
-									return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-								} else {
-									let left = arg.parse::<i32>().unwrap();
-									let right = arg2.parse::<i32>().unwrap();
-									left >= right
-								}
-							} else {
-								return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-							}
-						}
-						"-gt" => {
-							if let Some(arg2) = args.pop_front() {
-								if !is_int(&arg2) {
-									return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-								} else {
-									let left = arg.parse::<i32>().unwrap();
-									let right = arg2.parse::<i32>().unwrap();
-									left > right
-								}
-							} else {
-								return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-							}
-						}
-						"-le" => {
-							if let Some(arg2) = args.pop_front() {
-								if !is_int(&arg2) {
-									return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-								} else {
-									let left = arg.parse::<i32>().unwrap();
-									let right = arg2.parse::<i32>().unwrap();
-									left <= right
-								}
-							} else {
-								return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-							}
-						}
-						"-lt" => {
-							if let Some(arg2) = args.pop_front() {
-								if !is_int(&arg2) {
-									return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-								} else {
-									let left = arg.parse::<i32>().unwrap();
-									let right = arg2.parse::<i32>().unwrap();
-									left < right
-								}
-							} else {
-								return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-							}
-						}
-						"-ne" => {
-							if let Some(arg2) = args.pop_front() {
-								if !is_int(&arg2) {
-									return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-								} else {
-									let left = arg.parse::<i32>().unwrap();
-									let right = arg2.parse::<i32>().unwrap();
-									left != right
-								}
-							} else {
-								return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-							}
-						}
+						"-eq" => do_cmp(arg, &mut args, to_int, |left,right| left == right)?,
+						"-ge" => do_cmp(arg, &mut args, to_int, |left,right| left >= right)?,
+						"-gt" => do_cmp(arg, &mut args, to_int, |left,right| left > right)?,
+						"-le" => do_cmp(arg, &mut args, to_int, |left,right| left <= right)?,
+						"-lt" => do_cmp(arg, &mut args, to_int, |left,right| left < right)?,
+						"-ne" => do_cmp(arg, &mut args, to_int, |left,right| left != right)?,
 						_ => {
 							return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
 						}
@@ -512,45 +233,9 @@ pub fn test(mut argv: Vec<CString>) -> Result<RshExitStatus,ShellError> {
 			_ if is_path(&arg) => {
 				if let Some(cmp) = args.pop_front() {
 					match cmp.as_str() {
-						"-ef" => {
-							if let Some(arg2) = args.pop_front() {
-								if !is_path(&arg2) {
-									return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-								} else if let (Ok(left_meta), Ok(right_meta)) = (fs::metadata(&arg), fs::metadata(&arg2)) {
-									left_meta.dev() == right_meta.dev() && left_meta.ino() == right_meta.ino()
-								} else {
-									return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-								}
-							} else {
-								return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-							}
-						},
-						"-nt" => {
-							if let Some(arg2) = args.pop_front() {
-								if !is_path(&arg2) {
-									return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-								} else if let (Ok(left_meta), Ok(right_meta)) = (fs::metadata(&arg), fs::metadata(&arg2)) {
-									left_meta.mtime() > right_meta.mtime()
-								} else {
-									return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-								}
-							} else {
-								return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-							}
-						},
-						"-ot" => {
-							if let Some(arg2) = args.pop_front() {
-								if !is_path(&arg2) {
-									return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-								} else if let (Ok(left_meta), Ok(right_meta)) = (fs::metadata(&arg), fs::metadata(&arg2)) {
-									left_meta.mtime() < right_meta.mtime()
-								} else {
-									return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-								}
-							} else {
-								return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-							}
-						},
+						"-ef" => do_cmp(arg, &mut args, to_meta, |left,right| left.dev() == right.dev() && left.ino() == right.ino())?,
+						"-nt" => do_cmp(arg, &mut args, to_meta, |left,right| left.mtime() > right.mtime())?,
+						"-ot" => do_cmp(arg, &mut args, to_meta, |left,right| left.mtime() < right.mtime())?,
 						_ => {
 							return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
 						}
@@ -564,28 +249,8 @@ pub fn test(mut argv: Vec<CString>) -> Result<RshExitStatus,ShellError> {
 					!arg.is_empty()
 				} else if let Some(cmp) = args.pop_front() {
 					match cmp.as_str() {
-						"=" => {
-							if let Some(arg2) = args.pop_front() {
-								if !is_string(&arg2) {
-									return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-								} else {
-									arg == arg2
-								}
-							} else {
-								return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-							}
-						}
-						"!=" => {
-							if let Some(arg2) = args.pop_front() {
-								if !is_string(&arg2) {
-									return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-								} else {
-									arg != arg2
-								}
-							} else {
-								return Err(ShellError::InvalidSyntax("Expected a file name after -b flag".into()));
-							}
-						}
+						"=" => do_cmp(arg, &mut args, string_noop, |left,right| left == right)?,
+						"!=" => do_cmp(arg, &mut args, string_noop, |left,right| left != right)?,
 						_ => {
 							return Err(ShellError::InvalidSyntax("Expected a comparison operator after string in test".into()));
 						}
@@ -597,34 +262,21 @@ pub fn test(mut argv: Vec<CString>) -> Result<RshExitStatus,ShellError> {
 		};
 		if let Some(arg) = args.pop_front() {
 			match arg.as_str() {
-				"-a" => {
+				"-a" | "-o" => { // And/Or
+					args.push_front(command); // Push argv[0] back onto the stack, to trick the recursive test call into thinking it's a new invocation
 					argv = args.into_iter().map(|s| CString::new(s).unwrap()).collect::<Vec<CString>>();
 					let result2 = match test(argv)? {
 						RshExitStatus::Success => { true },
 						RshExitStatus::Fail {..} => { false },
 					};
-					match result1 && result2 {
-						true => {
-							return is_true();
-						}
-						false => {
-							return is_false();
-						}
-					}
-				}
-				"-o" => {
-					argv = args.into_iter().map(|s| CString::new(s).unwrap()).collect::<Vec<CString>>();
-					let result2 = match test(argv)? {
-						RshExitStatus::Success => { true },
-						RshExitStatus::Fail {..} => { false },
+					let result = if arg.as_str() == "-a" {
+						result1 && result2
+					} else {
+						result1 || result2
 					};
-					match result1 || result2 {
-						true => {
-							return is_true();
-						}
-						false => {
-							return is_false();
-						}
+					match result {
+						true => return is_true(),
+						false => return is_false()
 					}
 				}
 				"]" => {}
