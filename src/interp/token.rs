@@ -15,8 +15,8 @@ pub const KEYWORDS: [&str;14] = [
 	"then", "elif", "else", "in",
 	"do", "done", "fi", "esac"
 ];
-pub const BUILTINS: [&str; 14] = [
-	"echo", "set", "shift", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node",
+pub const BUILTINS: [&str; 16] = [
+	"echo", "set", "test", "[", "shift", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node",
 	"exec", "source", "wait",
 ];
 pub const FUNCTIONS: [&str; 1] = [
@@ -51,7 +51,6 @@ bitflags! {
 		const DUB_QUOTED = 0b00000000100000;
 		const SNG_QUOTED = 0b00000001000000;
 		const IN_BRACE =   0b00000010000000;
-		const IN_BRACKET = 0b00000100000000;
 		const IN_PAREN =   0b00001000000000;
 		const IS_SUB =     0b00010000000000;
 		const IS_OP =      0b00100000000000;
@@ -420,7 +419,6 @@ impl WordDesc {
 	pub fn delimit(&self, delim: char) -> Self {
 		let flag = match delim {
 			'{' => WdFlags::IN_BRACE,
-			'[' => WdFlags::IN_BRACKET,
 			'(' => WdFlags::IN_PAREN,
 			_ => unreachable!()
 		};
@@ -505,14 +503,12 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,RshErr> {
 						word_desc.remove_flag(WdFlags::IN_BRACE)
 					} else if word_desc.contains_flag(WdFlags::IN_PAREN) {
 						word_desc.remove_flag(WdFlags::IN_PAREN)
-					} else if word_desc.contains_flag(WdFlags::IN_BRACKET) {
-						word_desc.remove_flag(WdFlags::IN_BRACKET)
 					} else {
 						word_desc
 					}
 				}
 			}
-			'(' | '{' | '[' => {
+			'(' | '{' => {
 				word_desc.add_char(c).delimit(c)
 			}
 			_ if helper::quoted(&word_desc) => {

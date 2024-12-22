@@ -25,7 +25,7 @@ pub fn expand(mut state: ParseState) -> Result<ParseState,RshErr> {
 }
 
 pub fn check_globs(string: String) -> bool {
-	string.chars().any(|t| matches!(t, '?' | '*' | '[' | ']'))
+	string.chars().any(|t| matches!(t, '?' | '*'))
 }
 
 

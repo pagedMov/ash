@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use log::{error,info,debug,trace};
 use glob::MatchOptions;
 
-use crate::builtin::{cd, echo, source};
+use crate::builtin::{cd, echo, source, test};
 use crate::event::ShellError;
 use crate::interp::{self, expand};
 use crate::interp::token::{Redir, RedirType, Tk, TkType};
@@ -316,6 +316,7 @@ impl<'a> NodeWalker<'a> {
 			"echo" => echo(argv.into(), redirs, stdout),
 			"source" => source(self.shellenv, argv),
 			"cd" => cd(self.shellenv, argv.into()),
+			"[" | "test" => test(argv),
 			_ => unimplemented!()
 		}
 	}
@@ -447,11 +448,7 @@ impl<'a> NodeWalker<'a> {
 	}
 
 	fn handle_command(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
-		let (argv, redirs) = if let NdType::Command { argv, redirs } = node.nd_type {
-			(argv, redirs)
-		} else {
-			unreachable!()
-		};
+		let (argv, redirs) = self.extract_args(node);
 		let mut saved_fds = SavedFDs::new(0,1,2).unwrap();
 
 
@@ -481,13 +478,9 @@ impl<'a> NodeWalker<'a> {
 		}
 
 
-		let cmd = Some(argv[0].text().to_string());
-		let command = CString::new(argv[0].text()).unwrap();
-		let argv = argv
-			.into_iter()
-			.map(|tk| CString::new(tk.text()).unwrap())
-			.collect::<Vec<CString>>();
-			let envp = self.shellenv.get_cvars();
+		let cmd = Some(argv[0].clone().into_string().unwrap());
+		let command = &argv[0];
+		let envp = self.shellenv.get_cvars();
 
 			match unsafe { fork() } {
 				Ok(ForkResult::Child) => {
@@ -499,7 +492,7 @@ impl<'a> NodeWalker<'a> {
 					}
 
 					// Execute the command
-					let Err(err) = execvpe(&command, &argv, &envp);
+					let Err(err) = execvpe(command, &argv, &envp);
 					eprintln!("Exec failed: {}", err);
 					std::process::exit(127);
 				}

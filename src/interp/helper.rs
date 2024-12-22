@@ -1,6 +1,7 @@
 use crate::interp::token::{Tk, WdFlags, WordDesc, CMDSEP, KEYWORDS, BUILTINS, REGEX, WHITESPACE};
+use libc::STDERR_FILENO;
 use log::{debug,trace};
-use std::collections::VecDeque;
+use std::{collections::VecDeque, os::fd::{AsFd, BorrowedFd}};
 
 use super::parse::RshErr;
 
@@ -22,10 +23,13 @@ impl StrExtension for str {
 	}
 }
 
+pub fn get_stderr<'a>() -> BorrowedFd<'a> {
+	unsafe { BorrowedFd::borrow_raw(STDERR_FILENO) }
+}
+
 pub fn get_delimiter(wd: &WordDesc) -> char {
     let flags = wd.flags;
     match () {
-        _ if flags.contains(WdFlags::IN_BRACKET) => ']',
         _ if flags.contains(WdFlags::IN_BRACE) => '}',
         _ if flags.contains(WdFlags::IN_PAREN) => ')',
         _ => unreachable!("No active delimiter found in WordDesc flags"),
@@ -36,8 +40,6 @@ pub fn is_brace_expansion(text: &str) -> bool {
 		REGEX["brace_expansion"].captures(text).unwrap()[1].is_empty()
 }
 pub fn delimited(wd: &WordDesc) -> bool {
-    wd.flags.contains(WdFlags::IN_BRACKET) ||
-    wd.flags.contains(WdFlags::IN_BRACE) ||
     wd.flags.contains(WdFlags::IN_PAREN)
 }
 pub fn cmdsep(c: &char) -> bool {
@@ -103,8 +105,6 @@ pub fn finalize_delimiter(word_desc: &WordDesc) -> Result<WordDesc, RshErr> {
         updated_word_desc = updated_word_desc.remove_flag(WdFlags::IN_BRACE);
     } else if word_desc.contains_flag(WdFlags::IN_PAREN) {
         updated_word_desc = updated_word_desc.remove_flag(WdFlags::IN_PAREN);
-    } else if word_desc.contains_flag(WdFlags::IN_BRACKET) {
-        updated_word_desc = updated_word_desc.remove_flag(WdFlags::IN_BRACKET);
     }
 
     Ok(updated_word_desc)

@@ -13,6 +13,7 @@ use nix::unistd::write;
 use crate::event::ShellError;
 use crate::execute::{NodeWalker, RshExitStatus};
 use crate::interp::expand::expand_var;
+use crate::interp::helper;
 use crate::interp::parse::{descend, Node};
 
 #[derive(Debug, Clone)]
@@ -30,8 +31,9 @@ pub struct ShellEnv {
 
 impl ShellEnv {
 	// Constructor
-	pub fn new(login: bool, interactive: bool) -> Result<Self,ShellError> {
+	pub fn new(login: bool, interactive: bool) -> Self {
 		let mut open_fds = HashSet::new();
+		let stderr = helper::get_stderr();
 		let shopts = init_shopts();
 		let mut env_vars = std::env::vars().collect::<HashMap<String,String>>();
 		env_vars.insert("HIST_FILE".into(),"${HOME}/.rsh_hist".into());
@@ -52,18 +54,22 @@ impl ShellEnv {
 		let runtime_commands_path = &expand_var(&shellenv, "${HOME}/.rshrc".into());
 		let runtime_commands_path = Path::new(runtime_commands_path);
 		if runtime_commands_path.exists() {
-				shellenv.source_file(runtime_commands_path.to_path_buf())?;
+				if let Err(e) = shellenv.source_file(runtime_commands_path.to_path_buf()) {
+					write(stderr,format!("Failed to source ~/.rshrc: {}",e).as_bytes()).unwrap();
+				}
 		} else {
 				eprintln!("Warning: Runtime commands file '{}' not found.", runtime_commands_path.display());
 		}
     if login {
-        let profile_path = expand_var(&shellenv, "${HOME}/.profile".into());
+        let profile_path = expand_var(&shellenv, "${HOME}/.rsh_profile".into());
         let profile_path = Path::new(&profile_path);
         if profile_path.exists() {
-            shellenv.source_file(profile_path.to_path_buf())?;
+					if let Err(e) = shellenv.source_file(profile_path.to_path_buf()) {
+						write(stderr,format!("Failed to source ~/.rsh_profile: {}",e).as_bytes()).unwrap();
+					}
         }
     }
-		Ok(shellenv)
+		shellenv
 	}
 
 	pub fn source_file(&mut self, path: PathBuf) -> Result<(),ShellError> {
