@@ -157,7 +157,7 @@ impl<'a> NodeWalker<'a> {
 				last_status = self.handle_loop(node)?;
 			}
 			NdType::Case {..} => {
-				todo!("handle case-in")
+				last_status = self.handle_case(node)?;
 			}
 			NdType::Subshell {..} => {
 				last_status = self.handle_subshell(node,stdin,stdout,stderr)?;
@@ -196,6 +196,24 @@ impl<'a> NodeWalker<'a> {
 					}
 				}
 			}
+		} else {
+			return Err(ShellError::from_internal("Entered walk_root() with a non-root node", node.span()))
+		}
+		Ok(last_status)
+	}
+
+	fn handle_case(&mut self, node: Node) -> Result<RshExitStatus, ShellError> {
+		let mut last_status = RshExitStatus::new();
+		if let NdType::Case { input_var, cases } = node.nd_type {
+				for case in cases.keys() {
+						if case == input_var.text() {
+								if let Some(body) = cases.get(case) {
+										last_status = self.walk_root(body.clone(), None)?;
+								}
+						}
+				}
+		} else {
+			return Err(ShellError::from_internal("Entered handle_case() with a non-case node", node.span()))
 		}
 		Ok(last_status)
 	}
@@ -679,84 +697,135 @@ impl<'a> NodeWalker<'a> {
 	}
 }
 
-//pub fn run_subshell<F>(func: F) -> Result<RshExitStatus,ShellError>
-//where
-//F: FnOnce() -> Result<RshExitStatus,ShellError>
-//{
-//let mut last_status = RshExitStatus::Success;
-//match unsafe { fork() } {
-//Ok(ForkResult::Child) => {
-//if let Err(e) = func() {
-//eprintln!("Subshell failed: {}",e);
-//std::process::exit(1);
-//}
-//std::process::exit(0);
-//}
-//Ok(ForkResult::Parent { child }) => {
-//match waitpid(child,None) {
-//Ok(WaitStatus::Exited(_,status)) => {
-//if status == 0 {
-//return Ok(RshExitStatus::Success);
-//} else {
-//return Ok(RshExitStatus::Fail { code: status, cmd: cmd_name });
-//}
-//}
-//_ => panic!()
-//}
-//}
-//Err(e) => Err(ShellError::from_execf(format!("Subshell failed"), 1))
-//}
-//}
+#[cfg(test)]
+mod tests {
+	use std::{fs, io::Read, path::Path};
 
-/// Example command invocation using system calls
-/// Note that the command name is the first argument in argv
-/// execvpe will handle path crawling for you
-/// just make sure that the path env var is set up
-fn hello_world() -> Result<(), String> {
-	// Command and arguments
-	let command = "echo";
-	let args = ["echo", "hello", "world"];
+use interp::parse;
 
-	// Prepare argv
-	let argv = args
-		.iter()
-		.map(|&arg| CString::new(arg).unwrap())
-		.collect::<Vec<CString>>();
+use super::*;
 
-		// Prepare envp (using current environment)
-		let env_vars: HashMap<String, String> = std::env::vars().collect();
-		let envp = env_vars
-			.iter()
-			.map(|(key, value)| {
-				let env_pair = format!("{}={}", key, value);
-				CString::new(env_pair).unwrap() })
-			.collect::<Vec<CString>>();
-
-		let file_path = "/tmp/hello_world.txt";
-		let file_fd: RawFd = open(
-			file_path,
-			OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
-			Mode::from_bits(0o644).unwrap(),
-		).unwrap();
-
-		// Fork the process
-		match unsafe { fork() } {
-			Ok(ForkResult::Child) => {
-				// Child process: execute the command
-				dup2(file_fd,1).unwrap();
-				close(file_fd).unwrap();
-				let c_command = CString::new(command).unwrap();
-				let _ = execvpe(&c_command, &argv, &envp);
-			}
-			Ok(ForkResult::Parent { child }) => {
-				// Parent process: Wait for the child process to finish
-				use nix::sys::wait::waitpid;
-				if let Err(err) = waitpid(child, None) {
-					return Err(format!("Failed to wait for child process: {}", err));
-				}
-			}
-			Err(err) => return Err(format!("Fork failed: {}", err)),
+	fn from_file(input: &str) -> String {
+		let mut file = fs::File::open(PathBuf::from(input)).unwrap();
+		let mut buffer = String::new();
+		file.read_to_string(&mut buffer).unwrap();
+		buffer
+	}
+	#[test]
+	fn basic_if_script() {
+		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/basic_if.sh");
+		let mut shellenv = ShellEnv::new(false,true);
+		let state = parse::descend(&input, &shellenv);
+		assert!(state.is_ok());
+		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
+		let result = walker.start_walk();
+		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
+		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
+			assert_ne!(code,127);
 		}
-
-		Ok(())
+	}
+	#[test]
+	fn basic_for_script() {
+		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/basic_for.sh");
+		let mut shellenv = ShellEnv::new(false,true);
+		let state = parse::descend(&input, &shellenv);
+		assert!(state.is_ok());
+		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
+		let result = walker.start_walk();
+		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
+		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
+			assert_ne!(code,127);
+		}
+	}
+	#[test]
+	fn basic_case_script() {
+		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/basic_case.sh");
+		let mut shellenv = ShellEnv::new(false,true);
+		let state = parse::descend(&input, &shellenv);
+		assert!(state.is_ok());
+		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
+		let result = walker.start_walk();
+		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
+		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
+			assert_ne!(code,127);
+		}
+	}
+	#[test]
+	fn basic_while_script() {
+		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/basic_while.sh");
+		let mut shellenv = ShellEnv::new(false,true);
+		let state = parse::descend(&input, &shellenv);
+		assert!(state.is_ok());
+		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
+		let result = walker.start_walk();
+		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
+		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
+			assert_ne!(code,127);
+		}
+	}
+	#[test]
+	fn basic_until_script() {
+		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/basic_until.sh");
+		let mut shellenv = ShellEnv::new(false,true);
+		let state = parse::descend(&input, &shellenv);
+		assert!(state.is_ok());
+		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
+		let result = walker.start_walk();
+		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
+		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
+			assert_ne!(code,127);
+		}
+	}
+	#[test]
+	fn basic_commands() {
+		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/basic_commands.sh");
+		let mut shellenv = ShellEnv::new(false,true);
+		let state = parse::descend(&input, &shellenv);
+		assert!(state.is_ok());
+		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
+		let result = walker.start_walk();
+		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
+		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
+			assert_ne!(code,127);
+		}
+	}
+	#[test]
+	fn basic_var_sub() {
+		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/basic_var_sub.sh");
+		let mut shellenv = ShellEnv::new(false,true);
+		let state = parse::descend(&input, &shellenv);
+		assert!(state.is_ok());
+		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
+		let result = walker.start_walk();
+		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
+		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
+			assert_ne!(code,127);
+		}
+	}
+	#[test]
+	fn basic_chain() {
+		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/chain.sh");
+		let mut shellenv = ShellEnv::new(false,true);
+		let state = parse::descend(&input, &shellenv);
+		assert!(state.is_ok());
+		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
+		let result = walker.start_walk();
+		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
+		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
+			assert_ne!(code,127);
+		}
+	}
+	#[test]
+	fn very_nested() {
+		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/very_nested.sh");
+		let mut shellenv = ShellEnv::new(false,true);
+		let state = parse::descend(&input, &shellenv);
+		assert!(state.is_ok());
+		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
+		let result = walker.start_walk();
+		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
+		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
+			assert_ne!(code,127);
+		}
+	}
 }
