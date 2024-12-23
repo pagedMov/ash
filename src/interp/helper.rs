@@ -1,9 +1,9 @@
-use crate::interp::token::{Tk, WdFlags, WordDesc, CMDSEP, KEYWORDS, BUILTINS, REGEX, WHITESPACE};
+use crate::interp::{parse::Span, token::{Tk, WdFlags, WordDesc, BUILTINS, CMDSEP, KEYWORDS, REGEX, WHITESPACE}};
 use libc::STDERR_FILENO;
 use log::{debug,trace};
 use std::{collections::VecDeque, os::fd::{AsFd, BorrowedFd}};
 
-use super::parse::RshErr;
+use super::parse::ParseErr;
 
 pub trait StrExtension {
     fn has_unescaped(&self, check_char: char) -> bool;
@@ -24,6 +24,10 @@ impl StrExtension for str {
 }
 
 pub fn get_stderr<'a>() -> BorrowedFd<'a> {
+	unsafe { BorrowedFd::borrow_raw(STDERR_FILENO) }
+}
+
+pub fn get_stdout<'a>() -> BorrowedFd<'a> {
 	unsafe { BorrowedFd::borrow_raw(STDERR_FILENO) }
 }
 
@@ -80,7 +84,7 @@ pub fn check_redirection(c: &char, chars: &mut VecDeque<char>) -> bool {
 pub fn process_redirection(
     word_desc: &mut WordDesc,
     chars: &mut VecDeque<char>,
-) -> Result<WordDesc, RshErr> {
+) -> Result<WordDesc, ParseErr> {
     let mut redirection_text = String::new();
     while let Some(c) = chars.pop_front() {
 			debug!("found this char in redirection: {}",c);
@@ -98,7 +102,7 @@ pub fn process_redirection(
         flags: WdFlags::IS_OP,
     })
 }
-pub fn finalize_delimiter(word_desc: &WordDesc) -> Result<WordDesc, RshErr> {
+pub fn finalize_delimiter(word_desc: &WordDesc) -> Result<WordDesc, ParseErr> {
     let mut updated_word_desc = word_desc.clone();
 
     if word_desc.contains_flag(WdFlags::IN_BRACE) {
@@ -109,9 +113,28 @@ pub fn finalize_delimiter(word_desc: &WordDesc) -> Result<WordDesc, RshErr> {
 
     Ok(updated_word_desc)
 }
-pub fn finalize_word(word_desc: &WordDesc, tokens: &mut VecDeque<Tk>) -> Result<WordDesc,RshErr> {
+
+pub fn count_spaces(chars: &mut VecDeque<char>) -> usize {
+	let mut count = 1;
+	let mut buffer = VecDeque::new();
+	while let Some(ch) = chars.pop_front() {
+		if ch.is_whitespace() {
+			buffer.push_back(ch);
+			count += 1;
+		} else {
+			chars.push_front(ch);
+			while let Some(ch) = buffer.pop_back() {
+				chars.push_front(ch);
+			}
+			break
+		}
+	}
+	count
+}
+
+pub fn finalize_word(word_desc: &WordDesc, tokens: &mut VecDeque<Tk>) -> Result<WordDesc,ParseErr> {
     let mut word_desc = word_desc.clone();
-    let span = (word_desc.span.1,word_desc.span.1);
+    let span = Span::from(word_desc.span.end,word_desc.span.end);
     trace!("finalizing word `{}` with flags `{:?}`",word_desc.text,word_desc.flags);
     if !word_desc.text.is_empty() {
         if keywd(&word_desc) {

@@ -10,13 +10,13 @@ use libc::STDERR_FILENO;
 use log::{debug, info, trace};
 use nix::unistd::write;
 
-use crate::event::ShellError;
+use crate::event::{ShellError, ShellErrorFull};
 use crate::execute::{NodeWalker, RshExitStatus};
 use crate::interp::expand::expand_var;
 use crate::interp::helper;
-use crate::interp::parse::{descend, Node};
+use crate::interp::parse::{descend, Node, Span};
 
-#[derive(Debug, Clone)]
+#[derive(Debug,PartialEq,Clone)]
 pub struct ShellEnv {
 	interactive: bool,
 	login: bool,
@@ -26,7 +26,8 @@ pub struct ShellEnv {
 	shopts: HashMap<String,usize>,
 	functions: HashMap<String, VecDeque<Node>>,
 	parameters: HashMap<String, String>,
-	open_fds: HashSet<i32>
+	open_fds: HashSet<i32>,
+	last_input: Option<String>
 }
 
 impl ShellEnv {
@@ -49,34 +50,54 @@ impl ShellEnv {
 			shopts,
 			functions: HashMap::new(),
 			parameters: HashMap::new(),
-			open_fds
+			open_fds,
+			last_input: None
 		};
 		let runtime_commands_path = &expand_var(&shellenv, "${HOME}/.rshrc".into());
 		let runtime_commands_path = Path::new(runtime_commands_path);
 		if runtime_commands_path.exists() {
-				if let Err(e) = shellenv.source_file(runtime_commands_path.to_path_buf()) {
-					write(stderr,format!("Failed to source ~/.rshrc: {}",e).as_bytes()).unwrap();
+				if let Err(e) = shellenv.source_file(runtime_commands_path.to_path_buf(), Span::new()) {
+					let err = ShellErrorFull::from(shellenv.get_last_input(),e);
+					write(stderr,format!("Failed to source ~/.rshrc: {}",err).as_bytes()).unwrap();
 				}
 		} else {
 				eprintln!("Warning: Runtime commands file '{}' not found.", runtime_commands_path.display());
 		}
     if login {
-        let profile_path = expand_var(&shellenv, "${HOME}/.rsh_profile".into());
-        let profile_path = Path::new(&profile_path);
-        if profile_path.exists() {
-					if let Err(e) = shellenv.source_file(profile_path.to_path_buf()) {
-						write(stderr,format!("Failed to source ~/.rsh_profile: {}",e).as_bytes()).unwrap();
-					}
-        }
+			let profile_path = expand_var(&shellenv, "${HOME}/.rsh_profile".into());
+			let profile_path = Path::new(&profile_path);
+			if profile_path.exists() {
+				if let Err(e) = shellenv.source_file(profile_path.to_path_buf(), Span::new()) {
+					let err = ShellErrorFull::from(shellenv.get_last_input(),e);
+					write(stderr,format!("Failed to source ~/.rshrc: {}",err).as_bytes()).unwrap();
+				}
+			}
     }
 		shellenv
 	}
 
-	pub fn source_file(&mut self, path: PathBuf) -> Result<(),ShellError> {
-		let mut file = File::open(path).map_err(|e| ShellError::IoError(e.to_string()))?;
+	pub fn is_interactive(&self) -> bool {
+		self.interactive
+	}
+
+	pub fn is_login(&self) -> bool {
+		self.interactive
+	}
+
+	pub fn set_last_input(&mut self, input: &str) {
+		self.last_input = Some(input.to_string())
+	}
+
+	pub fn get_last_input(&mut self) -> String {
+		self.last_input.clone().unwrap_or_default()
+	}
+
+	pub fn source_file(&mut self, path: PathBuf, span: Span) -> Result<(),ShellError> {
+		let mut file = File::open(&path).map_err(|e| ShellError::from_io(&e.to_string(), span))?;
 		let mut buffer = String::new();
 		let stderr = unsafe { BorrowedFd::borrow_raw(STDERR_FILENO) };
-		file.read_to_string(&mut buffer).map_err(|e| ShellError::IoError(e.to_string()))?;
+		file.read_to_string(&mut buffer).map_err(|e| ShellError::from_io(&e.to_string(), span))?;
+		self.last_input = Some(buffer.clone());
 
 
 		let state = descend(&buffer, self);
@@ -86,29 +107,35 @@ impl ShellEnv {
 				match walker.start_walk() {
 					Ok(code) => {
 						info!("Last exit status: {:?}", code);
-						if let RshExitStatus::Fail { code, cmd } = code {
+						if let RshExitStatus::Fail { code, cmd, span } = code {
 							if code == 127 {
 								if let Some(cmd) = cmd {
-									write(stderr, format!("Command not found: {}\n", cmd).as_bytes()).unwrap();
+									let err = ShellErrorFull::from(self.get_last_input(),ShellError::from_no_cmd(&format!("Command not found: {}",cmd), span));
+									write(stderr, format!("{}", err).as_bytes()).unwrap();
 								}
 							}
 						}
 					}
 					Err(e) => {
-						write(stderr.as_fd(), format!("Execution error: {}\n", e).as_bytes()).unwrap();
+						let err = ShellErrorFull::from(self.get_last_input(), e);
+						write(stderr.as_fd(), format!("{}", err).as_bytes()).unwrap();
 					}
 				}
 			}
 			Err(e) => {
-				write(stderr.as_fd(), format!("Parsing error: {}\n", e).as_bytes()).unwrap();
+				let err = ShellErrorFull::from(self.get_last_input(), ShellError::from_parse(e));
+				write(stderr.as_fd(), format!("Encountered error while sourcing file: {}\n{}",path.display(), err).as_bytes()).unwrap();
 			}
 		}
 		Ok(())
 	}
 
-	pub fn change_dir(&mut self, path: &Path) {
+	pub fn change_dir(&mut self, path: &Path, span: Span) -> Result<(), ShellError> {
 		self.export_variable("PWD".into(), path.to_str().unwrap().to_string());
-		let _ = env::set_current_dir(path);
+		match env::set_current_dir(path) {
+			Ok(_) => Ok(()),
+			Err(e) => Err(ShellError::from_execf(&e.to_string(), 1, span))
+		}
 	}
 
 	pub fn open_fd(&mut self, fd: RawFd) {
@@ -117,11 +144,6 @@ impl ShellEnv {
 
 	pub fn close_fd(&mut self, fd: RawFd) {
 		self.open_fds.remove(&fd);
-	}
-
-	// Getters and Setters for `interactive`
-	pub fn is_interactive(&self) -> bool {
-		self.interactive
 	}
 
 	pub fn last_exit_status(&mut self, code: i32) {
@@ -151,8 +173,12 @@ impl ShellEnv {
 			.collect::<Vec<CString>>()
 	}
 
-	pub fn set_variable(&mut self, key: String, value: String) {
+	pub fn set_variable(&mut self, key: String, mut value: String) {
 		debug!("inserted var: {} with value: {}",key,value);
+		if value.starts_with('"') && value.ends_with('"') {
+			value = value.strip_prefix('"').unwrap().into();
+			value = value.strip_suffix('"').unwrap().into();
+		}
 		self.variables.insert(key.clone(), value);
 		trace!("testing variable get: {} = {}", key, self.get_variable(key.as_str()).unwrap())
 	}

@@ -30,7 +30,7 @@ pub mod builtin;
 
 use std::{env, fs::File, io::Read, os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd}};
 
-use event::EventLoop;
+use event::{EventLoop, ShellError, ShellErrorFull};
 use execute::{NodeWalker, RshExitStatus};
 use interp::parse::descend;
 use libc::STDERR_FILENO;
@@ -87,6 +87,7 @@ async fn main_noninteractive(args: Vec<String>) {
 
 	// Code Execution Logic
 	let mut shellenv = ShellEnv::new(false, false);
+	shellenv.set_last_input(&input);
 	let state = descend(&input, &shellenv);
 	match state {
 		Ok(parse_state) => {
@@ -94,21 +95,24 @@ async fn main_noninteractive(args: Vec<String>) {
 			match walker.start_walk() {
 				Ok(code) => {
 					info!("Last exit status: {:?}", code);
-					if let RshExitStatus::Fail { code, cmd } = code {
+					if let RshExitStatus::Fail { code, cmd, span } = code {
 						if code == 127 {
 							if let Some(cmd) = cmd {
-								write(stderr, format!("Command not found: {}\n", cmd).as_bytes()).unwrap();
+								let err = ShellErrorFull::from(shellenv.get_last_input(),ShellError::from_no_cmd(&cmd, span));
+								write(stderr, format!("{}", err).as_bytes()).unwrap();
 							}
 						}
 					}
 				}
 				Err(e) => {
-					write(stderr.as_fd(), format!("Execution error: {}\n", e).as_bytes()).unwrap();
+					let err = ShellErrorFull::from(shellenv.get_last_input(),e);
+					write(stderr.as_fd(), format!("{}", err).as_bytes()).unwrap();
 				}
 			}
 		}
 		Err(e) => {
-			write(stderr.as_fd(), format!("Parsing error: {}\n", e).as_bytes()).unwrap();
+			let err = ShellErrorFull::from(shellenv.get_last_input(),ShellError::from_parse(e));
+			write(stderr.as_fd(), format!("{}", err).as_bytes()).unwrap();
 		}
 	}
 }

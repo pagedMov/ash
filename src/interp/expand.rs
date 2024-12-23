@@ -6,9 +6,9 @@ use crate::interp::parse::ParseState;
 use crate::interp::helper::{self,StrExtension};
 use crate::shellenv::ShellEnv;
 
-use super::parse::RshErr;
+use super::parse::ParseErr;
 
-pub fn expand(mut state: ParseState) -> Result<ParseState,RshErr> {
+pub fn expand(mut state: ParseState) -> Result<ParseState,ParseErr> {
 	let mut buffer = VecDeque::new();
 	while let Some(tk) = state.tokens.pop_front() {
 		for token in expand_token(state.shellenv, tk) {
@@ -79,6 +79,20 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 						tk_type: TkType::String,
 						wd: WordDesc {
 							text: path.to_str().unwrap().to_string(),
+							span: token.span(),
+							flags: token.flags()
+						}
+					}
+				);
+			}
+		} else if shellenv.get_alias(token.text()).is_some() {
+			let alias_content = shellenv.get_alias(token.text()).unwrap().split(' ');
+			for word in alias_content {
+				working_buffer.push_back(
+					Tk {
+						tk_type: TkType::String,
+						wd: WordDesc {
+							text: word.into(),
 							span: token.span(),
 							flags: token.flags()
 						}

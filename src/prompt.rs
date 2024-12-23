@@ -66,17 +66,16 @@ pub async fn prompt(sender: mpsc::Sender<ShellEvent>, shellenv: &mut ShellEnv) {
 	let hist_path = expand::expand_var(shellenv, "$HIST_FILE".into());
 	let readline = rl.readline(">> ");
 	if let Ok(line) = readline {
+		shellenv.set_last_input(&line);
 		let state = descend(&line,shellenv);
 		match state {
 			Ok(parse_state) => {
 				let _ = rl.history_mut().add(&line);
 				let _ = rl.history_mut().save(Path::new(&hist_path));
 				let _ = sender.send(ShellEvent::NewAST(parse_state.ast)).await;
-				let _ = sender.send(ShellEvent::Prompt).await;
 			}
 			Err(e) => {
 				let _ = sender.send(ShellEvent::CatchError(ShellError::ParsingError(e))).await;
-				let _ = sender.send(ShellEvent::Prompt).await;
 			}
 		}
 	}

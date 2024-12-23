@@ -1,3 +1,4 @@
+use std::fmt;
 use std::os::fd::BorrowedFd;
 
 use nix::unistd::write;
@@ -7,29 +8,39 @@ use tokio::signal::unix::{signal, Signal, SignalKind};
 use thiserror::Error;
 
 use crate::execute::RshExitStatus;
-use crate::interp::parse::{ParseErrFull,Node};
+use crate::interp::parse::{Node, ParseErr, Span};
 use crate::{execute, prompt};
 use crate::shellenv::ShellEnv;
 
-#[derive(Debug,Error,PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum ShellError {
-	#[error("Command not found: {0}")]
-	CommandNotFound(String),
-
-	#[error("Invalid syntax: {0}")]
-	InvalidSyntax(String),
-
-	#[error("{0}")]
-	ParsingError(ParseErrFull),
-
-	#[error("Execution failed for command '{0}' with exit code {1}")]
-	ExecFailed(String,i32),
-
-	#[error("I/o error: {0}")]
-	IoError(String),
+	CommandNotFound(String, Span),
+	InvalidSyntax(String, Span),
+	ParsingError(ParseErr),
+	ExecFailed(String, i32, Span),
+	IoError(String, Span),
+	InternalError(String, Span),
 }
 
 impl ShellError {
+	pub fn from_io(msg: &str, span: Span) -> Self {
+		ShellError::IoError(msg.to_string(), span)
+	}
+	pub fn from_execf(msg: &str, code: i32, span: Span) -> Self {
+		ShellError::ExecFailed(msg.to_string(), code, span)
+	}
+	pub fn from_parse(parse_err: ParseErr) -> Self {
+		ShellError::ParsingError(parse_err)
+	}
+	pub fn from_syntax(msg: &str, span: Span) -> Self {
+		ShellError::InvalidSyntax(msg.to_string(), span)
+	}
+	pub fn from_no_cmd(msg: &str, span: Span) -> Self {
+		ShellError::CommandNotFound(msg.to_string(), span)
+	}
+	pub fn from_internal(msg: &str, span: Span) -> Self {
+		ShellError::InternalError(msg.to_string(), span)
+	}
 	pub fn is_fatal(&self) -> bool {
 		match self {
 			ShellError::IoError(..) => true,
@@ -37,6 +48,124 @@ impl ShellError {
 			ShellError::ExecFailed(..) => false,
 			ShellError::ParsingError(..) => false,
 			ShellError::InvalidSyntax(..) => false,
+			ShellError::InternalError(..) => false,
+		}
+	}
+}
+
+pub struct ShellErrorFull {
+	input: String,
+	error: ShellError,
+}
+
+impl ShellErrorFull {
+	pub fn from(input: String, error: ShellError) -> Self {
+		Self { input, error }
+	}
+	fn format_error_context(&self, span: Span) {
+		let (line, col) = Self::get_line_col(&self.input, span.start);
+		let (window, window_offset) = Self::generate_window(&self.input, line, col);
+		let span_diff = span.end - span.start;
+		let pointer = Self::get_pointer(span_diff, window_offset);
+
+		println!("{};{}:",line + 1, col + 1);
+		println!("{}",window);
+		println!("{}",pointer);
+	}
+
+	fn get_pointer(span_diff: usize, offset: usize) -> String {
+		let padding = " ".repeat(offset);
+		let visible_span = span_diff.min(40 - offset);
+
+		let mut pointer = String::new();
+		pointer.push('^');
+		if visible_span > 1 {
+			pointer.push_str(&"~".repeat(visible_span - 2));
+			pointer.push('^');
+		}
+
+		format!("{}{}", padding, pointer)
+	}
+
+	fn get_line_col(input: &str, offset: usize) -> (usize, usize) {
+		let mut line = 0;
+		let mut col = 0;
+
+		for (i, ch) in input.chars().enumerate() {
+			if i == offset {
+				break;
+			}
+			if ch == '\n' {
+				line += 1;
+				col = 0;
+			} else {
+				col += 1;
+			}
+		}
+
+		(line, col)
+	}
+
+	fn generate_window(input: &str, error_line: usize, error_col: usize) -> (String, usize) {
+		let window_width = 40;
+		let lines: Vec<&str> = input.lines().collect();
+
+		if lines.len() <= error_line {
+			return ("Error line out of range".into(), 0);
+		}
+
+		let offending_line = lines[error_line];
+		let line_len = offending_line.len();
+
+		let start = if error_col > 10 {
+			error_col.saturating_sub(10)
+		} else {
+			0
+		};
+		let end = (start + window_width).min(line_len);
+
+		(offending_line[start..end].to_string(), error_col - start)
+	}
+}
+
+impl fmt::Display for ShellErrorFull {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match &self.error {
+			ShellError::IoError(msg, span) => {
+				writeln!(f, "I/O Error: {}", msg)?;
+				self.format_error_context(*span);
+				Ok(())
+			}
+			ShellError::ExecFailed(msg, code, span) => {
+				writeln!(
+					f,
+					"Execution failed (exit code {}): {}",
+					code,
+					msg
+				)?;
+				self.format_error_context(*span);
+				Ok(())
+			}
+			ShellError::ParsingError(parse_err) => {
+				writeln!(f, "Parsing error: {}", parse_err.msg)?;
+				self.format_error_context(parse_err.span);
+				Ok(())
+			}
+			ShellError::InvalidSyntax(msg, span) => {
+				writeln!(f, "Syntax Error: {}", msg)?;
+				self.format_error_context(*span);
+				Ok(())
+			}
+			ShellError::CommandNotFound(msg, span) => {
+				writeln!(f, "Command not found: {}", msg)?;
+				self.format_error_context(*span);
+				Ok(())
+			}
+			ShellError::InternalError(msg, span) => {
+				writeln!(f, "Internal Error: {}", msg)?;
+				self.format_error_context(*span);
+				Ok(())
+			}
 		}
 	}
 }
@@ -126,6 +255,7 @@ impl<'a> EventLoop<'a> {
 			match event {
 				ShellEvent::Prompt => {
 					// Trigger the prompt logic.
+					info!("Received prompt signal");
 					prompt::prompt(self.inbox(),self.shellenv).await;
 				}
 				ShellEvent::Exit(exit_code) => {
@@ -139,16 +269,20 @@ impl<'a> EventLoop<'a> {
 					match walker.start_walk() {
 						Ok(code) => {
 							info!("Last exit status: {:?}",code);
-							if let RshExitStatus::Fail { code, cmd } = code {
+							if let RshExitStatus::Fail { code, cmd, span } = code {
 								let stderr = unsafe { BorrowedFd::borrow_raw(2) };
 								if code == 127 {
 									if let Some(cmd) = cmd {
-										write(stderr, format!("Command not found: {}\n",cmd).as_bytes()).unwrap();
+										let err = ShellErrorFull::from(self.shellenv.get_last_input(),ShellError::from_no_cmd(&cmd, span));
+										write(stderr, format!("{}",err).as_bytes()).unwrap();
 									}
 								};
 							};
 						},
 						Err(e) => self.inbox().send(ShellEvent::CatchError(e)).await.unwrap()
+					}
+					if self.shellenv.is_interactive() {
+						self.inbox().send(ShellEvent::Prompt).await.unwrap()
 					}
 				}
 				ShellEvent::SubprocessExited(pid, exit_code) => {
@@ -161,11 +295,13 @@ impl<'a> EventLoop<'a> {
 				}
 				ShellEvent::CatchError(err) => {
 					// Handle errors, exiting if fatal.
-					if err.is_fatal() {
-						error!("Fatal: {}", err);
+					let fatal = err.is_fatal();
+					let error_display = ShellErrorFull::from(self.shellenv.get_last_input(), err);
+						if fatal {
+						error!("Fatal: {}", error_display);
 						std::process::exit(1);
 					} else {
-						println!("{}",err);
+						println!("{}",error_display);
 					}
 				}
 			}
@@ -221,53 +357,53 @@ impl SignalListener {
 		let sigusr1 = &mut self.sigusr1;
 		let sigusr2 = &mut self.sigusr2;
 
-			loop {
-				tokio::select! {
-					//_ = sigint.recv() => {
-					//self.outbox.send(ShellEvent::Signal(Signals::SIGINT)).await.unwrap();
-					// Handle SIGINT
-					//}
-					_ = sigio.recv() => {
-						self.outbox.send(ShellEvent::Signal(Signals::SIGIO)).await.unwrap();
-						// Handle SIGIO
-					}
-					_ = sigpipe.recv() => {
-						self.outbox.send(ShellEvent::Signal(Signals::SIGPIPE)).await.unwrap();
-						// Handle SIGPIPE
-					}
-					_ = sigtstp.recv() => {
-						self.outbox.send(ShellEvent::Signal(Signals::SIGTSTP)).await.unwrap();
-						// Handle SIGPIPE
-					}
-					_ = sigquit.recv() => {
-						self.outbox.send(ShellEvent::Signal(Signals::SIGQUIT)).await.unwrap();
-						// Handle SIGQUIT
-					}
-					_ = sigterm.recv() => {
-						self.outbox.send(ShellEvent::Signal(Signals::SIGTERM)).await.unwrap();
-						// Handle SIGTERM
-					}
-					_ = sigchild.recv() => {
-						self.outbox.send(ShellEvent::Signal(Signals::SIGCHLD)).await.unwrap();
-						// Handle SIGCHLD
-					}
-					_ = sighup.recv() => {
-						self.outbox.send(ShellEvent::Signal(Signals::SIGHUP)).await.unwrap();
-						// Handle SIGHUP
-					}
-					_ = sigwinch.recv() => {
-						self.outbox.send(ShellEvent::Signal(Signals::SIGWINCH)).await.unwrap();
-						// Handle SIGWINCH
-					}
-					_ = sigusr1.recv() => {
-						self.outbox.send(ShellEvent::Signal(Signals::SIGUSR1)).await.unwrap();
-						// Handle SIGUSR1
-					}
-					_ = sigusr2.recv() => {
-						self.outbox.send(ShellEvent::Signal(Signals::SIGUSR2)).await.unwrap();
-						// Handle SIGUSR2
-					}
+		loop {
+			tokio::select! {
+				//_ = sigint.recv() => {
+				//self.outbox.send(ShellEvent::Signal(Signals::SIGINT)).await.unwrap();
+				// Handle SIGINT
+				//}
+				_ = sigio.recv() => {
+					self.outbox.send(ShellEvent::Signal(Signals::SIGIO)).await.unwrap();
+					// Handle SIGIO
+				}
+				_ = sigpipe.recv() => {
+					self.outbox.send(ShellEvent::Signal(Signals::SIGPIPE)).await.unwrap();
+					// Handle SIGPIPE
+				}
+				_ = sigtstp.recv() => {
+					self.outbox.send(ShellEvent::Signal(Signals::SIGTSTP)).await.unwrap();
+					// Handle SIGPIPE
+				}
+				_ = sigquit.recv() => {
+					self.outbox.send(ShellEvent::Signal(Signals::SIGQUIT)).await.unwrap();
+					// Handle SIGQUIT
+				}
+				_ = sigterm.recv() => {
+					self.outbox.send(ShellEvent::Signal(Signals::SIGTERM)).await.unwrap();
+					// Handle SIGTERM
+				}
+				_ = sigchild.recv() => {
+					self.outbox.send(ShellEvent::Signal(Signals::SIGCHLD)).await.unwrap();
+					// Handle SIGCHLD
+				}
+				_ = sighup.recv() => {
+					self.outbox.send(ShellEvent::Signal(Signals::SIGHUP)).await.unwrap();
+					// Handle SIGHUP
+				}
+				_ = sigwinch.recv() => {
+					self.outbox.send(ShellEvent::Signal(Signals::SIGWINCH)).await.unwrap();
+					// Handle SIGWINCH
+				}
+				_ = sigusr1.recv() => {
+					self.outbox.send(ShellEvent::Signal(Signals::SIGUSR1)).await.unwrap();
+					// Handle SIGUSR1
+				}
+				_ = sigusr2.recv() => {
+					self.outbox.send(ShellEvent::Signal(Signals::SIGUSR2)).await.unwrap();
+					// Handle SIGUSR2
 				}
 			}
+		}
 	}
 }
