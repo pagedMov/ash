@@ -701,7 +701,9 @@ impl<'a> NodeWalker<'a> {
 mod tests {
 	use std::{fs, io::Read, path::Path};
 
-use interp::parse;
+use interp::parse::{self, ParseErr};
+
+use crate::event::ShellErrorFull;
 
 use super::*;
 
@@ -827,5 +829,461 @@ use super::*;
 		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
 			assert_ne!(code,127);
 		}
+	}
+	#[test]
+	fn basic_command() {
+			let input = "echo hello";
+			let mut shellenv = ShellEnv::new(false, true);
+			let state = parse::descend(input, &shellenv);
+			if let Err(e) = state {
+					let err = ShellErrorFull::from("Basic command test case failed".into(), ShellError::from_parse(e));
+					panic!("{}", err);
+			}
+			let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
+			let result = walker.start_walk();
+			if !matches!(result, Ok(RshExitStatus::Success { .. })) {
+					let err = ShellErrorFull::from("Execution failed for basic command test case".into(), ShellError::from_execf("Execution error", 1, Span::from(0, input.len())));
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn basic_if_statement() {
+			let input = "if true; then echo hello; fi";
+			let mut shellenv = ShellEnv::new(false, true);
+			let state = parse::descend(input, &shellenv);
+			if let Err(e) = state {
+					let err = ShellErrorFull::from("`if` statement test case failed".into(), ShellError::from_parse(e));
+					panic!("{}", err);
+			}
+			let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
+			let result = walker.start_walk();
+			if !matches!(result, Ok(RshExitStatus::Success { .. })) {
+					let err = ShellErrorFull::from("Execution failed for `if` statement test case".into(), ShellError::from_execf("Execution error", 1, Span::from(0, input.len())));
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn pipeline_test() {
+			let input = "echo hello | grep hello";
+			let mut shellenv = ShellEnv::new(false, true);
+			let state = parse::descend(input, &shellenv);
+			if let Err(e) = state {
+					let err = ShellErrorFull::from("Pipeline test case failed".into(), ShellError::from_parse(e));
+					panic!("{}", err);
+			}
+			let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
+			let result = walker.start_walk();
+			if !matches!(result, Ok(RshExitStatus::Success { .. })) {
+					let err = ShellErrorFull::from("Execution failed for pipeline test case".into(), ShellError::from_execf("Execution error", 1, Span::from(0, input.len())));
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn missing_fi_test() {
+			let input = "if true; then echo hello";
+			let mut shellenv = ShellEnv::new(false, true);
+			let state = parse::descend(input, &shellenv);
+			if let Err(e) = state {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from("Unexpected error type for missing `fi` test case".into(), ShellError::from_parse(e));
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from("Expected parsing error for missing `fi` test case".into(), ShellError::from_internal("Parsing unexpectedly succeeded", Span::from(0, input.len())));
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn missing_then_test() {
+			let input = "if true; echo hello; fi";
+			let mut shellenv = ShellEnv::new(false, true);
+			let state = parse::descend(input, &shellenv);
+			if let Err(e) = state {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from("Unexpected error type for missing `then` test case".into(), ShellError::from_parse(e));
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from("Expected parsing error for missing `then` test case".into(), ShellError::from_internal("Parsing unexpectedly succeeded", Span::from(0, input.len())));
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn else_before_elif_test() {
+			let input = "if true; else echo; elif true; then echo; fi";
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from("Unexpected error type for `else` before `elif` test case".into(), ShellError::from_parse(e));
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from("Expected parsing error for `else` before `elif` test case".into(), ShellError::from_internal("Parsing unexpectedly succeeded", Span::from(0, input.len())));
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn if_no_body_test() {
+			let input = "if true; fi";
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from("Unexpected error type for `if` with no body test case".into(), ShellError::from_parse(e));
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from("Expected parsing error for `if` with no body test case".into(), ShellError::from_internal("Parsing unexpectedly succeeded", Span::from(0, input.len())));
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn while_missing_done_test() {
+			let input = "while true; do echo hello";
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from("Unexpected error type for missing `done` in `while` loop test case".into(), ShellError::from_parse(e));
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from("Expected parsing error for missing `done` in `while` loop test case".into(), ShellError::from_internal("Parsing unexpectedly succeeded", Span::from(0, input.len())));
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn while_missing_do_test() {
+			let input = "while true; echo hello; done";
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from("Unexpected error type for missing `do` in `while` loop test case".into(), ShellError::from_parse(e));
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from("Expected parsing error for missing `do` in `while` loop test case".into(), ShellError::from_internal("Parsing unexpectedly succeeded", Span::from(0, input.len())));
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn until_missing_done_test() {
+			let input = "until true; do echo hello";
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from("Unexpected error type for missing `done` in `until` loop test case".into(), ShellError::from_parse(e));
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from("Expected parsing error for missing `done` in `until` loop test case".into(), ShellError::from_internal("Parsing unexpectedly succeeded", Span::from(0, input.len())));
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn for_basic_test() {
+			let input = "for i in 1 2 3; do echo $i; done";
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					let err = ShellErrorFull::from(
+							"Parsing failed for basic `for` loop".into(),
+							ShellError::from_parse(e),
+					);
+					panic!("{}", err);
+			}
+
+			let state = result.unwrap();
+			if let NdType::Root { deck } = state.ast.nd_type {
+					assert_eq!(deck.len(), 1, "Unexpected number of nodes in AST");
+					if let NdType::For { loop_vars, loop_arr, loop_body } = &deck.front().unwrap().nd_type {
+							assert_eq!(loop_vars.len(), 1, "Expected one loop variable");
+							assert_eq!(loop_vars[0].text(), "i", "Loop variable mismatch");
+							assert_eq!(loop_arr.len(), 3, "Expected three loop array elements");
+							assert_eq!(loop_body.span.start, 16, "Unexpected body span");
+					} else {
+							let err = ShellErrorFull::from(
+									"Expected `For` node in AST".into(),
+									ShellError::from_internal("Parsing produced unexpected node type".into(), Span::from(0, input.len())),
+							);
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from(
+							"Unexpected AST root type".into(),
+							ShellError::from_internal("AST root type is not `Root`".into(), Span::from(0, input.len())),
+					);
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn for_missing_done_test() {
+			let input = "for i in 1 2 3; do echo $i";
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from(
+									"Unexpected error type for missing `done` in `for` loop".into(),
+									ShellError::from_parse(e),
+							);
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from(
+							"Expected parsing error for missing `done` in `for` loop".into(),
+							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
+					);
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn for_missing_in_test() {
+			let input = "for i 1 2 3; do echo $i; done";
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from(
+									"Unexpected error type for missing `in` in `for` loop".into(),
+									ShellError::from_parse(e),
+							);
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from(
+							"Expected parsing error for missing `in` in `for` loop".into(),
+							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
+					);
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn for_no_loop_vars_test() {
+			let input = "for in 1 2 3; do echo $i; done";
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from(
+									"Unexpected error type for missing loop variables in `for` loop".into(),
+									ShellError::from_parse(e),
+							);
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from(
+							"Expected parsing error for missing loop variables in `for` loop".into(),
+							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
+					);
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn for_no_do_test() {
+			let input = "for i in 1 2 3; echo $i; done";
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from(
+									"Unexpected error type for missing `do` in `for` loop".into(),
+									ShellError::from_parse(e),
+							);
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from(
+							"Expected parsing error for missing `do` in `for` loop".into(),
+							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
+					);
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn case_basic_test() {
+			let input = r#"
+					case $var in
+							option1)
+									echo "Option 1"
+									;;
+							option2)
+									echo "Option 2"
+									;;
+					esac
+			"#;
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					let err = ShellErrorFull::from(
+							"Parsing failed for basic `case` statement".into(),
+							ShellError::from_parse(e),
+					);
+					panic!("{}", err);
+			}
+
+			let state = result.unwrap();
+			if let NdType::Root { deck } = state.ast.nd_type {
+					assert_eq!(deck.len(), 1, "Unexpected number of nodes in AST");
+					if let NdType::Case { input_var, cases } = &deck.front().unwrap().nd_type {
+							assert_eq!(input_var.text(), "$var", "Unexpected input variable");
+							assert_eq!(cases.len(), 2, "Expected two case branches");
+							assert!(cases.contains_key("option1"), "Missing case branch: option1");
+							assert!(cases.contains_key("option2"), "Missing case branch: option2");
+					} else {
+							let err = ShellErrorFull::from(
+									"Expected `Case` node in AST".into(),
+									ShellError::from_internal("Parsing produced unexpected node type".into(), Span::from(0, input.len())),
+							);
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from(
+							"Unexpected AST root type".into(),
+							ShellError::from_internal("AST root type is not `Root`".into(), Span::from(0, input.len())),
+					);
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn case_missing_esac_test() {
+			let input = r#"
+					case $var in
+							option1)
+									echo "Option 1"
+									;;
+			"#;
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from(
+									"Unexpected error type for missing `esac` in `case` statement".into(),
+									ShellError::from_parse(e),
+							);
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from(
+							"Expected parsing error for missing `esac` in `case` statement".into(),
+							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
+					);
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn case_missing_in_test() {
+			let input = r#"
+					case $var
+							option1)
+									echo "Option 1"
+									;;
+					esac
+			"#;
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from(
+									"Unexpected error type for missing `in` in `case` statement".into(),
+									ShellError::from_parse(e),
+							);
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from(
+							"Expected parsing error for missing `in` in `case` statement".into(),
+							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
+					);
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn case_missing_pattern_test() {
+			let input = r#"
+					case $var in
+							)
+									echo "No pattern"
+									;;
+					esac
+			"#;
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from(
+									"Unexpected error type for missing case pattern in `case` statement".into(),
+									ShellError::from_parse(e),
+							);
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from(
+							"Expected parsing error for missing case pattern in `case` statement".into(),
+							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
+					);
+					panic!("{}", err);
+			}
+	}
+
+	#[test]
+	fn case_no_branches_test() {
+			let input = r#"
+					case $var in
+					esac
+			"#;
+			let mut shellenv = ShellEnv::new(false, true);
+
+			let result = parse::descend(input, &shellenv);
+			if let Err(e) = result {
+					if !matches!(e, ParseErr { .. }) {
+							let err = ShellErrorFull::from(
+									"Unexpected error type for `case` statement with no branches".into(),
+									ShellError::from_parse(e),
+							);
+							panic!("{}", err);
+					}
+			} else {
+					let err = ShellErrorFull::from(
+							"Expected parsing error for `case` statement with no branches".into(),
+							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
+					);
+					panic!("{}", err);
+			}
 	}
 }
