@@ -1,7 +1,7 @@
 use crate::interp::{parse::Span, token::{Tk, WdFlags, WordDesc, BUILTINS, CMDSEP, KEYWORDS, REGEX, WHITESPACE}};
 use libc::STDERR_FILENO;
 use log::{debug,trace};
-use std::{collections::VecDeque, os::fd::{AsFd, BorrowedFd}};
+use std::{collections::VecDeque, os::fd::BorrowedFd};
 
 use super::parse::ParseErr;
 

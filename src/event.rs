@@ -5,7 +5,6 @@ use nix::unistd::write;
 use tokio::sync::mpsc;
 use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};
-use thiserror::Error;
 
 use crate::execute::RshExitStatus;
 use crate::interp::parse::{Node, ParseErr, Span};
@@ -53,79 +52,134 @@ impl ShellError {
 	}
 }
 
+/// A custom error type for the shell program that provides detailed error context.
+/// This struct encapsulates the original input and the error, and offers methods
+/// to format the error context for more informative output.
 pub struct ShellErrorFull {
-	input: String,
-	error: ShellError,
+    /// The original input string that led to the error.
+    input: String,
+    /// The shell error encountered during execution.
+    error: ShellError,
 }
 
 impl ShellErrorFull {
-	pub fn from(input: String, error: ShellError) -> Self {
-		Self { input, error }
-	}
-	fn format_error_context(&self, span: Span) {
-		let (line, col) = Self::get_line_col(&self.input, span.start);
-		let (window, window_offset) = Self::generate_window(&self.input, line, col);
-		let span_diff = span.end - span.start;
-		let pointer = Self::get_pointer(span_diff, window_offset);
+    /// Creates a new `ShellErrorFull` instance from the given input and error.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The original input string that caused the error.
+    /// * `error` - The `ShellError` encountered during execution.
+    ///
+    /// # Returns
+    ///
+    /// A `ShellErrorFull` instance encapsulating the input and error.
+    pub fn from(input: String, error: ShellError) -> Self {
+        Self { input, error }
+    }
 
-		println!("{};{}:",line + 1, col + 1);
-		println!("{}",window);
-		println!("{}",pointer);
-	}
+    /// Formats and prints the error context, including the line, column, offending input,
+    /// and a pointer indicating the error location.
+    ///
+    /// # Arguments
+    ///
+    /// * `span` - The span indicating the start and end positions of the error in the input.
+    fn format_error_context(&self, span: Span) {
+        let (line, col) = Self::get_line_col(&self.input, span.start);
+        let (window, window_offset) = Self::generate_window(&self.input, line, col);
+        let span_diff = span.end - span.start;
+        let pointer = Self::get_pointer(span_diff, window_offset);
 
-	fn get_pointer(span_diff: usize, offset: usize) -> String {
-		let padding = " ".repeat(offset);
-		let visible_span = span_diff.min(40 - offset);
+        println!("{};{}:", line + 1, col + 1);
+        println!("{}", window);
+        println!("{}", pointer);
+    }
 
-		let mut pointer = String::new();
-		pointer.push('^');
-		if visible_span > 1 {
-			pointer.push_str(&"~".repeat(visible_span - 2));
-			pointer.push('^');
-		}
+    /// Generates a string pointer indicating the location of the error in the input.
+    /// This pointer is composed of a caret (^) and tildes (~) to mark the span.
+    ///
+    /// # Arguments
+    ///
+    /// * `span_diff` - The length of the error span.
+    /// * `offset` - The offset position of the error within the window.
+    ///
+    /// # Returns
+    ///
+    /// A string representing the pointer to the error location.
+    fn get_pointer(span_diff: usize, offset: usize) -> String {
+        let padding = " ".repeat(offset);
+        let visible_span = span_diff.min(40 - offset);
 
-		format!("{}{}", padding, pointer)
-	}
+        let mut pointer = String::new();
+        pointer.push('^');
+        if visible_span > 1 {
+            pointer.push_str(&"~".repeat(visible_span - 2));
+            pointer.push('^');
+        }
 
-	fn get_line_col(input: &str, offset: usize) -> (usize, usize) {
-		let mut line = 0;
-		let mut col = 0;
+        format!("{}{}", padding, pointer)
+    }
 
-		for (i, ch) in input.chars().enumerate() {
-			if i == offset {
-				break;
-			}
-			if ch == '\n' {
-				line += 1;
-				col = 0;
-			} else {
-				col += 1;
-			}
-		}
+    /// Determines the line and column number of a given offset within the input string.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The original input string.
+    /// * `offset` - The character offset for which to find the line and column.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing the zero-based line and column numbers.
+    fn get_line_col(input: &str, offset: usize) -> (usize, usize) {
+        let mut line = 0;
+        let mut col = 0;
 
-		(line, col)
-	}
+        for (i, ch) in input.chars().enumerate() {
+            if i == offset {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                col = 0;
+            } else {
+                col += 1;
+            }
+        }
 
-	fn generate_window(input: &str, error_line: usize, error_col: usize) -> (String, usize) {
-		let window_width = 40;
-		let lines: Vec<&str> = input.lines().collect();
+        (line, col)
+    }
 
-		if lines.len() <= error_line {
-			return ("Error line out of range".into(), 0);
-		}
+    /// Generates a window of text surrounding the error location for context.
+    /// The window is centered around the error column, with a maximum width of 40 characters.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The original input string.
+    /// * `error_line` - The zero-based line number of the error.
+    /// * `error_col` - The zero-based column number of the error.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing a string with the window of text and the offset for the error pointer.
+    fn generate_window(input: &str, error_line: usize, error_col: usize) -> (String, usize) {
+        let window_width = 40;
+        let lines: Vec<&str> = input.lines().collect();
 
-		let offending_line = lines[error_line];
-		let line_len = offending_line.len();
+        if lines.len() <= error_line {
+            return ("Error line out of range".into(), 0);
+        }
 
-		let start = if error_col > 10 {
-			error_col.saturating_sub(10)
-		} else {
-			0
-		};
-		let end = (start + window_width).min(line_len);
+        let offending_line = lines[error_line];
+        let line_len = offending_line.len();
 
-		(offending_line[start..end].to_string(), error_col - start)
-	}
+        let start = if error_col > 10 {
+            error_col.saturating_sub(10)
+        } else {
+            0
+        };
+        let end = (start + window_width).min(line_len);
+
+        (offending_line[start..end].to_string(), error_col - start)
+    }
 }
 
 impl fmt::Display for ShellErrorFull {

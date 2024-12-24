@@ -57,7 +57,7 @@ bitflags! {
 		const EXPECT_IN =  0b01000000000000;
 		const IS_PATH =    0b10000000000000;
 	}
-	}
+}
 
 macro_rules! define_patterns {
 	($($name:expr => $pattern:expr),* $(,)?) => {{

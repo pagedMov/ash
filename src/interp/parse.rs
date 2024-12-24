@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
+use bitflags::bitflags;
 use once_cell::sync::Lazy;
 use log::{error,debug,info,trace};
-use thiserror::Error;
 use std::mem::take;
 
 use crate::event::ShellError;
@@ -9,6 +9,13 @@ use crate::shellenv::ShellEnv;
 use crate::interp::token::{tokenize, Tk, TkType};
 
 use super::token::WdFlags;
+
+bitflags! {
+	#[derive(Debug,Clone,PartialEq)]
+	pub struct NdFlags: u32 {
+		const COMBINE_OUT = 0b00000001;
+	}
+}
 
 pub static EXPECT: Lazy<HashMap<TkType, Vec<TkType>>> = Lazy::new(|| {
 	let mut m = HashMap::new();
@@ -105,14 +112,23 @@ pub struct Conditional {
 #[derive(Debug,Clone,PartialEq)]
 pub struct Node {
 	pub nd_type: NdType,
-	pub span: Span
+	pub span: Span,
+	pub flags: NdFlags
 }
 
 impl Node {
 	pub fn from(deck: VecDeque<Node>,span: Span) -> Self {
 		Self {
 			nd_type: NdType::Root { deck },
-			span
+			span,
+			flags: NdFlags::empty()
+		}
+	}
+	pub fn with_flags(&mut self,flags: NdFlags) -> Self {
+		Self {
+			nd_type: self.nd_type.clone(),
+			span: self.span,
+			flags
 		}
 	}
 	pub fn span(&self) -> Span {
@@ -124,7 +140,8 @@ impl Node {
 	pub fn set_span(&self,span: Span) -> Self {
 		Self {
 			nd_type: self.nd_type.clone(),
-			span
+			span,
+			flags: NdFlags::empty()
 		}
 	}
 	pub fn get_argv(&self) -> Result<Vec<Tk>,ShellError> {
@@ -267,7 +284,8 @@ pub fn descend<'a>(input: &'a str, shellenv: &'a ShellEnv) -> Result<ParseState<
 		tokens: VecDeque::new(),
 		ast: Node {
 			nd_type: NdType::Root { deck: VecDeque::new() },
-			span: Span::from(0,input.len())
+			span: Span::from(0,input.len()),
+			flags: NdFlags::empty()
 		}
 	};
 
@@ -305,7 +323,8 @@ pub fn get_tree(ctx: DescentContext) -> Result<Node, ParseErr> {
 	Ok(
 		Node {
 			nd_type: NdType::Root { deck: ctx.root },
-			span
+			span,
+			flags: NdFlags::empty()
 		}
 	)
 }
@@ -425,11 +444,11 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> Result<DescentContex
 			Cmdsep | LogicAnd | LogicOr | Pipe | PipeBoth => {
 				info!("Found operator token: {:?}, preserving as node", tk.class());
 				match tk.class() {
-					Cmdsep => ctx.attach_node(Node { nd_type: NdType::Cmdsep, span: tk.span() }),
-					LogicAnd => ctx.attach_node(Node { nd_type: NdType::And, span: tk.span() }),
-					LogicOr => ctx.attach_node(Node { nd_type: NdType::Or, span: tk.span() }),
-					Pipe => ctx.attach_node(Node { nd_type: NdType::Pipe, span: tk.span() }),
-					PipeBoth => ctx.attach_node(Node { nd_type: NdType::PipeBoth, span: tk.span() }),
+					Cmdsep => ctx.attach_node(Node { nd_type: NdType::Cmdsep, span: tk.span(), flags: NdFlags::empty() }),
+					LogicAnd => ctx.attach_node(Node { nd_type: NdType::And, span: tk.span(), flags: NdFlags::empty() }),
+					LogicOr => ctx.attach_node(Node { nd_type: NdType::Or, span: tk.span(), flags: NdFlags::empty() }),
+					Pipe => ctx.attach_node(Node { nd_type: NdType::Pipe, span: tk.span(), flags: NdFlags::empty() }),
+					PipeBoth => ctx.attach_node(Node { nd_type: NdType::PipeBoth, span: tk.span(), flags: NdFlags::empty() }.with_flags(NdFlags::COMBINE_OUT)),
 					_ => unreachable!(),
 				}
 			}
@@ -477,7 +496,8 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, Pars
 						let right = Box::new(right);
 						let pipeline = Node {
 							nd_type: NdType::Pipeline { left, right, both },
-							span: Span::from(0,0)
+							span: Span::from(0,0),
+							flags: NdFlags::empty()
 						};
 						buffer.push_back(pipeline);
 					} else {
@@ -513,7 +533,8 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, Pars
 						let op = Box::new(node);
 						let chain = Node {
 							nd_type: NdType::Chain { left, right, op },
-							span: Span::from(0,0)
+							span: Span::from(0,0),
+							flags: NdFlags::empty()
 						};
 						buffer.push_back(chain);
 					} else {
@@ -555,8 +576,8 @@ fn parse_and_attach(mut tokens: VecDeque<Tk>, mut root: VecDeque<Node>) -> Resul
 }
 
 fn get_conditional(cond_root: VecDeque<Node>, cond_span: Span, body_root: VecDeque<Node>, body_span: Span) -> Conditional {
-	let condition = Box::new(Node { nd_type: NdType::Root { deck: cond_root }, span: cond_span });
-	let body = Box::new(Node { nd_type: NdType::Root { deck: body_root }, span: body_span });
+	let condition = Box::new(Node { nd_type: NdType::Root { deck: cond_root }, span: cond_span, flags: NdFlags::empty() });
+	let body = Box::new(Node { nd_type: NdType::Root { deck: body_root }, span: body_span, flags: NdFlags::empty() });
 	Conditional { condition, body }
 }
 
@@ -715,6 +736,7 @@ pub fn build_if(mut ctx: DescentContext) -> Result<DescentContext, ParseErr> {
 	let node = Node {
 		nd_type: NdType::If { cond_blocks: logic_blocks, else_block },
 		span,
+		flags: NdFlags::empty()
 	};
 	debug!("created node: {:#?}",node);
 	ctx.attach_node(node);
@@ -819,7 +841,8 @@ pub fn build_for(mut ctx: DescentContext) -> Result<DescentContext, ParseErr> {
 	let loop_body = Box::new(Node::from(body_root,body_span));
 	let node = Node {
 		nd_type: NdType::For { loop_vars, loop_arr, loop_body },
-		span
+		span,
+		flags: NdFlags::empty()
 	};
 	ctx.attach_node(node);
 	Ok(ctx)
@@ -908,7 +931,8 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> Result<DescentCon
 
 	let node = Node {
 		nd_type: NdType::Loop { condition: loop_condition, logic },
-		span
+		span,
+		flags: NdFlags::empty()
 	};
 	ctx.attach_node(node);
 	Ok(ctx)
@@ -1066,6 +1090,7 @@ pub fn build_case(mut ctx: DescentContext) -> Result<DescentContext, ParseErr> {
 	let node = Node {
 		nd_type: NdType::Case { input_var, cases },
 		span,
+		flags: NdFlags::empty()
 	};
 	ctx.attach_node(node);
 	Ok(ctx)
@@ -1160,7 +1185,8 @@ pub fn build_select(mut ctx: DescentContext) -> Result<DescentContext, ParseErr>
 	let body = Box::new(Node::from(body_root,body_span));
 	let node = Node {
 		nd_type: NdType::Select { select_var, opts, body },
-		span
+		span,
+		flags: NdFlags::empty()
 	};
 	ctx.attach_node(node);
 	Ok(ctx)
@@ -1170,8 +1196,9 @@ pub fn build_subshell(mut ctx: DescentContext) -> Result<DescentContext, ParseEr
 	let token = ctx.next_tk().unwrap();
 	let span = token.span();
 	let node = Node {
-			nd_type: NdType::Subshell { body: token.text().into() },
-			span
+		nd_type: NdType::Subshell { body: token.text().into() },
+		span,
+		flags: NdFlags::empty()
 	};
 	ctx.attach_node(node);
 	Ok(ctx)
@@ -1191,7 +1218,8 @@ pub fn build_assignment(mut ctx: DescentContext) -> Result<DescentContext, Parse
 				name: var.to_string(),
 				value: Some(val.to_string()),
 			},
-			span
+			span,
+			flags: NdFlags::empty()
 		};
 		ctx.attach_node(node);
 		Ok(ctx)
@@ -1273,12 +1301,14 @@ pub fn build_command(mut ctx: DescentContext) -> Result<DescentContext, ParseErr
 			Node {
 				nd_type: NdType::Command { argv, redirs },
 				span,
+				flags: NdFlags::empty()
 			}
 		}
 		CmdType::Builtin => {
 			Node {
 				nd_type: NdType::Builtin { argv, redirs },
 				span,
+				flags: NdFlags::empty()
 			}
 		}
 	};

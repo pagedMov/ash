@@ -23,48 +23,91 @@ pub const GLOB_OPTS: MatchOptions = MatchOptions {
 	require_literal_leading_dot: false
 };
 
-pub struct SavedFDs {
-	saved_stdin: RawFd,
-	saved_stdout: RawFd,
-	saved_stderr: RawFd,
+pub struct ProcIO {
+	pub stdin: Option<RawFd>,
+	pub stdout: Option<RawFd>,
+	pub stderr: Option<RawFd>,
+	pub backup: HashMap<RawFd,RawFd>
 }
 
-impl SavedFDs {
-	pub fn new(stdin: RawFd, stdout: RawFd, stderr: RawFd, span: Span) -> Result<Self, ShellError> {
-			let saved = Self {
-					saved_stdin: dup(stdin).map_err(|e| ShellError::from_io(&e.to_string(), span))?,
-					saved_stdout: dup(stdout).map_err(|e| ShellError::from_io(&e.to_string(), span))?,
-					saved_stderr: dup(stderr).map_err(|e| ShellError::from_io(&e.to_string(), span))?,
-			};
-			Ok(saved)
+impl ProcIO {
+	pub fn new() -> Self {
+		Self { stdin: None, stdout: None, stderr: None, backup: HashMap::new() }
 	}
-	pub fn restore(&mut self, stdin: RawFd, stdout: RawFd, stderr: RawFd, span: Span) -> Result<(), ShellError> {
-			if self.saved_stdin >= 0 {
-					dup2(self.saved_stdin, stdin).map_err(|e| ShellError::from_io(&e.to_string(), span))?;
-			}
-			if self.saved_stdout >= 0 {
-					dup2(self.saved_stdout, stdout).map_err(|e| ShellError::from_io(&e.to_string(), span))?;
-			}
-			if self.saved_stderr >= 0 {
-					dup2(self.saved_stderr, stderr).map_err(|e| ShellError::from_io(&e.to_string(), span))?;
-			}
-			self.close_all();
-			Ok(())
+	pub fn from(stdin: Option<RawFd>, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Self {
+		Self { stdin, stdout, stderr, backup: HashMap::new() }
 	}
-	fn close_all(&mut self) {
-			if self.saved_stdin >= 0 {
-					close(self.saved_stdin).expect("failed to close stdin");
-					self.saved_stdin = -1;
-			}
-			if self.saved_stdout >= 0 {
-					close(self.saved_stdout).expect("failed to close stdout");
-					self.saved_stdout = -1;
-			}
-			if self.saved_stderr >= 0 {
-					close(self.saved_stderr).expect("failed to close stderr");
-					self.saved_stderr = -1;
-			}
+	pub fn backup_fildescs(&mut self) -> Result<(), ShellError> {
+		let mut backup = HashMap::new();
+		// Get duped file descriptors
+		let dup_in = dup(0).map_err(|e| ShellError::from_io(&e.to_string(), Span::new()))?;
+		let dup_out = dup(1).map_err(|e| ShellError::from_io(&e.to_string(), Span::new()))?;
+		let dup_err = dup(2).map_err(|e| ShellError::from_io(&e.to_string(), Span::new()))?;
+		// Store them in a hashmap
+		backup.insert(0,dup_in);
+		backup.insert(1,dup_out);
+		backup.insert(2,dup_err);
+		self.backup = backup;
+		Ok(())
 	}
+	pub fn restore_fildescs(&mut self) -> Result<(), ShellError> {
+		// Get duped file descriptors from hashmap
+		if !self.backup.is_empty() {
+			// Dup2 to restore file descriptors
+			if let Some(saved_in) = self.backup.get(&0) {
+					dup2(*saved_in, 0).map_err(|e| ShellError::from_io(&e.to_string(), Span::new()))?;
+					close(*saved_in).unwrap();
+					self.backup.remove(&0);
+			}
+			if let Some(saved_out) = self.backup.get(&1) {
+					dup2(*saved_out, 1).map_err(|e| ShellError::from_io(&e.to_string(), Span::new()))?;
+					close(*saved_out).unwrap();
+					self.backup.remove(&1);
+			}
+			if let Some(saved_err) = self.backup.get(&2) {
+					dup2(*saved_err, 2).map_err(|e| ShellError::from_io(&e.to_string(), Span::new()))?;
+					close(*saved_err).unwrap();
+					self.backup.remove(&2);
+			}
+		}
+		Ok(())
+	}
+	pub fn do_plumbing(&self) -> Result<(), ShellError> {
+		if let Some(err_pipe) = self.stderr {
+			if let Err(err) = dup2(err_pipe, 2) {
+				eprintln!("Failed to duplicate stderr: {}", err);
+				std::process::exit(1);
+			}
+			close(err_pipe)
+				.map_err(|e| ShellError::from_io(format!("failed to close error pipe: {}",e).as_str(), Span::new()))?;
+		}
+		// Redirect stdout
+		if let Some(w_pipe) = self.stdout {
+			if let Err(err) = dup2(w_pipe, 1) {
+				eprintln!("Failed to duplicate stdout: {}", err);
+				std::process::exit(1);
+			}
+			close(w_pipe)
+				.map_err(|e| ShellError::from_io(format!("failed to close error pipe: {}",e).as_str(), Span::new()))?;
+		}
+
+		// Redirect stdin
+		if let Some(r_pipe) = self.stdin {
+			if let Err(err) = dup2(r_pipe, 0) {
+				eprintln!("Failed to duplicate stdin: {}", err);
+				std::process::exit(1);
+			}
+			close(r_pipe)
+				.map_err(|e| ShellError::from_io(format!("failed to close error pipe: {}",e).as_str(), Span::new()))?;
+		}
+		Ok(())
+	}
+}
+
+impl Default for ProcIO {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(PartialEq,Debug)]
@@ -112,7 +155,7 @@ impl<'a> NodeWalker<'a> {
 			nodes = std::mem::take(deck);
 		} else { unreachable!() }
 		while let Some(node) = nodes.pop_front() {
-			exit_status = self.walk(node, None, None, None)?;
+			exit_status = self.walk(node, ProcIO::new())?;
 		}
 		Ok(exit_status)
 	}
@@ -127,22 +170,21 @@ impl<'a> NodeWalker<'a> {
 	/// stdout to.
 	///
 	/// # Outputs: An RshExitStatus or a shell error.
-	fn walk(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
-		debug!("walking over node {:?} with these pipes: {:?},{:?}",node,stdin,stdout);
+	fn walk(&mut self, node: Node, io: ProcIO) -> Result<RshExitStatus,ShellError> {
 		let last_status;
 		match node.nd_type {
-			NdType::Command { ref argv, .. } => {
+			NdType::Command {..} => {
 				trace!("Found command: {:?}",node);
-				last_status = self.handle_command(node, stdin, stdout, stderr)?;
+				last_status = self.handle_command(node, io)?;
 			}
 			NdType::Builtin {..} => {
-				last_status = self.handle_builtin(node, stdin, stdout, stderr)?;
+				last_status = self.handle_builtin(node, io)?;
 			}
 			//NdType::Function { .. } => {
 			//todo!("handle simple commands")
 			//}
 			NdType::Pipeline {..} => {
-				last_status = self.handle_pipeline(node, stdin, stdout, stderr)?;
+				last_status = self.handle_pipeline(node, io)?;
 			}
 			NdType::Chain {..} => {
 				last_status = self.handle_chain(node)?;
@@ -157,10 +199,10 @@ impl<'a> NodeWalker<'a> {
 				last_status = self.handle_loop(node)?;
 			}
 			NdType::Case {..} => {
-				last_status = self.handle_case(node)?;
+				todo!("handle case-in")
 			}
 			NdType::Subshell {..} => {
-				last_status = self.handle_subshell(node,stdin,stdout,stderr)?;
+				last_status = self.handle_subshell(node,io)?;
 			}
 			NdType::FuncDef {..} => {
 				todo!("handle function definition")
@@ -180,7 +222,7 @@ impl<'a> NodeWalker<'a> {
 		let mut last_status = RshExitStatus::new();
 		if let NdType::Root { deck } = node.nd_type {
 			for node in deck {
-				last_status = self.walk(node,None,None,None)?;
+				last_status = self.walk(node, ProcIO::new())?;
 				if let Some(condition) = break_condition {
 					match condition {
 						true => {
@@ -196,24 +238,6 @@ impl<'a> NodeWalker<'a> {
 					}
 				}
 			}
-		} else {
-			return Err(ShellError::from_internal("Entered walk_root() with a non-root node", node.span()))
-		}
-		Ok(last_status)
-	}
-
-	fn handle_case(&mut self, node: Node) -> Result<RshExitStatus, ShellError> {
-		let mut last_status = RshExitStatus::new();
-		if let NdType::Case { input_var, cases } = node.nd_type {
-				for case in cases.keys() {
-						if case == input_var.text() {
-								if let Some(body) = cases.get(case) {
-										last_status = self.walk_root(body.clone(), None)?;
-								}
-						}
-				}
-		} else {
-			return Err(ShellError::from_internal("Entered handle_case() with a non-case node", node.span()))
 		}
 		Ok(last_status)
 	}
@@ -293,7 +317,7 @@ impl<'a> NodeWalker<'a> {
 	}
 
 	fn handle_if(&mut self, node: Node) -> Result<RshExitStatus, ShellError> {
-		let mut last_result = RshExitStatus::new();;
+		let mut last_result = RshExitStatus::new();
 
 		if let NdType::If { mut cond_blocks, else_block } = node.nd_type {
 			while let Some(block) = cond_blocks.pop_front() {
@@ -315,15 +339,15 @@ impl<'a> NodeWalker<'a> {
 		let mut last_status = RshExitStatus::new();
 
 		if let NdType::Chain { left, right, op } = node.nd_type {
-			match self.walk(*left, None, None, None)? {
+			match self.walk(*left, ProcIO::new())? {
 				RshExitStatus::Success {..} => {
 					if let NdType::And = op.nd_type {
-						last_status = self.walk(*right, None, None, None)?;
+						last_status = self.walk(*right, ProcIO::new())?;
 					}
 				}
 				RshExitStatus::Fail {..} => {
 					if let NdType::Or = op.nd_type {
-						last_status = self.walk(*right, None, None, None)?;
+						last_status = self.walk(*right, ProcIO::new())?;
 					}
 				}
 			}
@@ -342,7 +366,7 @@ impl<'a> NodeWalker<'a> {
 		Ok(RshExitStatus::s(span))
 	}
 
-	fn handle_builtin(&mut self, mut node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
+	fn handle_builtin(&mut self, mut node: Node, io: ProcIO) -> Result<RshExitStatus,ShellError> {
 		let argv = node.get_argv()?;
 		let mut expand_buffer = Vec::new();
 		for arg in &argv {
@@ -353,7 +377,7 @@ impl<'a> NodeWalker<'a> {
 			node.nd_type = NdType::Builtin { argv: expand_buffer.into(), redirs }
 		}
 		match argv[0].text() {
-			"echo" => echo(node, stdout, stderr),
+			"echo" => echo(node, io),
 			"source" => source(self.shellenv, node),
 			"cd" => cd(self.shellenv, node),
 			"pwd" => pwd(self.shellenv, node.span()),
@@ -366,7 +390,7 @@ impl<'a> NodeWalker<'a> {
 	fn extract_redirs(&mut self, node: &Node) -> Result<VecDeque<Tk>, ShellError> {
 		match &node.nd_type {
 			NdType::Command { argv: _, redirs } | NdType::Builtin { argv: _, redirs } => {
-				return Ok(redirs.clone())
+				Ok(redirs.clone())
 			}
 			_ => Err(ShellError::from_internal("Called extract_redirs() on a non-command node", node.span()))
 		}
@@ -498,7 +522,7 @@ impl<'a> NodeWalker<'a> {
 			Ok(())
 	}
 
-	fn handle_subshell(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Result<RshExitStatus,ShellError> {
+	fn handle_subshell(&mut self, node: Node, io: ProcIO) -> Result<RshExitStatus,ShellError> {
 		todo!()
 	}
 
@@ -555,7 +579,7 @@ impl<'a> NodeWalker<'a> {
 	/// # Panics
 	///
 	/// This function does not panic.
-	fn handle_pipeline(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
+	fn handle_pipeline(&mut self, node: Node, io: ProcIO) -> Result<RshExitStatus, ShellError> {
 			let (left, right, both) = if let NdType::Pipeline { left, right, both } = &node.nd_type {
 					(*left.clone(), *right.clone(), both)
 			} else {
@@ -576,93 +600,35 @@ impl<'a> NodeWalker<'a> {
 					stderr_left = Some(dup(w_pipe).unwrap());
 			}
 
+			// `left_io` works like this:
+			// 1. takes stdin from the io arg, representing input from a previous command if any
+			// 2. takes the write pipe as stdout
+			// 3. takes the duped stderr fildesc if any
+			let left_io = ProcIO::from(io.stdin,Some(w_pipe), stderr_left);
+			// `right_io` works like this:
+			// 1. takes the read pipe as stdin
+			// 2. takes stdout from the io arg, representing the output to the next command if any
+			// 3. takes stderr from the io arg, representing the error output the the next command if any
+			let right_io = ProcIO::from(Some(r_pipe), io.stdout, io.stderr);
 			// Walk left side of the pipeline
-			let left_status = self.walk(left, stdin, Some(w_pipe), stderr_left);
+			let left_status = self.walk(left, left_io);
 
 			// Walk right side of the pipeline
-			let right_status = self.walk(right, Some(r_pipe), stdout, stderr);
+			let right_status = self.walk(right, right_io);
 
 			// Return status of the last command
 			left_status?;
 			right_status
 	}
 
-	/// Executes a command in a shell environment.
-	///
-	/// This function processes a command node, handles input and output redirections, and executes the command. It uses the `fork` system call to create a child process for executing the command. The function also handles restoring the original file descriptors after the command execution.
-	///
-	/// # Arguments
-	///
-	/// * `node` - The command node containing the arguments and redirections.
-	/// * `stdin` - An optional file descriptor for standard input.
-	/// * `stdout` - An optional file descriptor for standard output.
-	/// * `stderr` - An optional file descriptor for standard error.
-	///
-	/// # Returns
-	///
-	/// * `Result<RshExitStatus, ShellError>` - Returns the exit status of the command.
-	/// * Returns an appropriate `ShellError` if there is an issue with setting up the command or executing it.
-	///
-	/// # Examples
-	///
-	/// ```
-	/// let command_node = Node::new(NdType::Command { ... });
-	/// let stdin = Some(0); // Standard input file descriptor
-	/// let stdout = Some(1); // Standard output file descriptor
-	/// let stderr = Some(2); // Standard error file descriptor
-	/// let result = shell.handle_command(command_node, stdin, stdout, stderr);
-	/// assert!(result.is_ok());
-	/// ```
-	///
-	/// # Notes
-	///
-	/// - The function uses the `fork` system call to create a child process for executing the command.
-	/// - The function handles closing all file descriptors that were opened or duplicated during the command execution.
-	/// - The function uses the `execvpe` function to execute the command with the given arguments and environment variables.
-	/// - The function waits for the child process to finish and returns the exit status of the command.
-	///
-	/// # Errors
-	///
-	/// - Returns `ShellError::from_execf` if there is an issue with forking the process or executing the command.
-	/// - Returns `ShellError::from_io` if there is an issue with setting up the file descriptors.
-	///
-	/// # Safety
-	///
-	/// This function uses unsafe code to call the `fork` system call and to duplicate file descriptors.
-	///
-	/// # Panics
-	///
-	/// This function does not panic.
-	fn handle_command(&mut self, node: Node, stdin: Option<RawFd>, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
+
+	fn handle_command(&mut self, node: Node, mut io: ProcIO) -> Result<RshExitStatus, ShellError> {
 		let argv = self.extract_args(node.get_argv()?);
 		let redirs = self.extract_redirs(&node)?;
 		let span = node.span();
-		let mut saved_fds = SavedFDs::new(0, 1, 2, node.span()).unwrap();
+		io.backup_fildescs()?; // Save original stin, stdout, and stderr
+		io.do_plumbing()?; // Route pipe logic using fildescs
 
-		if let Some(err_pipe) = stderr {
-			if let Err(err) = dup2(err_pipe, 2) {
-				eprintln!("Failed to duplicate stderr: {}", err);
-				std::process::exit(1);
-			}
-			close(err_pipe).unwrap();
-		}
-		// Redirect stdout
-		if let Some(w_pipe) = stdout {
-			if let Err(err) = dup2(w_pipe, 1) {
-				eprintln!("Failed to duplicate stdout: {}", err);
-				std::process::exit(1);
-			}
-			close(w_pipe).unwrap();
-		}
-
-		// Redirect stdin
-		if let Some(r_pipe) = stdin {
-			if let Err(err) = dup2(r_pipe, 0) {
-				eprintln!("Failed to duplicate stdin: {}", err);
-				std::process::exit(1);
-			}
-			close(r_pipe).unwrap();
-		}
 
 		let cmd = Some(argv[0].clone().into_string().unwrap());
 		let command = &argv[0];
@@ -680,7 +646,7 @@ impl<'a> NodeWalker<'a> {
 				std::process::exit(127);
 			}
 			Ok(ForkResult::Parent { child }) => {
-				saved_fds.restore(0, 1, 2, node.span()).unwrap();
+				io.restore_fildescs()?;
 
 				// Wait for the child process to finish
 				match waitpid(child, None) {
@@ -694,596 +660,5 @@ impl<'a> NodeWalker<'a> {
 			}
 			Err(_) => Err(ShellError::from_execf("Fork failed", 1, node.span())),
 		}
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use std::{fs, io::Read, path::Path};
-
-use interp::parse::{self, ParseErr};
-
-use crate::event::ShellErrorFull;
-
-use super::*;
-
-	fn from_file(input: &str) -> String {
-		let mut file = fs::File::open(PathBuf::from(input)).unwrap();
-		let mut buffer = String::new();
-		file.read_to_string(&mut buffer).unwrap();
-		buffer
-	}
-	#[test]
-	fn basic_if_script() {
-		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/basic_if.sh");
-		let mut shellenv = ShellEnv::new(false,true);
-		let state = parse::descend(&input, &shellenv);
-		assert!(state.is_ok());
-		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
-		let result = walker.start_walk();
-		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
-		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
-			assert_ne!(code,127);
-		}
-	}
-	#[test]
-	fn basic_for_script() {
-		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/basic_for.sh");
-		let mut shellenv = ShellEnv::new(false,true);
-		let state = parse::descend(&input, &shellenv);
-		assert!(state.is_ok());
-		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
-		let result = walker.start_walk();
-		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
-		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
-			assert_ne!(code,127);
-		}
-	}
-	#[test]
-	fn basic_case_script() {
-		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/basic_case.sh");
-		let mut shellenv = ShellEnv::new(false,true);
-		let state = parse::descend(&input, &shellenv);
-		assert!(state.is_ok());
-		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
-		let result = walker.start_walk();
-		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
-		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
-			assert_ne!(code,127);
-		}
-	}
-	#[test]
-	fn basic_while_script() {
-		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/basic_while.sh");
-		let mut shellenv = ShellEnv::new(false,true);
-		let state = parse::descend(&input, &shellenv);
-		assert!(state.is_ok());
-		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
-		let result = walker.start_walk();
-		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
-		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
-			assert_ne!(code,127);
-		}
-	}
-	#[test]
-	fn basic_until_script() {
-		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/basic_until.sh");
-		let mut shellenv = ShellEnv::new(false,true);
-		let state = parse::descend(&input, &shellenv);
-		assert!(state.is_ok());
-		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
-		let result = walker.start_walk();
-		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
-		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
-			assert_ne!(code,127);
-		}
-	}
-	#[test]
-	fn basic_commands() {
-		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/basic_commands.sh");
-		let mut shellenv = ShellEnv::new(false,true);
-		let state = parse::descend(&input, &shellenv);
-		assert!(state.is_ok());
-		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
-		let result = walker.start_walk();
-		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
-		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
-			assert_ne!(code,127);
-		}
-	}
-	#[test]
-	fn basic_var_sub() {
-		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/basic_var_sub.sh");
-		let mut shellenv = ShellEnv::new(false,true);
-		let state = parse::descend(&input, &shellenv);
-		assert!(state.is_ok());
-		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
-		let result = walker.start_walk();
-		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
-		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
-			assert_ne!(code,127);
-		}
-	}
-	#[test]
-	fn basic_chain() {
-		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/chain.sh");
-		let mut shellenv = ShellEnv::new(false,true);
-		let state = parse::descend(&input, &shellenv);
-		assert!(state.is_ok());
-		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
-		let result = walker.start_walk();
-		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
-		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
-			assert_ne!(code,127);
-		}
-	}
-	#[test]
-	fn very_nested() {
-		let input = from_file("/home/pagedmov/Coding/projects/rust/rsh/tests/very_nested.sh");
-		let mut shellenv = ShellEnv::new(false,true);
-		let state = parse::descend(&input, &shellenv);
-		assert!(state.is_ok());
-		let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
-		let result = walker.start_walk();
-		assert!(matches!(result,Ok(RshExitStatus::Success {..})));
-		if let Ok(RshExitStatus::Fail { code, cmd: _, span: _ }) = result {
-			assert_ne!(code,127);
-		}
-	}
-	#[test]
-	fn basic_command() {
-			let input = "echo hello";
-			let mut shellenv = ShellEnv::new(false, true);
-			let state = parse::descend(input, &shellenv);
-			if let Err(e) = state {
-					let err = ShellErrorFull::from("Basic command test case failed".into(), ShellError::from_parse(e));
-					panic!("{}", err);
-			}
-			let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
-			let result = walker.start_walk();
-			if !matches!(result, Ok(RshExitStatus::Success { .. })) {
-					let err = ShellErrorFull::from("Execution failed for basic command test case".into(), ShellError::from_execf("Execution error", 1, Span::from(0, input.len())));
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn basic_if_statement() {
-			let input = "if true; then echo hello; fi";
-			let mut shellenv = ShellEnv::new(false, true);
-			let state = parse::descend(input, &shellenv);
-			if let Err(e) = state {
-					let err = ShellErrorFull::from("`if` statement test case failed".into(), ShellError::from_parse(e));
-					panic!("{}", err);
-			}
-			let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
-			let result = walker.start_walk();
-			if !matches!(result, Ok(RshExitStatus::Success { .. })) {
-					let err = ShellErrorFull::from("Execution failed for `if` statement test case".into(), ShellError::from_execf("Execution error", 1, Span::from(0, input.len())));
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn pipeline_test() {
-			let input = "echo hello | grep hello";
-			let mut shellenv = ShellEnv::new(false, true);
-			let state = parse::descend(input, &shellenv);
-			if let Err(e) = state {
-					let err = ShellErrorFull::from("Pipeline test case failed".into(), ShellError::from_parse(e));
-					panic!("{}", err);
-			}
-			let mut walker = NodeWalker::new(state.unwrap().ast, &mut shellenv);
-			let result = walker.start_walk();
-			if !matches!(result, Ok(RshExitStatus::Success { .. })) {
-					let err = ShellErrorFull::from("Execution failed for pipeline test case".into(), ShellError::from_execf("Execution error", 1, Span::from(0, input.len())));
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn missing_fi_test() {
-			let input = "if true; then echo hello";
-			let mut shellenv = ShellEnv::new(false, true);
-			let state = parse::descend(input, &shellenv);
-			if let Err(e) = state {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from("Unexpected error type for missing `fi` test case".into(), ShellError::from_parse(e));
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from("Expected parsing error for missing `fi` test case".into(), ShellError::from_internal("Parsing unexpectedly succeeded", Span::from(0, input.len())));
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn missing_then_test() {
-			let input = "if true; echo hello; fi";
-			let mut shellenv = ShellEnv::new(false, true);
-			let state = parse::descend(input, &shellenv);
-			if let Err(e) = state {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from("Unexpected error type for missing `then` test case".into(), ShellError::from_parse(e));
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from("Expected parsing error for missing `then` test case".into(), ShellError::from_internal("Parsing unexpectedly succeeded", Span::from(0, input.len())));
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn else_before_elif_test() {
-			let input = "if true; else echo; elif true; then echo; fi";
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from("Unexpected error type for `else` before `elif` test case".into(), ShellError::from_parse(e));
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from("Expected parsing error for `else` before `elif` test case".into(), ShellError::from_internal("Parsing unexpectedly succeeded", Span::from(0, input.len())));
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn if_no_body_test() {
-			let input = "if true; fi";
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from("Unexpected error type for `if` with no body test case".into(), ShellError::from_parse(e));
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from("Expected parsing error for `if` with no body test case".into(), ShellError::from_internal("Parsing unexpectedly succeeded", Span::from(0, input.len())));
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn while_missing_done_test() {
-			let input = "while true; do echo hello";
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from("Unexpected error type for missing `done` in `while` loop test case".into(), ShellError::from_parse(e));
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from("Expected parsing error for missing `done` in `while` loop test case".into(), ShellError::from_internal("Parsing unexpectedly succeeded", Span::from(0, input.len())));
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn while_missing_do_test() {
-			let input = "while true; echo hello; done";
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from("Unexpected error type for missing `do` in `while` loop test case".into(), ShellError::from_parse(e));
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from("Expected parsing error for missing `do` in `while` loop test case".into(), ShellError::from_internal("Parsing unexpectedly succeeded", Span::from(0, input.len())));
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn until_missing_done_test() {
-			let input = "until true; do echo hello";
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from("Unexpected error type for missing `done` in `until` loop test case".into(), ShellError::from_parse(e));
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from("Expected parsing error for missing `done` in `until` loop test case".into(), ShellError::from_internal("Parsing unexpectedly succeeded", Span::from(0, input.len())));
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn for_basic_test() {
-			let input = "for i in 1 2 3; do echo $i; done";
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					let err = ShellErrorFull::from(
-							"Parsing failed for basic `for` loop".into(),
-							ShellError::from_parse(e),
-					);
-					panic!("{}", err);
-			}
-
-			let state = result.unwrap();
-			if let NdType::Root { deck } = state.ast.nd_type {
-					assert_eq!(deck.len(), 1, "Unexpected number of nodes in AST");
-					if let NdType::For { loop_vars, loop_arr, loop_body } = &deck.front().unwrap().nd_type {
-							assert_eq!(loop_vars.len(), 1, "Expected one loop variable");
-							assert_eq!(loop_vars[0].text(), "i", "Loop variable mismatch");
-							assert_eq!(loop_arr.len(), 3, "Expected three loop array elements");
-							assert_eq!(loop_body.span.start, 16, "Unexpected body span");
-					} else {
-							let err = ShellErrorFull::from(
-									"Expected `For` node in AST".into(),
-									ShellError::from_internal("Parsing produced unexpected node type".into(), Span::from(0, input.len())),
-							);
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from(
-							"Unexpected AST root type".into(),
-							ShellError::from_internal("AST root type is not `Root`".into(), Span::from(0, input.len())),
-					);
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn for_missing_done_test() {
-			let input = "for i in 1 2 3; do echo $i";
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from(
-									"Unexpected error type for missing `done` in `for` loop".into(),
-									ShellError::from_parse(e),
-							);
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from(
-							"Expected parsing error for missing `done` in `for` loop".into(),
-							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
-					);
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn for_missing_in_test() {
-			let input = "for i 1 2 3; do echo $i; done";
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from(
-									"Unexpected error type for missing `in` in `for` loop".into(),
-									ShellError::from_parse(e),
-							);
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from(
-							"Expected parsing error for missing `in` in `for` loop".into(),
-							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
-					);
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn for_no_loop_vars_test() {
-			let input = "for in 1 2 3; do echo $i; done";
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from(
-									"Unexpected error type for missing loop variables in `for` loop".into(),
-									ShellError::from_parse(e),
-							);
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from(
-							"Expected parsing error for missing loop variables in `for` loop".into(),
-							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
-					);
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn for_no_do_test() {
-			let input = "for i in 1 2 3; echo $i; done";
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from(
-									"Unexpected error type for missing `do` in `for` loop".into(),
-									ShellError::from_parse(e),
-							);
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from(
-							"Expected parsing error for missing `do` in `for` loop".into(),
-							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
-					);
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn case_basic_test() {
-			let input = r#"
-					case $var in
-							option1)
-									echo "Option 1"
-									;;
-							option2)
-									echo "Option 2"
-									;;
-					esac
-			"#;
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					let err = ShellErrorFull::from(
-							"Parsing failed for basic `case` statement".into(),
-							ShellError::from_parse(e),
-					);
-					panic!("{}", err);
-			}
-
-			let state = result.unwrap();
-			if let NdType::Root { deck } = state.ast.nd_type {
-					assert_eq!(deck.len(), 1, "Unexpected number of nodes in AST");
-					if let NdType::Case { input_var, cases } = &deck.front().unwrap().nd_type {
-							assert_eq!(input_var.text(), "$var", "Unexpected input variable");
-							assert_eq!(cases.len(), 2, "Expected two case branches");
-							assert!(cases.contains_key("option1"), "Missing case branch: option1");
-							assert!(cases.contains_key("option2"), "Missing case branch: option2");
-					} else {
-							let err = ShellErrorFull::from(
-									"Expected `Case` node in AST".into(),
-									ShellError::from_internal("Parsing produced unexpected node type".into(), Span::from(0, input.len())),
-							);
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from(
-							"Unexpected AST root type".into(),
-							ShellError::from_internal("AST root type is not `Root`".into(), Span::from(0, input.len())),
-					);
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn case_missing_esac_test() {
-			let input = r#"
-					case $var in
-							option1)
-									echo "Option 1"
-									;;
-			"#;
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from(
-									"Unexpected error type for missing `esac` in `case` statement".into(),
-									ShellError::from_parse(e),
-							);
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from(
-							"Expected parsing error for missing `esac` in `case` statement".into(),
-							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
-					);
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn case_missing_in_test() {
-			let input = r#"
-					case $var
-							option1)
-									echo "Option 1"
-									;;
-					esac
-			"#;
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from(
-									"Unexpected error type for missing `in` in `case` statement".into(),
-									ShellError::from_parse(e),
-							);
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from(
-							"Expected parsing error for missing `in` in `case` statement".into(),
-							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
-					);
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn case_missing_pattern_test() {
-			let input = r#"
-					case $var in
-							)
-									echo "No pattern"
-									;;
-					esac
-			"#;
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from(
-									"Unexpected error type for missing case pattern in `case` statement".into(),
-									ShellError::from_parse(e),
-							);
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from(
-							"Expected parsing error for missing case pattern in `case` statement".into(),
-							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
-					);
-					panic!("{}", err);
-			}
-	}
-
-	#[test]
-	fn case_no_branches_test() {
-			let input = r#"
-					case $var in
-					esac
-			"#;
-			let mut shellenv = ShellEnv::new(false, true);
-
-			let result = parse::descend(input, &shellenv);
-			if let Err(e) = result {
-					if !matches!(e, ParseErr { .. }) {
-							let err = ShellErrorFull::from(
-									"Unexpected error type for `case` statement with no branches".into(),
-									ShellError::from_parse(e),
-							);
-							panic!("{}", err);
-					}
-			} else {
-					let err = ShellErrorFull::from(
-							"Expected parsing error for `case` statement with no branches".into(),
-							ShellError::from_internal("Parsing unexpectedly succeeded".into(), Span::from(0, input.len())),
-					);
-					panic!("{}", err);
-			}
 	}
 }

@@ -1,33 +1,48 @@
 use glob::glob;
 use log::{debug, info, trace};
 use std::collections::VecDeque;
+use crate::event::ShellError;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
-use crate::interp::parse::ParseState;
 use crate::interp::helper::{self,StrExtension};
 use crate::shellenv::ShellEnv;
 
-use super::parse::ParseErr;
-
-pub fn expand(mut state: ParseState) -> Result<ParseState,ParseErr> {
-	let mut buffer = VecDeque::new();
-	while let Some(tk) = state.tokens.pop_front() {
-		for token in expand_token(state.shellenv, tk) {
-			buffer.push_back(token);
-		}
-	}
-	let tokens = std::mem::take(&mut buffer);
-	Ok(ParseState {
-		input: state.input,
-		shellenv: state.shellenv,
-		tokens,
-		ast: state.ast
-	})
-}
+use super::parse::{NdType, Node};
 
 pub fn check_globs(string: String) -> bool {
 	string.chars().any(|t| matches!(t, '?' | '*'))
 }
 
+/// Handles the expansion of command arguments
+/// Replaces a command node's argv field with the resulting expansions
+///
+/// # Arguments
+///
+/// * `shellenv` - The shell environment containing information used for variable expansion
+/// # `node` - The AST node being operated on
+///
+/// # Returns
+///
+/// A result containing either the produced vector of tokens, or a `ShellError` if `node.get_argv()` fails,
+/// or if the method is called with a node that is not a Builtin or a Command.
+pub fn expand_arguments(shellenv: &ShellEnv, node: &mut Node) -> Result<Vec<Tk>,ShellError> {
+	let argv = node.get_argv()?;
+	let mut expand_buffer = Vec::new();
+	for arg in &argv {
+		let mut expanded = expand_token(shellenv, arg.clone());
+		expand_buffer.extend(expanded.drain(..));
+	}
+	match &node.nd_type {
+		NdType::Builtin { argv: _, redirs } => {
+			node.nd_type = NdType::Builtin { argv: expand_buffer.into(), redirs: redirs.clone() };
+			Ok(argv)
+		}
+		NdType::Command { argv: _, redirs }  => {
+			node.nd_type = NdType::Command { argv: expand_buffer.into(), redirs: redirs.clone() };
+			Ok(argv)
+		}
+		_ => Err(ShellError::from_internal("Called expand arguments on a non-command node", node.span()))
+	}
+}
 
 pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 	trace!("expand(): Starting expansion with token: {:?}", token);

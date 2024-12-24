@@ -1,19 +1,19 @@
 use std::collections::VecDeque;
 use std::ffi::{CString, OsStr};
 use std::fs;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::os::fd::RawFd;
-use libc::{getegid, geteuid, STDOUT_FILENO};
+use libc::{getegid, geteuid};
 use log::{debug, info};
 use nix::fcntl::{open,OFlag};
 use nix::sys::stat::Mode;
 use nix::unistd::{access, close, dup, dup2, isatty, write, AccessFlags};
 use nix::NixPath;
 
-use crate::execute::{RshExitStatus, SavedFDs};
+use crate::execute::{ProcIO, RshExitStatus};
 use crate::interp::parse::{Node, Span};
 use crate::interp::{helper, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType};
@@ -520,7 +520,7 @@ pub fn pwd(shellenv: &ShellEnv, span: Span) -> Result<RshExitStatus, ShellError>
 	}
 }
 
-pub fn echo(node: Node, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Result<RshExitStatus, ShellError> {
+pub fn echo(node: Node, mut io: ProcIO) -> Result<RshExitStatus, ShellError> {
 	let mut argv = node
 		.get_argv()?
 		.iter()
@@ -530,7 +530,7 @@ pub fn echo(node: Node, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Result<
 	let redirs = node.get_redirs()?;
 	log::info!("Executing echo with argv: {:?}", argv);
 
-	let mut saved_fds = SavedFDs::new(0,1,2, node.span())?;
+	io.backup_fildescs();
 	argv.pop_front(); // Remove 'echo' from argv
 	let output_str = catstr(argv, true);
 
@@ -540,10 +540,10 @@ pub fn echo(node: Node, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Result<
 		Vec::new()
 	};
 
-	let output_fd = stdout.unwrap_or(1); // Default to standard output
+	let output_fd = io.stdout.unwrap_or(1); // Default to standard output
 	let output = unsafe { BorrowedFd::borrow_raw(output_fd) };
 
-	if let Some(fd) = stderr {
+	if let Some(fd) = io.stderr {
 		dup2(output_fd,fd).unwrap();
 		close(fd).unwrap();
 	}
@@ -552,13 +552,13 @@ pub fn echo(node: Node, stdout: Option<RawFd>, stderr: Option<RawFd>) -> Result<
 		ShellError::from_execf(&format!("Failed to write output in echo: {}", e), 1, node.span())
 	});
 
-	if let Some(w_pipe) = stdout {
+	if let Some(w_pipe) = io.stdout {
 		close(w_pipe).expect("failed to close stdout in echo");
 	}
 
 	close_file_descriptors(fd_stack);
 
-	saved_fds.restore(0,1,2,node.span())?;
+	io.restore_fildescs();
 
 	result.map(|_| RshExitStatus::Success { span: node.span })
 }

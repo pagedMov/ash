@@ -28,14 +28,14 @@ pub mod shellenv;
 pub mod interp;
 pub mod builtin;
 
-use std::{env, fs::File, io::Read, os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd}};
+use std::{env, fs::File, io::Read, os::fd::{AsFd, BorrowedFd}};
 
 use event::{EventLoop, ShellError, ShellErrorFull};
 use execute::{NodeWalker, RshExitStatus};
 use interp::parse::descend;
 use libc::STDERR_FILENO;
 use log::info;
-use nix::{fcntl::{open, OFlag}, sys::stat::Mode, unistd::write};
+use nix::unistd::write;
 
 //use crate::event::EventLoop;
 use crate::shellenv::ShellEnv;
