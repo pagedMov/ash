@@ -52,7 +52,7 @@ pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellEr
 			if let Some(cmd_tk) = argv.front() {
 				if let Some(alias_content) = shellenv.get_alias(cmd_tk.text()) {
 					argv.pop_front();
-					let mut new_argv = take(argv);
+					let new_argv = take(argv);
 					let mut child_shellenv = shellenv.clone();
 					child_shellenv.mod_flags(|f| *f |= EnvFlags::NO_ALIAS);
 					let state = ParseState {
@@ -72,11 +72,12 @@ pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellEr
 					for token in &mut alias_tokens {
 						token.wd = token.wd.add_flag(WdFlags::FROM_ALIAS);
 					}
-					dbg!(&alias_tokens);
 
 					state.tokens = alias_tokens;
 					state = parse::parse(state)?;
-					dbg!(&state.ast);
+					for redir in node.redirs {
+						state.ast.redirs.push_back(redir.clone())
+					}
 					Ok(state.ast)
 				} else {
 					Ok(node)

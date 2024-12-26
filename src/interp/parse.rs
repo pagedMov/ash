@@ -601,7 +601,7 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, Shel
 	ctx.root.extend(buffer.drain(..));
 	Ok(ctx)
 }
-fn propagate_redirections(mut node: Node) -> Result<Node,ShellError> {
+pub fn propagate_redirections(mut node: Node) -> Result<Node,ShellError> {
 	// This function allows for redirections for higher order control flow structures
 	// e.g. `while true; do echo hello world; done > file.txt`
 	// The entire AST is rebuilt in-place, while carrying redirections out to the leaf nodes

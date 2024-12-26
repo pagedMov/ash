@@ -11,7 +11,7 @@ use glob::MatchOptions;
 
 use crate::builtin::{alias, cd, echo, pwd, source, test};
 use crate::event::ShellError;
-use crate::interp::expand;
+use crate::interp::{expand, parse};
 use crate::interp::token::{Redir, RedirType, Tk, WdFlags};
 use crate::interp::parse::{NdType,Node, Span};
 use crate::shellenv::{EnvFlags, ShellEnv};
@@ -221,8 +221,11 @@ impl<'a> NodeWalker<'a> {
 		Ok(last_status)
 	}
 
-	fn walk_root(&mut self, node: Node, break_condition: Option<bool>, io: ProcIO) -> Result<RshExitStatus,ShellError> {
+	fn walk_root(&mut self, mut node: Node, break_condition: Option<bool>, io: ProcIO) -> Result<RshExitStatus,ShellError> {
 		let mut last_status = RshExitStatus::new();
+		if !node.redirs.is_empty() {
+			node = parse::propagate_redirections(node)?;
+		}
 		if let NdType::Root { deck } = node.nd_type {
 			for node in deck {
 				last_status = self.walk(node, io.clone())?;
@@ -378,7 +381,6 @@ impl<'a> NodeWalker<'a> {
 	}
 
 	fn handle_builtin(&mut self, mut node: Node, io: ProcIO) -> Result<RshExitStatus,ShellError> {
-		dbg!(&node);
 		let argv = node.get_argv()?;
 		let mut expand_buffer = Vec::new();
 		for arg in &argv {
