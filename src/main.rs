@@ -111,7 +111,7 @@ async fn main_noninteractive(args: Vec<String>) {
 			}
 		}
 		Err(e) => {
-			let err = ShellErrorFull::from(shellenv.get_last_input(),ShellError::from_parse(e));
+			let err = ShellErrorFull::from(shellenv.get_last_input(),e);
 			write(stderr.as_fd(), format!("{}", err).as_bytes()).unwrap();
 		}
 	}

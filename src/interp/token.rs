@@ -5,18 +5,19 @@ use log::{info,trace,debug};
 use regex::Regex;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use crate::event::ShellError;
 use crate::interp::parse::ParseState;
 use crate::interp::helper;
 
-use super::parse::{Span,ParseErr};
+use super::parse::Span;
 
 pub const KEYWORDS: [&str;14] = [
 	"if", "while", "until", "for", "case", "select",
 	"then", "elif", "else", "in",
 	"do", "done", "fi", "esac"
 ];
-pub const BUILTINS: [&str; 16] = [
-	"echo", "set", "test", "[", "shift", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node",
+pub const BUILTINS: [&str; 17] = [
+	"echo", "set", "test", "[", "shift", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node",
 	"exec", "source", "wait",
 ];
 pub const FUNCTIONS: [&str; 1] = [
@@ -180,7 +181,7 @@ impl Tk {
 			wd: WordDesc { text: ";;".into(), span: Span::from(pos,pos+1), flags: WdFlags::empty() }
 		}
 	}
-	pub fn from(mut wd: WordDesc) -> Result<Self,ParseErr> {
+	pub fn from(mut wd: WordDesc) -> Result<Self,ShellError> {
 		debug!("Tk::from(): Evaluating node type for: {}", wd.text);
 
 		// TODO: Implement sub-shell substitutions
@@ -192,6 +193,8 @@ impl Tk {
 			}
 			_ if REGEX["assignment"].is_match(&text) => {
 				trace!("Matched assignment: {}", text);
+				dbg!("assignment text");
+				dbg!(&wd.text);
 				TkType::Assignment
 			},
 			_ if REGEX["redirection"].is_match(&text) => {
@@ -240,14 +243,14 @@ impl Tk {
 				TkType::Ident
 			},
 			_ => {
-				return Err(ParseErr::from_parse(format!("Parsing error on: {}",wd.text), wd.span))
+				return Err(ShellError::from_parse(format!("Parsing error on: {}",wd.text).as_str(), wd.span))
 			}
 		};
 		let token = Tk { tk_type, wd };
 		info!("returning token: {:?}",token);
 		Ok(token)
 	}
-	fn get_keyword_token(wd: &WordDesc) -> Result<TkType,ParseErr> {
+	fn get_keyword_token(wd: &WordDesc) -> Result<TkType,ShellError> {
 		let text = wd.text.clone();
 		match text.as_str() {
 			"if" => Ok(TkType::If),
@@ -264,10 +267,10 @@ impl Tk {
 			"esac" => Ok(TkType::Esac),
 			"select" => Ok(TkType::Select),
 			"in" => Ok(TkType::In),
-			_ => Err(ParseErr::from_parse(format!("Unrecognized keyword: {}",wd.text), wd.span))
+			_ => Err(ShellError::from_parse(format!("Unrecognized keyword: {}",wd.text).as_str(), wd.span))
 		}
 	}
-	fn build_redir(wd: &WordDesc) -> Result<TkType,ParseErr> {
+	fn build_redir(wd: &WordDesc) -> Result<TkType,ShellError> {
 		let text = wd.text.clone();
 		if let Some(caps) = REGEX["redirection"].captures(text.as_str()) {
 			let mut fd_source = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(1);
@@ -280,7 +283,7 @@ impl Tk {
 				"<" => RedirType::Input,
 				"<<" => RedirType::Heredoc,
 				"<<<" => RedirType::Herestring,
-				_ => return Err(ParseErr::from_parse(format!("Invalid redirect operator: {}",wd.text), wd.span))
+				_ => return Err(ShellError::from_parse(format!("Invalid redirect operator: {}",wd.text).as_str(), wd.span))
 			};
 			if matches!(redir_type, RedirType::Input | RedirType::Heredoc | RedirType::Herestring) {
 				fd_source = 0
@@ -436,7 +439,7 @@ impl WordDesc {
 	}
 }
 
-pub fn tokenize(state: ParseState) -> Result<ParseState,ParseErr> {
+pub fn tokenize(state: ParseState) -> Result<ParseState,ShellError> {
 	debug!("Starting tokenization with input: {:?}", state.input);
 
 	let mut word_desc = WordDesc {
@@ -601,7 +604,7 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,ParseErr> {
 				} else {
 					match c {
 						'&' => { word_desc = word_desc.add_char(c); }, // Background operator
-						_ => return Err(ParseErr::from_parse(format!("Expected an expression after this operator '{}'", c), word_desc.span))
+						_ => return Err(ShellError::from_parse(format!("Expected an expression after this operator '{}'", c).as_str(), word_desc.span))
 					}
 				};
 				is_arg = false;
@@ -680,10 +683,10 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,ParseErr> {
 	if !word_desc.text.is_empty() {
 		trace!("finalizing word: {:?}", word_desc);
 		if helper::delimited(&word_desc) {
-			return Err(ParseErr::from_parse("unclosed delimiter".into(), word_desc.span))
+			return Err(ShellError::from_parse("unclosed delimiter".into(), word_desc.span))
 		}
 		if helper::quoted(&word_desc) {
-			return Err(ParseErr::from_parse("unclosed quotation".into(), word_desc.span))
+			return Err(ShellError::from_parse("unclosed quotation".into(), word_desc.span))
 		}
 		if is_arg {
 			word_desc = word_desc.add_flag(WdFlags::IS_ARG);

@@ -23,6 +23,7 @@ pub const GLOB_OPTS: MatchOptions = MatchOptions {
 	require_literal_leading_dot: false
 };
 
+#[derive(Clone,Debug)]
 pub struct ProcIO {
 	pub stdin: Option<RawFd>,
 	pub stdout: Option<RawFd>,
@@ -190,16 +191,19 @@ impl<'a> NodeWalker<'a> {
 				last_status = self.handle_chain(node)?;
 			}
 			NdType::If {..} => {
-				last_status = self.handle_if(node)?;
+				last_status = self.handle_if(node,io)?;
 			}
 			NdType::For {..} => {
-				last_status = self.handle_for(node)?;
+				last_status = self.handle_for(node,io)?;
 			}
 			NdType::Loop {..} => {
-				last_status = self.handle_loop(node)?;
+				last_status = self.handle_loop(node,io)?;
 			}
 			NdType::Case {..} => {
-				todo!("handle case-in")
+				todo!("handle case")
+			}
+			NdType::Select {..} => {
+				todo!("handle select")
 			}
 			NdType::Subshell {..} => {
 				last_status = self.handle_subshell(node,io)?;
@@ -218,11 +222,11 @@ impl<'a> NodeWalker<'a> {
 		Ok(last_status)
 	}
 
-	fn walk_root(&mut self, node: Node, break_condition: Option<bool>) -> Result<RshExitStatus,ShellError> {
+	fn walk_root(&mut self, node: Node, break_condition: Option<bool>, io: ProcIO) -> Result<RshExitStatus,ShellError> {
 		let mut last_status = RshExitStatus::new();
 		if let NdType::Root { deck } = node.nd_type {
 			for node in deck {
-				last_status = self.walk(node, ProcIO::new())?;
+				last_status = self.walk(node, io.clone())?;
 				if let Some(condition) = break_condition {
 					match condition {
 						true => {
@@ -245,8 +249,11 @@ impl<'a> NodeWalker<'a> {
 	/// For loops in bash can have multiple loop variables, e.g. `for a b c in 1 2 3 4 5 6`
 	/// In this case, loop_vars are also iterated through, e.g. a = 1, b = 2, c = 3, etc
 	/// Here, we use the modulo operator to figure out which variable to set on each iteration.
-	fn handle_for(&mut self, node: Node) -> Result<RshExitStatus, ShellError> {
+	fn handle_for(&mut self, node: Node, io: ProcIO) -> Result<RshExitStatus, ShellError> {
 		let mut last_status = RshExitStatus::new();
+		let body_io = ProcIO::from(None, io.stdout, io.stderr);
+		let redirs = node.get_redirs()?;
+		self.handle_redirs(redirs.into())?;
 
 		if let NdType::For { loop_vars, mut loop_arr, loop_body } = node.nd_type {
 			let var_count = loop_vars.len();
@@ -267,22 +274,25 @@ impl<'a> NodeWalker<'a> {
 				var_index = iteration_count % var_count;
 
 				// Execute the body of the loop
-				last_status = self.walk_root(*loop_body.clone(), None)?;
+				last_status = self.walk_root(*loop_body.clone(), None, body_io.clone())?;
 			}
 		}
 
 		Ok(last_status)
 	}
 
-	fn handle_loop(&mut self, node: Node) -> Result<RshExitStatus, ShellError> {
+	fn handle_loop(&mut self, node: Node, io: ProcIO) -> Result<RshExitStatus, ShellError> {
 		let mut last_status = RshExitStatus::new();
+		let cond_io = ProcIO::from(io.stdin, None, None);
+		let body_io = ProcIO::from(None, io.stdout, io.stderr);
 
 		if let NdType::Loop { condition, logic } = node.nd_type {
-			let cond= *logic.condition;
+			let cond = *logic.condition;
 			let body = *logic.body;
+			// TODO: keep an eye on this; cloning in the loop body may be too expensive
 			loop {
 				// Evaluate the loop condition
-				let condition_status = self.walk_root(cond.clone(),Some(condition))?;
+				let condition_status = self.walk_root(cond.clone(),Some(condition),cond_io.clone())?;
 
 				match condition {
 					true => {
@@ -298,7 +308,7 @@ impl<'a> NodeWalker<'a> {
 				}
 
 				// Execute the body of the loop
-				last_status = self.walk_root(body.clone(),None)?;
+				last_status = self.walk_root(body.clone(),None,body_io.clone())?;
 
 				// Check for break or continue signals
 				// match last_status {
@@ -316,20 +326,22 @@ impl<'a> NodeWalker<'a> {
 		}
 	}
 
-	fn handle_if(&mut self, node: Node) -> Result<RshExitStatus, ShellError> {
+	fn handle_if(&mut self, node: Node, io: ProcIO) -> Result<RshExitStatus, ShellError> {
 		let mut last_result = RshExitStatus::new();
+		let cond_io = ProcIO::from(io.stdin, None, None);
+		let body_io = ProcIO::from(None, io.stdout, io.stderr);
 
 		if let NdType::If { mut cond_blocks, else_block } = node.nd_type {
 			while let Some(block) = cond_blocks.pop_front() {
 				let cond = *block.condition;
 				let body = *block.body;
-				last_result = self.walk_root(cond,Some(false))?;
+				last_result = self.walk_root(cond,Some(false),cond_io.clone())?;
 				if let RshExitStatus::Success {..} = last_result {
-					return self.walk_root(body,None)
+					return self.walk_root(body,None,body_io)
 				}
 			}
 			if let Some(block) = else_block {
-				return self.walk_root(*block,None)
+				return self.walk_root(*block,None,body_io)
 			}
 		}
 		Ok(last_result)
@@ -373,8 +385,8 @@ impl<'a> NodeWalker<'a> {
 			let mut expanded = expand::expand_token(self.shellenv, arg.clone());
 			expand_buffer.extend(expanded.drain(..));
 		}
-		if let NdType::Builtin { argv: _, redirs } = node.nd_type {
-			node.nd_type = NdType::Builtin { argv: expand_buffer.into(), redirs }
+		if let NdType::Builtin {..} = node.nd_type {
+			node.nd_type = NdType::Builtin { argv: expand_buffer.into() }
 		}
 		match argv[0].text() {
 			"echo" => echo(node, io),
@@ -387,14 +399,7 @@ impl<'a> NodeWalker<'a> {
 		}
 	}
 
-	fn extract_redirs(&mut self, node: &Node) -> Result<VecDeque<Tk>, ShellError> {
-		match &node.nd_type {
-			NdType::Command { argv: _, redirs } | NdType::Builtin { argv: _, redirs } => {
-				Ok(redirs.clone())
-			}
-			_ => Err(ShellError::from_internal("Called extract_redirs() on a non-command node", node.span()))
-		}
-	}
+
 
 	/// Extracts arguments and redirections from an AST node.
 	///
@@ -437,6 +442,7 @@ impl<'a> NodeWalker<'a> {
 			let tokens = expand::expand_token(self.shellenv, word);
 			debug!("got expanded tokens: {:?}",tokens);
 			for token in tokens {
+				dbg!(&token);
 				let cstring = CString::new(token.text()).unwrap();
 				args.push(cstring);
 			}
@@ -489,12 +495,12 @@ impl<'a> NodeWalker<'a> {
 	/// # Panics
 	///
 	/// This function does not panic.
-	fn handle_redirs(&self, mut redirs: VecDeque<Tk>) -> Result<(), ShellError> {
+	fn handle_redirs(&self, mut redirs: VecDeque<Node>) -> Result<(), ShellError> {
 			let mut fd_queue: VecDeque<i32> = VecDeque::new();
 			debug!("Handling redirections: {:?}", redirs);
 
 			while let Some(redir) = redirs.pop_front() {
-					if let TkType::Redirection { redir } = redir.class() {
+					if let NdType::Redirection { redir } = redir.nd_type {
 							let Redir { fd_source, op, fd_target, file_target } = redir;
 							if let Some(target) = fd_target {
 									dup2(target, fd_source).unwrap();
@@ -624,7 +630,7 @@ impl<'a> NodeWalker<'a> {
 
 	fn handle_command(&mut self, node: Node, mut io: ProcIO) -> Result<RshExitStatus, ShellError> {
 		let argv = self.extract_args(node.get_argv()?);
-		let redirs = self.extract_redirs(&node)?;
+		let redirs = node.get_redirs()?;
 		let span = node.span();
 		io.backup_fildescs()?; // Save original stin, stdout, and stderr
 		io.do_plumbing()?; // Route pipe logic using fildescs
@@ -638,7 +644,7 @@ impl<'a> NodeWalker<'a> {
 			Ok(ForkResult::Child) => {
 				// Handle redirections
 				if !redirs.is_empty() {
-					self.handle_redirs(redirs)?;
+					self.handle_redirs(redirs.into())?;
 				}
 
 				// Execute the command

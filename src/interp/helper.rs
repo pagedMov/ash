@@ -1,9 +1,7 @@
-use crate::interp::{parse::Span, token::{Tk, WdFlags, WordDesc, BUILTINS, CMDSEP, KEYWORDS, REGEX, WHITESPACE}};
+use crate::{event::ShellError, interp::{parse::Span, token::{Tk, WdFlags, WordDesc, BUILTINS, CMDSEP, KEYWORDS, REGEX, WHITESPACE}}};
 use libc::STDERR_FILENO;
 use log::{debug,trace};
 use std::{collections::VecDeque, os::fd::BorrowedFd};
-
-use super::parse::ParseErr;
 
 pub trait StrExtension {
     fn has_unescaped(&self, check_char: char) -> bool;
@@ -84,7 +82,7 @@ pub fn check_redirection(c: &char, chars: &mut VecDeque<char>) -> bool {
 pub fn process_redirection(
     word_desc: &mut WordDesc,
     chars: &mut VecDeque<char>,
-) -> Result<WordDesc, ParseErr> {
+) -> Result<WordDesc, ShellError> {
     let mut redirection_text = String::new();
     while let Some(c) = chars.pop_front() {
 			debug!("found this char in redirection: {}",c);
@@ -102,7 +100,7 @@ pub fn process_redirection(
         flags: WdFlags::IS_OP,
     })
 }
-pub fn finalize_delimiter(word_desc: &WordDesc) -> Result<WordDesc, ParseErr> {
+pub fn finalize_delimiter(word_desc: &WordDesc) -> Result<WordDesc, ShellError> {
     let mut updated_word_desc = word_desc.clone();
 
     if word_desc.contains_flag(WdFlags::IN_BRACE) {
@@ -132,7 +130,7 @@ pub fn count_spaces(chars: &mut VecDeque<char>) -> usize {
 	count
 }
 
-pub fn finalize_word(word_desc: &WordDesc, tokens: &mut VecDeque<Tk>) -> Result<WordDesc,ParseErr> {
+pub fn finalize_word(word_desc: &WordDesc, tokens: &mut VecDeque<Tk>) -> Result<WordDesc,ShellError> {
     let mut word_desc = word_desc.clone();
     let span = Span::from(word_desc.span.end,word_desc.span.end);
     trace!("finalizing word `{}` with flags `{:?}`",word_desc.text,word_desc.flags);

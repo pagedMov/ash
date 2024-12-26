@@ -123,7 +123,7 @@ impl ShellEnv {
 				}
 			}
 			Err(e) => {
-				let err = ShellErrorFull::from(self.get_last_input(), ShellError::from_parse(e));
+				let err = ShellErrorFull::from(self.get_last_input(), e);
 				write(stderr.as_fd(), format!("Encountered error while sourcing file: {}\n{}",path.display(), err).as_bytes()).unwrap();
 			}
 		}
@@ -205,7 +205,11 @@ impl ShellEnv {
 		self.aliases.get(key)
 	}
 
-	pub fn set_alias(&mut self, key: String, value: String) {
+	pub fn set_alias(&mut self, key: String, mut value: String) {
+		if value.starts_with('"') && value.ends_with('"') {
+			value = value.strip_prefix('"').unwrap().into();
+			value = value.strip_suffix('"').unwrap().into();
+		}
 		self.aliases.insert(key, value);
 	}
 

@@ -161,7 +161,8 @@ pub async fn prompt(sender: mpsc::Sender<ShellEvent>, shellenv: &mut ShellEnv) {
 				let _ = sender.send(ShellEvent::NewAST(parse_state.ast)).await;
 			}
 			Err(e) => {
-				let _ = sender.send(ShellEvent::CatchError(ShellError::ParsingError(e))).await;
+				let _ = sender.send(ShellEvent::CatchError(e)).await;
+				let _ = sender.send(ShellEvent::Prompt).await;
 			}
 		}
 	}

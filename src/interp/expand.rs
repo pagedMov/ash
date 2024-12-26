@@ -6,7 +6,7 @@ use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
 use crate::interp::helper::{self,StrExtension};
 use crate::shellenv::ShellEnv;
 
-use super::parse::{NdType, Node};
+use super::parse::{NdType, Node, Span};
 
 pub fn check_globs(string: String) -> bool {
 	string.chars().any(|t| matches!(t, '?' | '*'))
@@ -32,16 +32,38 @@ pub fn expand_arguments(shellenv: &ShellEnv, node: &mut Node) -> Result<Vec<Tk>,
 		expand_buffer.extend(expanded.drain(..));
 	}
 	match &node.nd_type {
-		NdType::Builtin { argv: _, redirs } => {
-			node.nd_type = NdType::Builtin { argv: expand_buffer.into(), redirs: redirs.clone() };
+		NdType::Builtin {..} => {
+			node.nd_type = NdType::Builtin { argv: expand_buffer.into() };
 			Ok(argv)
 		}
-		NdType::Command { argv: _, redirs }  => {
-			node.nd_type = NdType::Command { argv: expand_buffer.into(), redirs: redirs.clone() };
+		NdType::Command {..}  => {
+			node.nd_type = NdType::Command { argv: expand_buffer.into() };
 			Ok(argv)
 		}
 		_ => Err(ShellError::from_internal("Called expand arguments on a non-command node", node.span()))
 	}
+}
+
+pub fn expand_alias(shellenv: &ShellEnv, mut token: Tk) -> Result<Vec<Tk>, ShellError> {
+	let mut expanded = vec![];
+	let mut span = Span::from(0,0);
+	if let Some(alias) = shellenv.get_alias(token.text()) {
+		dbg!(&alias);
+		let alias_content = alias.split(' ');
+		dbg!(&alias_content);
+		for word in alias_content {
+			span = Span::from(span.end, span.end + word.len());
+			let wd = WordDesc { text: word.into(), span, flags: token.flags() };
+			let expanded_token = Tk {
+				tk_type: TkType::Ident,
+				wd
+			};
+			expanded.push(expanded_token)
+		}
+	} else {
+		expanded = vec![token];
+	}
+	Ok(expanded)
 }
 
 pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
@@ -62,6 +84,18 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 			if token.text().has_unescaped('$') && !token.wd.contains_flag(WdFlags::SNG_QUOTED) {
 				info!("found unescaped dollar in: {}",token.text());
 				token.wd.text = expand_var(shellenv, token.text().into());
+
+			} else if !token.wd.contains_flag(WdFlags::IS_ARG) {
+				dbg!(&token);
+				let alias_tokens = expand_alias(shellenv, token.clone()).unwrap();
+
+				if let Some(alias_token) = alias_tokens.first() {
+					dbg!(&alias_tokens);
+					if !(alias_token.text() == token.text() && alias_tokens.len() == 1) {
+						product_buffer.extend(alias_tokens);
+						continue
+					}
+				}
 			}
 			if helper::is_brace_expansion(token.text()) || token.text().has_unescaped('$') {
 				working_buffer.push_front(token);

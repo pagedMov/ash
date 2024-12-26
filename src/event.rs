@@ -7,7 +7,7 @@ use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};
 
 use crate::execute::RshExitStatus;
-use crate::interp::parse::{Node, ParseErr, Span};
+use crate::interp::parse::{Node, Span};
 use crate::{execute, prompt};
 use crate::shellenv::ShellEnv;
 
@@ -15,7 +15,7 @@ use crate::shellenv::ShellEnv;
 pub enum ShellError {
 	CommandNotFound(String, Span),
 	InvalidSyntax(String, Span),
-	ParsingError(ParseErr),
+	ParsingError(String, Span),
 	ExecFailed(String, i32, Span),
 	IoError(String, Span),
 	InternalError(String, Span),
@@ -28,8 +28,8 @@ impl ShellError {
 	pub fn from_execf(msg: &str, code: i32, span: Span) -> Self {
 		ShellError::ExecFailed(msg.to_string(), code, span)
 	}
-	pub fn from_parse(parse_err: ParseErr) -> Self {
-		ShellError::ParsingError(parse_err)
+	pub fn from_parse(msg: &str, span: Span) -> Self {
+		ShellError::ParsingError(msg.to_string(), span)
 	}
 	pub fn from_syntax(msg: &str, span: Span) -> Self {
 		ShellError::InvalidSyntax(msg.to_string(), span)
@@ -200,9 +200,9 @@ impl fmt::Display for ShellErrorFull {
 				self.format_error_context(*span);
 				Ok(())
 			}
-			ShellError::ParsingError(parse_err) => {
-				writeln!(f, "Parsing error: {}", parse_err.msg)?;
-				self.format_error_context(parse_err.span);
+			ShellError::ParsingError(msg, span) => {
+				writeln!(f, "Parsing error: {}", msg)?;
+				self.format_error_context(*span);
 				Ok(())
 			}
 			ShellError::InvalidSyntax(msg, span) => {
@@ -320,11 +320,11 @@ impl<'a> EventLoop<'a> {
 					// Log and process a new AST node.
 					debug!("new tree:\n {:#?}", tree);
 					let mut walker = execute::NodeWalker::new(tree,self.shellenv);
+					let stderr = unsafe { BorrowedFd::borrow_raw(2) };
 					match walker.start_walk() {
 						Ok(code) => {
 							info!("Last exit status: {:?}",code);
 							if let RshExitStatus::Fail { code, cmd, span } = code {
-								let stderr = unsafe { BorrowedFd::borrow_raw(2) };
 								if code == 127 {
 									if let Some(cmd) = cmd {
 										let err = ShellErrorFull::from(self.shellenv.get_last_input(),ShellError::from_no_cmd(&cmd, span));
@@ -333,7 +333,10 @@ impl<'a> EventLoop<'a> {
 								};
 							};
 						},
-						Err(e) => self.inbox().send(ShellEvent::CatchError(e)).await.unwrap()
+						Err(e) => {
+							let err = ShellErrorFull::from(self.shellenv.get_last_input(),e);
+							let _ = write(stderr, format!("{}",err).as_bytes());
+						}
 					}
 					if self.shellenv.is_interactive() {
 						self.inbox().send(ShellEvent::Prompt).await.unwrap()

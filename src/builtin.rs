@@ -14,7 +14,7 @@ use nix::unistd::{access, close, dup, dup2, isatty, write, AccessFlags};
 use nix::NixPath;
 
 use crate::execute::{ProcIO, RshExitStatus};
-use crate::interp::parse::{Node, Span};
+use crate::interp::parse::{NdType, Node, Span};
 use crate::interp::{helper, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType};
 use crate::shellenv::ShellEnv;
@@ -25,21 +25,21 @@ pub const BUILTINS: [&str; 14] = [
 	"exec", "source", "wait",
 ];
 
-fn open_file_descriptors(redirs: VecDeque<Tk>) -> Result<Vec<(i32, i32)>, ShellError> {
+fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<(i32, i32)>, ShellError> {
 	let mut fd_stack: Vec<(i32, i32)> = Vec::new();
-	debug!("Handling redirections for builtin: {:?}", redirs);
+	info!("Handling redirections for builtin: {:?}", redirs);
 
 	for redir_tk in redirs {
-		if let TkType::Redirection { redir } = redir_tk.class() {
+		if let NdType::Redirection { ref redir } = redir_tk.nd_type {
 			let Redir { fd_source, op, fd_target, file_target } = redir;
 
-			let backup_fd = dup(fd_source).map_err(|e| {
+			let backup_fd = dup(*fd_source).map_err(|e| {
 				ShellError::from_execf(&format!("Failed to back up FD {}: {}", fd_source, e), 1, redir_tk.span())
 			})?;
-			fd_stack.push((fd_source, backup_fd));
+			fd_stack.push((*fd_source, backup_fd));
 
 			if let Some(target) = fd_target {
-				dup2(target, fd_source).map_err(|e| {
+				dup2(*target, *fd_source).map_err(|e| {
 					ShellError::from_execf(&format!("Failed to redirect FD {} to {}: {}", fd_source, target, e), 1, redir_tk.span())
 				})?;
 			} else if let Some(file_path) = file_target {
@@ -52,7 +52,7 @@ fn open_file_descriptors(redirs: VecDeque<Tk>) -> Result<Vec<(i32, i32)>, ShellE
 				let file_fd = open(file_path.text(), flags, Mode::from_bits(0o644).unwrap()).map_err(|e| {
 					ShellError::from_execf(&format!("Failed to open file {}: {}", file_path.text(), e), 1, redir_tk.span())
 				})?;
-				dup2(file_fd, fd_source).map_err(|e| {
+				dup2(file_fd, *fd_source).map_err(|e| {
 					ShellError::from_execf(&format!("Failed to redirect FD {} to file {}: {}", fd_source, file_path.text(), e), 1, redir_tk.span())
 				})?;
 				close(file_fd).unwrap_or_else(|e| {
@@ -528,9 +528,9 @@ pub fn echo(node: Node, mut io: ProcIO) -> Result<RshExitStatus, ShellError> {
 		.collect::<VecDeque<CString>>();
 
 	let redirs = node.get_redirs()?;
-	log::info!("Executing echo with argv: {:?}", argv);
+	info!("Executing echo with argv: {:?}, and redirs: {:?}", argv,node.redirs);
 
-	io.backup_fildescs();
+	io.backup_fildescs()?;
 	argv.pop_front(); // Remove 'echo' from argv
 	let output_str = catstr(argv, true);
 
@@ -558,7 +558,7 @@ pub fn echo(node: Node, mut io: ProcIO) -> Result<RshExitStatus, ShellError> {
 
 	close_file_descriptors(fd_stack);
 
-	io.restore_fildescs();
+	io.restore_fildescs()?;
 
 	result.map(|_| RshExitStatus::Success { span: node.span })
 }
