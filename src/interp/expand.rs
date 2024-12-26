@@ -1,12 +1,14 @@
 use glob::glob;
 use log::{debug, info, trace};
 use std::collections::VecDeque;
+use std::mem::take;
 use crate::event::ShellError;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
 use crate::interp::helper::{self,StrExtension};
-use crate::shellenv::ShellEnv;
+use crate::shellenv::{EnvFlags, ShellEnv};
 
-use super::parse::{NdType, Node, Span};
+use super::parse::{self, NdType, Node, ParseState};
+use super::token;
 
 pub fn check_globs(string: String) -> bool {
 	string.chars().any(|t| matches!(t, '?' | '*'))
@@ -44,26 +46,47 @@ pub fn expand_arguments(shellenv: &ShellEnv, node: &mut Node) -> Result<Vec<Tk>,
 	}
 }
 
-pub fn expand_alias(shellenv: &ShellEnv, mut token: Tk) -> Result<Vec<Tk>, ShellError> {
-	let mut expanded = vec![];
-	let mut span = Span::from(0,0);
-	if let Some(alias) = shellenv.get_alias(token.text()) {
-		dbg!(&alias);
-		let alias_content = alias.split(' ');
-		dbg!(&alias_content);
-		for word in alias_content {
-			span = Span::from(span.end, span.end + word.len());
-			let wd = WordDesc { text: word.into(), span, flags: token.flags() };
-			let expanded_token = Tk {
-				tk_type: TkType::Ident,
-				wd
-			};
-			expanded.push(expanded_token)
+pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellError> {
+	match node.nd_type {
+		NdType::Command { ref mut argv } | NdType::Builtin { ref mut argv } => {
+			if let Some(cmd_tk) = argv.front() {
+				if let Some(alias_content) = shellenv.get_alias(cmd_tk.text()) {
+					argv.pop_front();
+					let mut new_argv = take(argv);
+					let mut child_shellenv = shellenv.clone();
+					child_shellenv.mod_flags(|f| *f |= EnvFlags::NO_ALIAS);
+					let state = ParseState {
+						input: alias_content,
+						shellenv: &child_shellenv,
+						tokens: VecDeque::new(),
+						ast: Node::new(),
+					};
+
+					let mut state = token::tokenize(state, false)?;
+					let mut alias_tokens = state.tokens;
+					// Trim `SOI` and `EOI` tokens
+					alias_tokens.pop_back();
+					alias_tokens.pop_front();
+
+					alias_tokens.extend(new_argv);
+					for token in &mut alias_tokens {
+						token.wd = token.wd.add_flag(WdFlags::FROM_ALIAS);
+					}
+					dbg!(&alias_tokens);
+
+					state.tokens = alias_tokens;
+					state = parse::parse(state)?;
+					dbg!(&state.ast);
+					Ok(state.ast)
+				} else {
+					Ok(node)
+				}
+			} else {
+				Ok(node)
+			}
 		}
-	} else {
-		expanded = vec![token];
+		_ => unreachable!()
 	}
-	Ok(expanded)
 }
 
 pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
@@ -84,18 +107,6 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 			if token.text().has_unescaped('$') && !token.wd.contains_flag(WdFlags::SNG_QUOTED) {
 				info!("found unescaped dollar in: {}",token.text());
 				token.wd.text = expand_var(shellenv, token.text().into());
-
-			} else if !token.wd.contains_flag(WdFlags::IS_ARG) {
-				dbg!(&token);
-				let alias_tokens = expand_alias(shellenv, token.clone()).unwrap();
-
-				if let Some(alias_token) = alias_tokens.first() {
-					dbg!(&alias_tokens);
-					if !(alias_token.text() == token.text() && alias_tokens.len() == 1) {
-						product_buffer.extend(alias_tokens);
-						continue
-					}
-				}
 			}
 			if helper::is_brace_expansion(token.text()) || token.text().has_unescaped('$') {
 				working_buffer.push_front(token);

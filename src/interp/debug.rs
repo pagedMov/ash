@@ -115,6 +115,7 @@ impl fmt::Display for Node {
                 NdType::Cmdsep => {
                     writeln!(f, "{}Cmdsep", prefix)?;
                 }
+								NdType::NullNode => panic!()
             }
             Ok(())
         }

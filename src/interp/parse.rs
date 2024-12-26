@@ -103,6 +103,14 @@ pub struct Node {
 }
 
 impl Node {
+	pub fn new() -> Self {
+		Self {
+			nd_type: NdType::NullNode,
+			span: Span::new(),
+			flags: NdFlags::empty(),
+			redirs: VecDeque::new()
+		}
+	}
 	pub fn from(deck: VecDeque<Node>,span: Span) -> Self {
 		Self {
 			nd_type: NdType::Root { deck },
@@ -155,6 +163,12 @@ impl Node {
 		Ok(redir_vec)
 	}
 }
+
+impl Default for Node {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 #[derive(Debug,Clone,PartialEq)]
 pub enum NdType {
 	Root { deck: VecDeque<Node> },
@@ -176,7 +190,8 @@ pub enum NdType {
 	Or,
 	Pipe,
 	PipeBoth,
-	Cmdsep
+	Cmdsep,
+	NullNode
 }
 
 #[derive(Debug,PartialEq,Clone)]
@@ -277,7 +292,7 @@ pub fn descend<'a>(input: &'a str, shellenv: &'a ShellEnv) -> Result<ParseState<
 		}
 	};
 
-	state = tokenize(state)?;
+	state = tokenize(state,true)?;
 
 	state = parse(state)?;
 
@@ -586,7 +601,6 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, Shel
 	ctx.root.extend(buffer.drain(..));
 	Ok(ctx)
 }
-
 fn propagate_redirections(mut node: Node) -> Result<Node,ShellError> {
 	// This function allows for redirections for higher order control flow structures
 	// e.g. `while true; do echo hello world; done > file.txt`
@@ -594,6 +608,7 @@ fn propagate_redirections(mut node: Node) -> Result<Node,ShellError> {
 	let mut nd_type = node.nd_type.clone();
 	match nd_type {
 		NdType::Root { ref mut deck } => {
+			// Iterate through the deck and map all root node redirections to children
 			let mut new_deck = VecDeque::new();
 			while let Some(redir) = node.redirs.pop_back() {
 				while let Some(mut deck_node) = deck.pop_front() {
@@ -609,6 +624,8 @@ fn propagate_redirections(mut node: Node) -> Result<Node,ShellError> {
 			node = Node::from(new_deck, node.span)
 		}
 		NdType::If { cond_blocks, mut else_block } => {
+			// Iterate through cond_blocks and map redirections accordingly
+			// Input redirections go to cond, output redirections go to body
 			let (cond_redirs,body_redirs) = get_flow_ctl_redirections(&node)?;
 			let mut new_cond_blocks = VecDeque::new();
 			for block in cond_blocks {
@@ -640,6 +657,7 @@ fn propagate_redirections(mut node: Node) -> Result<Node,ShellError> {
 			}
 		}
 		NdType::Loop { condition, logic } => {
+			// Same as the logic for propagating in If blocks, just performed once
 			let mut cond = logic.condition;
 			let mut body = logic.body;
 			let (cond_redirs,body_redirs) = get_flow_ctl_redirections(&node)?;
@@ -662,6 +680,8 @@ fn propagate_redirections(mut node: Node) -> Result<Node,ShellError> {
 			}
 		}
 		NdType::For { loop_vars, loop_arr, mut loop_body } => {
+			// Simple, loop_body is just a Root node so we just need to map redirs to it
+			// and then call propagate_redirections()
 			for redir in &node.redirs {
 				loop_body.redirs.push_back(redir.clone());
 			}
@@ -675,6 +695,9 @@ fn propagate_redirections(mut node: Node) -> Result<Node,ShellError> {
 			}
 		}
 		NdType::Case { input_var, mut cases } => {
+			// This one gets a little bit messy
+			// Iterate through keys and map redirections to each case body
+			// And then iterate through the keys again and call propagate_redirections() on each
 			let keys = cases.keys().cloned().collect::<Vec<String>>();
 			let mut new_cases = HashMap::new();
 			for redir in &node.redirs {
@@ -698,6 +721,7 @@ fn propagate_redirections(mut node: Node) -> Result<Node,ShellError> {
 
 		}
 		NdType::Select { select_var, opts, mut body } => {
+			// Same as For node logic
 			for redir in &node.redirs {
 				body.redirs.push_back(redir.clone());
 			}
@@ -714,12 +738,16 @@ fn propagate_redirections(mut node: Node) -> Result<Node,ShellError> {
 			// Fall-through
 			// This is for bottom-level nodes like commands and subshells
 			// If we have reached one of these, propagation is complete
+			// so we can just return the node now
 		}
 	}
 	Ok(node)
 }
 
 fn get_flow_ctl_redirections(node: &Node) -> Result<(Vec<Node>, Vec<Node>),ShellError> {
+	// Separates redirections into two baskets; one for conditions and one for bodies
+	// Input redirections like `while read -r line; do echo $line; done < lines.txt` go to the condition
+	// Output redirections like `while true; do echo hello world; done >> hello.txt` go to the body
 	let redirs = node.get_redirs()?;
 	let (cond_redirs, body_redirs): (Vec<Node>, Vec<Node>) = redirs.into_iter().partition(|redir_nd| {
 			if let NdType::Redirection { ref redir } = redir_nd.nd_type {

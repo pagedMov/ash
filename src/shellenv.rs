@@ -6,6 +6,7 @@ use std::io::Read;
 use std::os::fd::{AsFd,BorrowedFd, RawFd};
 use std::path::{Path, PathBuf};
 
+use bitflags::bitflags;
 use libc::STDERR_FILENO;
 use log::{debug, info, trace};
 use nix::unistd::write;
@@ -16,18 +17,29 @@ use crate::interp::expand::expand_var;
 use crate::interp::helper;
 use crate::interp::parse::{descend, Node, Span};
 
+bitflags! {
+	#[derive(Debug,Copy,Clone,PartialEq)]
+	pub struct EnvFlags: u32 {
+		// Guard conditions against infinite alias/var/function recursion
+		const NO_ALIAS = 0b0000001;
+		const NO_VAR = 0b0000010;
+		const NO_FUNC = 0b0000100;
+	}
+}
+
 #[derive(Debug,PartialEq,Clone)]
 pub struct ShellEnv {
-	interactive: bool,
-	login: bool,
-	env_vars: HashMap<String, String>,
-	variables: HashMap<String, String>,
-	aliases: HashMap<String, String>,
-	shopts: HashMap<String,usize>,
-	functions: HashMap<String, VecDeque<Node>>,
-	parameters: HashMap<String, String>,
-	open_fds: HashSet<i32>,
-	last_input: Option<String>
+	pub flags: EnvFlags,
+	pub interactive: bool,
+	pub login: bool,
+	pub env_vars: HashMap<String, String>,
+	pub variables: HashMap<String, String>,
+	pub aliases: HashMap<String, String>,
+	pub shopts: HashMap<String,usize>,
+	pub functions: HashMap<String, VecDeque<Node>>,
+	pub parameters: HashMap<String, String>,
+	pub open_fds: HashSet<i32>,
+	pub last_input: Option<String>
 }
 
 impl ShellEnv {
@@ -42,6 +54,7 @@ impl ShellEnv {
 		open_fds.insert(1);
 		open_fds.insert(2);
 		let mut shellenv = Self {
+			flags: EnvFlags::empty(),
 			interactive,
 			login,
 			env_vars,
@@ -74,6 +87,10 @@ impl ShellEnv {
 			}
     }
 		shellenv
+	}
+
+	pub fn mod_flags<F>(&mut self, transform: F) where F: FnOnce(&mut EnvFlags) {
+		transform(&mut self.flags)
 	}
 
 	pub fn is_interactive(&self) -> bool {
@@ -202,6 +219,9 @@ impl ShellEnv {
 
 	// Getters and Setters for `aliases`
 	pub fn get_alias(&self, key: &str) -> Option<&String> {
+		if self.flags.contains(EnvFlags::NO_ALIAS) {
+			return None
+		}
 		self.aliases.get(key)
 	}
 

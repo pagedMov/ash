@@ -1,4 +1,4 @@
-use crate::{event::ShellError, interp::{parse::Span, token::{Tk, WdFlags, WordDesc, BUILTINS, CMDSEP, KEYWORDS, REGEX, WHITESPACE}}};
+use crate::{event::ShellError, interp::{parse::{Node, ParseState, Span}, token::{self, Tk, WdFlags, WordDesc, BUILTINS, CMDSEP, KEYWORDS, REGEX, WHITESPACE}}, shellenv::{self, ShellEnv}};
 use libc::STDERR_FILENO;
 use log::{debug,trace};
 use std::{collections::VecDeque, os::fd::BorrowedFd};
@@ -145,7 +145,8 @@ pub fn finalize_word(word_desc: &WordDesc, tokens: &mut VecDeque<Tk>) -> Result<
             word_desc = word_desc.remove_flag(WdFlags::IS_ARG);
             word_desc = word_desc.add_flag(WdFlags::KEYWORD);
         }
-        tokens.push_back(Tk::from(word_desc)?);
+				// TODO: this logic is really flimsy, probably needs to be refactored
+				tokens.push_back(Tk::from(word_desc)?);
     }
 
     // Always return a fresh WordDesc with reset state

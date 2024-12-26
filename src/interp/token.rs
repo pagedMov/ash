@@ -8,6 +8,8 @@ use std::collections::VecDeque;
 use crate::event::ShellError;
 use crate::interp::parse::ParseState;
 use crate::interp::helper;
+use crate::shellenv;
+use crate::shellenv::ShellEnv;
 
 use super::parse::Span;
 
@@ -44,19 +46,22 @@ bitflags! {
 	}
 	#[derive(Debug,Hash,Clone,Copy,PartialEq,Eq)]
 	pub struct WdFlags: u32 {
-		const KEYWORD =    0b00000000000001;
-		const BUILTIN =    0b00000000000010;
-		const FUNCTION =   0b00000000000100;
-		const ALIAS =      0b00000000001000;
-		const IS_ARG =     0b00000000010000;
-		const DUB_QUOTED = 0b00000000100000;
-		const SNG_QUOTED = 0b00000001000000;
-		const IN_BRACE =   0b00000010000000;
-		const IN_PAREN =   0b00001000000000;
-		const IS_SUB =     0b00010000000000;
-		const IS_OP =      0b00100000000000;
-		const EXPECT_IN =  0b01000000000000;
-		const IS_PATH =    0b10000000000000;
+		const KEYWORD =    0b000000000000000001;
+		const BUILTIN =    0b000000000000000010;
+		const FUNCTION =   0b000000000000000100;
+		const ALIAS =      0b000000000000001000;
+		const IS_ARG =     0b000000000000010000;
+		const DUB_QUOTED = 0b000000000000100000;
+		const SNG_QUOTED = 0b000000000001000000;
+		const IN_BRACE =   0b000000000010000000;
+		const IN_PAREN =   0b000000001000000000;
+		const IS_SUB =     0b000000010000000000;
+		const IS_OP =      0b000000100000000000;
+		const EXPECT_IN =  0b000001000000000000;
+		const IS_PATH =    0b000010000000000000;
+		const FROM_ALIAS = 0b000100000000000000;
+		const FROM_FUNC  = 0b001000000000000000;
+		const FROM_VAR   = 0b010000000000000000;
 	}
 }
 
@@ -193,8 +198,6 @@ impl Tk {
 			}
 			_ if REGEX["assignment"].is_match(&text) => {
 				trace!("Matched assignment: {}", text);
-				dbg!("assignment text");
-				dbg!(&wd.text);
 				TkType::Assignment
 			},
 			_ if REGEX["redirection"].is_match(&text) => {
@@ -439,7 +442,7 @@ impl WordDesc {
 	}
 }
 
-pub fn tokenize(state: ParseState) -> Result<ParseState,ShellError> {
+pub fn tokenize(state: ParseState,check_aliases: bool) -> Result<ParseState,ShellError> {
 	debug!("Starting tokenization with input: {:?}", state.input);
 
 	let mut word_desc = WordDesc {
@@ -447,6 +450,7 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,ShellError> {
 		span: Span::from(0, 0),
 		flags: WdFlags::empty(),
 	};
+	let shellenv = state.shellenv;
 	let mut chars = state.input.chars().collect::<VecDeque<char>>();
 	let mut tokens: VecDeque<Tk> = VecDeque::from(vec![Tk::start_of_input()]);
 	let mut is_arg = false; // Start in "command mode" since SOI implies a command
@@ -691,7 +695,7 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,ShellError> {
 		if is_arg {
 			word_desc = word_desc.add_flag(WdFlags::IS_ARG);
 		}
-		let _ = helper::finalize_word(&word_desc, &mut tokens);
+		helper::finalize_word(&word_desc, &mut tokens)?;
 	}
 
 	tokens.push_back(Tk::end_of_input(state.input.len()));

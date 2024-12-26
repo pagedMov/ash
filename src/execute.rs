@@ -1,21 +1,20 @@
-use libc::{STDOUT_FILENO,STDERR_FILENO,STDIN_FILENO,c_int, pipe};
-use nix::unistd::{close, dup, dup2, execvpe, fork, write, ForkResult};
+use libc::{c_int, pipe};
+use nix::unistd::{close, dup, dup2, execvpe, fork, ForkResult};
 use nix::fcntl::{open,OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::wait::{waitpid, WaitStatus};
-use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::RawFd;
 use std::ffi::CString;
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
-use log::{error,info,debug,trace};
+use log::{info,debug,trace};
 use glob::MatchOptions;
 
 use crate::builtin::{alias, cd, echo, pwd, source, test};
 use crate::event::ShellError;
-use crate::interp::{self, expand};
-use crate::interp::token::{Redir, RedirType, Tk, TkType};
+use crate::interp::expand;
+use crate::interp::token::{Redir, RedirType, Tk, WdFlags};
 use crate::interp::parse::{NdType,Node, Span};
-use crate::shellenv::ShellEnv;
+use crate::shellenv::{EnvFlags, ShellEnv};
 
 pub const GLOB_OPTS: MatchOptions = MatchOptions {
 	case_sensitive: false,
@@ -379,6 +378,7 @@ impl<'a> NodeWalker<'a> {
 	}
 
 	fn handle_builtin(&mut self, mut node: Node, io: ProcIO) -> Result<RshExitStatus,ShellError> {
+		dbg!(&node);
 		let argv = node.get_argv()?;
 		let mut expand_buffer = Vec::new();
 		for arg in &argv {
@@ -395,7 +395,7 @@ impl<'a> NodeWalker<'a> {
 			"pwd" => pwd(self.shellenv, node.span()),
 			"alias" => alias(self.shellenv, node),
 			"[" | "test" => test(node.get_argv()?.into()),
-			_ => unimplemented!()
+			_ => unimplemented!("found this builtin: {}",argv[0].text())
 		}
 	}
 
@@ -442,7 +442,6 @@ impl<'a> NodeWalker<'a> {
 			let tokens = expand::expand_token(self.shellenv, word);
 			debug!("got expanded tokens: {:?}",tokens);
 			for token in tokens {
-				dbg!(&token);
 				let cstring = CString::new(token.text()).unwrap();
 				args.push(cstring);
 			}
@@ -629,6 +628,20 @@ impl<'a> NodeWalker<'a> {
 
 
 	fn handle_command(&mut self, node: Node, mut io: ProcIO) -> Result<RshExitStatus, ShellError> {
+		// Let's expand aliases here
+		if let NdType::Command { ref argv } = node.nd_type {
+			// If the shellenv is allowing aliases, and the token is not from an expanded alias
+			if !self.shellenv.flags.contains(EnvFlags::NO_ALIAS) &&
+				 !argv.front().unwrap().flags().contains(WdFlags::FROM_ALIAS) {
+				let node = expand::expand_alias(self.shellenv, node.clone())?;
+
+				if !matches!(node.nd_type, NdType::Command {..}) {
+					// If the resulting alias expansion does not return this node
+					// then walk the resulting sub-tree
+					return self.walk_root(node, None, io)
+				}
+			}
+		}
 		let argv = self.extract_args(node.get_argv()?);
 		let redirs = node.get_redirs()?;
 		let span = node.span();
