@@ -5,7 +5,6 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::os::fd::RawFd;
 use libc::{getegid, geteuid};
 use log::{debug, info};
 use nix::fcntl::{open,OFlag};
@@ -16,7 +15,7 @@ use nix::NixPath;
 use crate::execute::{ProcIO, RshExitStatus};
 use crate::interp::parse::{NdType, Node, Span};
 use crate::interp::{helper, token};
-use crate::interp::token::{Redir, RedirType, Tk, TkType};
+use crate::interp::token::{Redir, RedirType, Tk};
 use crate::shellenv::ShellEnv;
 use crate::event::ShellError;
 

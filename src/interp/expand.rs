@@ -49,9 +49,8 @@ pub fn expand_arguments(shellenv: &ShellEnv, node: &mut Node) -> Result<Vec<Tk>,
 pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellError> {
 	match node.nd_type {
 		NdType::Command { ref mut argv } | NdType::Builtin { ref mut argv } => {
-			if let Some(cmd_tk) = argv.front() {
+			if let Some(cmd_tk) = argv.pop_front() {
 				if let Some(alias_content) = shellenv.get_alias(cmd_tk.text()) {
-					argv.pop_front();
 					let new_argv = take(argv);
 					let mut child_shellenv = shellenv.clone();
 					child_shellenv.mod_flags(|f| *f |= EnvFlags::NO_ALIAS);
@@ -67,10 +66,14 @@ pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellEr
 					// Trim `SOI` and `EOI` tokens
 					alias_tokens.pop_back();
 					alias_tokens.pop_front();
-
 					alias_tokens.extend(new_argv);
-					for token in &mut alias_tokens {
-						token.wd = token.wd.add_flag(WdFlags::FROM_ALIAS);
+
+					// Guard against recursive aliasing
+					// i.e. "alias grep="grep --color-auto"
+					if alias_tokens.front().is_some_and(|tk| tk.text() == cmd_tk.text()) {
+						for token in &mut alias_tokens {
+							token.wd = token.wd.add_flag(WdFlags::FROM_ALIAS);
+						}
 					}
 
 					state.tokens = alias_tokens;
@@ -80,6 +83,7 @@ pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellEr
 					}
 					Ok(state.ast)
 				} else {
+					argv.push_front(cmd_tk);
 					Ok(node)
 				}
 			} else {

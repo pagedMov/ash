@@ -1,4 +1,4 @@
-use crate::{event::ShellError, interp::{parse::{Node, ParseState, Span}, token::{self, Tk, WdFlags, WordDesc, BUILTINS, CMDSEP, KEYWORDS, REGEX, WHITESPACE}}, shellenv::{self, ShellEnv}};
+use crate::{event::ShellError, interp::{parse::Span, token::{Tk, WdFlags, WordDesc, BUILTINS, CMDSEP, KEYWORDS, REGEX, WHITESPACE}}};
 use libc::STDERR_FILENO;
 use log::{debug,trace};
 use std::{collections::VecDeque, os::fd::BorrowedFd};

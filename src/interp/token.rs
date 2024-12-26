@@ -8,8 +8,6 @@ use std::collections::VecDeque;
 use crate::event::ShellError;
 use crate::interp::parse::ParseState;
 use crate::interp::helper;
-use crate::shellenv;
-use crate::shellenv::ShellEnv;
 
 use super::parse::Span;
 

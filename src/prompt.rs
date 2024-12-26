@@ -8,9 +8,9 @@ use std::env;
 
 use tokio::sync::mpsc;
 use log::info;
-use rustyline::{self, completion::{Completer, FilenameCompleter}, config::Configurer, error::ReadlineError, history::{DefaultHistory, History}, ColorMode, Completer, Config, EditMode, Editor, Helper, Highlighter, Hinter, Validator};
+use rustyline::{self, completion::{Completer, FilenameCompleter}, config::Configurer, error::ReadlineError, history::{DefaultHistory, History}, ColorMode, Config, EditMode, Editor, Helper, Highlighter, Hinter, Validator};
 
-use crate::{event::{ShellError,ShellEvent}, shellenv::ShellEnv};
+use crate::{event::ShellEvent, shellenv::ShellEnv};
 use crate::interp::parse::descend;
 use crate::interp::expand;
 
