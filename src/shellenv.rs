@@ -12,7 +12,7 @@ use log::{debug, info, trace};
 use nix::unistd::write;
 
 use crate::event::{ShellError, ShellErrorFull};
-use crate::execute::{NodeWalker, RshExitStatus};
+use crate::execute::{NodeWalker, RshWaitStatus};
 use crate::interp::expand::expand_var;
 use crate::interp::helper;
 use crate::interp::parse::{descend, Node, Span};
@@ -21,22 +21,25 @@ bitflags! {
 	#[derive(Debug,Copy,Clone,PartialEq)]
 	pub struct EnvFlags: u32 {
 		// Guard conditions against infinite alias/var/function recursion
-		const NO_ALIAS = 0b0000001;
-		const NO_VAR = 0b0000010;
-		const NO_FUNC = 0b0000100;
+		const NO_ALIAS    = 0b00000000000001;
+		const NO_VAR      = 0b00000000000010;
+		const NO_FUNC     = 0b00000000000100;
+
+		// Context
+		const IN_FUNC     = 0b00000000001000; // Enables the `return` builtin
+		const LOGIN_SHELL = 0b00000000010000;
+		const INTERACTIVE = 0b00000000100000;
 	}
 }
 
 #[derive(Debug,PartialEq,Clone)]
 pub struct ShellEnv {
 	pub flags: EnvFlags,
-	pub interactive: bool,
-	pub login: bool,
 	pub env_vars: HashMap<String, String>,
 	pub variables: HashMap<String, String>,
 	pub aliases: HashMap<String, String>,
 	pub shopts: HashMap<String,usize>,
-	pub functions: HashMap<String, VecDeque<Node>>,
+	pub functions: HashMap<String, Box<Node>>,
 	pub parameters: HashMap<String, String>,
 	pub open_fds: HashSet<i32>,
 	pub last_input: Option<String>
@@ -48,15 +51,18 @@ impl ShellEnv {
 		let mut open_fds = HashSet::new();
 		let stderr = helper::get_stderr();
 		let shopts = init_shopts();
+		let mut flags = EnvFlags::empty();
+		// TODO: probably need to find a way to initialize env vars that doesnt rely on a parent process
 		let mut env_vars = std::env::vars().collect::<HashMap<String,String>>();
 		env_vars.insert("HIST_FILE".into(),"${HOME}/.rsh_hist".into());
+
+		if login { flags |= EnvFlags::LOGIN_SHELL; }
+		if interactive { flags |= EnvFlags::INTERACTIVE; }
 		open_fds.insert(0);
 		open_fds.insert(1);
 		open_fds.insert(2);
 		let mut shellenv = Self {
 			flags: EnvFlags::empty(),
-			interactive,
-			login,
 			env_vars,
 			variables: HashMap::new(),
 			aliases: HashMap::new(),
@@ -94,11 +100,11 @@ impl ShellEnv {
 	}
 
 	pub fn is_interactive(&self) -> bool {
-		self.interactive
+		self.flags.contains(EnvFlags::INTERACTIVE)
 	}
 
 	pub fn is_login(&self) -> bool {
-		self.interactive
+		self.flags.contains(EnvFlags::LOGIN_SHELL)
 	}
 
 	pub fn set_last_input(&mut self, input: &str) {
@@ -124,7 +130,7 @@ impl ShellEnv {
 				match walker.start_walk() {
 					Ok(code) => {
 						info!("Last exit status: {:?}", code);
-						if let RshExitStatus::Fail { code, cmd, span } = code {
+						if let RshWaitStatus::Fail { code, cmd, span } = code {
 							if code == 127 {
 								if let Some(cmd) = cmd {
 									let err = ShellErrorFull::from(self.get_last_input(),ShellError::from_no_cmd(&format!("Command not found: {}",cmd), span));
@@ -168,15 +174,21 @@ impl ShellEnv {
 	}
 
 	pub fn set_interactive(&mut self, interactive: bool) {
-		self.interactive = interactive;
+		if interactive {
+			self.flags |= EnvFlags::INTERACTIVE
+		} else {
+			self.flags &= !EnvFlags::INTERACTIVE
+		}
 	}
 
 	// Getters and Setters for `variables`
 	pub fn get_variable(&self, key: &str) -> Option<String> {
 		if let Some(value) = self.variables.get(key) {
 			Some(value.to_string())
+		} else if let Some(value) = self.env_vars.get(key) {
+			Some(value.to_string())
 		} else {
-			self.env_vars.get(key).map(|value| value.to_string())
+			self.get_parameter(key).map(|val| val.to_string())
 		}
 	}
 
@@ -225,12 +237,16 @@ impl ShellEnv {
 		self.aliases.get(key)
 	}
 
-	pub fn set_alias(&mut self, key: String, mut value: String) {
+	pub fn set_alias(&mut self, key: String, mut value: String) -> Result<(), String> {
+		if self.get_function(key.as_str()).is_some() {
+			return Err(format!("The name `{}` is already being used as a function",key))
+		}
 		if value.starts_with('"') && value.ends_with('"') {
 			value = value.strip_prefix('"').unwrap().into();
 			value = value.strip_suffix('"').unwrap().into();
 		}
 		self.aliases.insert(key, value);
+		Ok(())
 	}
 
 	pub fn remove_alias(&mut self, key: &str) -> Option<String> {
@@ -238,15 +254,19 @@ impl ShellEnv {
 	}
 
 	// Getters and Setters for `functions`
-	pub fn get_function(&self, name: &str) -> Option<&VecDeque<Node>> {
-		self.functions.get(name)
+	pub fn get_function(&self, name: &str) -> Option<Box<Node>> {
+		self.functions.get(name).cloned()
 	}
 
-	pub fn set_function(&mut self, name: String, body: VecDeque<Node>) {
+	pub fn set_function(&mut self, name: String, body: Box<Node>) -> Result<(),ShellError> {
+		if self.get_alias(name.as_str()).is_some() {
+			return Err(ShellError::from_parse(format!("The name `{}` is already being used as an alias",name).as_str(), body.span()))
+		}
 		self.functions.insert(name, body);
+		Ok(())
 	}
 
-	pub fn remove_function(&mut self, name: &str) -> Option<VecDeque<Node>> {
+	pub fn remove_function(&mut self, name: &str) -> Option<Box<Node>> {
 		self.functions.remove(name)
 	}
 
@@ -259,8 +279,12 @@ impl ShellEnv {
 		self.parameters.insert(key, value);
 	}
 
-	pub fn remove_parameter(&mut self, key: &str) -> Option<String> {
-		self.parameters.remove(key)
+	pub fn clear_pos_parameters(&mut self) {
+		let mut index = 1;
+		while let Some(_value) = self.get_parameter(index.to_string().as_str()) {
+			self.parameters.remove(index.to_string().as_str());
+			index += 1;
+		}
 	}
 
 	// Utility method to clear the environment

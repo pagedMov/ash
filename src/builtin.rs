@@ -12,7 +12,7 @@ use nix::sys::stat::Mode;
 use nix::unistd::{access, close, dup, dup2, isatty, write, AccessFlags};
 use nix::NixPath;
 
-use crate::execute::{ProcIO, RshExitStatus};
+use crate::execute::{ProcIO, RshWaitStatus};
 use crate::interp::parse::{NdType, Node, Span};
 use crate::interp::{helper, token};
 use crate::interp::token::{Redir, RedirType, Tk};
@@ -226,7 +226,7 @@ fn do_logical_op(
 	operator: Tk
 ) -> Result<bool, ShellError> {
 	args.push_front(command);
-	let result2 = test(std::mem::take(args)).map(|res| matches!(res,RshExitStatus::Success {..}))?;
+	let result2 = test(std::mem::take(args)).map(|res| matches!(res,RshWaitStatus::Success {..}))?;
 	match operator.text() {
 		"!" => { Ok(!result2) },
 		"-a" => { Ok(result1 && result2) },
@@ -246,7 +246,7 @@ fn do_logical_op(
 ///
 /// # Returns
 ///
-/// * `Ok(RshExitStatus)` - Returns a success or failure status based on the evaluation of the conditional expression.
+/// * `Ok(RshWaitStatus)` - Returns a success or failure status based on the evaluation of the conditional expression.
 /// * `Err(ShellError)` - Returns an appropriate `ShellError` if there is a syntax error or other issues with the arguments.
 ///
 /// # Examples
@@ -330,11 +330,11 @@ fn do_logical_op(
 /// # Panics
 ///
 /// This function does not panic.
-pub fn test(mut argv: VecDeque<Tk>) -> Result<RshExitStatus, ShellError> {
+pub fn test(mut argv: VecDeque<Tk>) -> Result<RshWaitStatus, ShellError> {
 	info!("Starting builtin test");
 	let span = Span::from(argv.front().unwrap().span().start,argv.back().unwrap().span().end);
-	let is_false = || -> Result<RshExitStatus, ShellError> { Ok(RshExitStatus::Fail { code: 1, cmd: Some("test".into()), span }) };
-	let is_true = || -> Result<RshExitStatus, ShellError> { Ok(RshExitStatus::Success { span }) };
+	let is_false = || -> Result<RshWaitStatus, ShellError> { Ok(RshWaitStatus::Fail { code: 1, cmd: Some("test".into()), span }) };
+	let is_true = || -> Result<RshWaitStatus, ShellError> { Ok(RshWaitStatus::Success { span }) };
 	let is_int = |tk: &Tk| -> bool { tk.text().parse::<i32>().is_ok() };
 	let to_int = |tk: Tk| -> Result<i32, ShellError> {
 		tk.text().parse::<i32>().map_err(|_| ShellError::from_syntax("Expected an integer in test", tk.span()))
@@ -461,7 +461,7 @@ pub fn test(mut argv: VecDeque<Tk>) -> Result<RshExitStatus, ShellError> {
 	}
 }
 
-pub fn alias(shellenv: &mut ShellEnv, node: Node) -> Result<RshExitStatus, ShellError> {
+pub fn alias(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus, ShellError> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front();
 	while let Some(arg) = argv.pop_front() {
@@ -471,10 +471,10 @@ pub fn alias(shellenv: &mut ShellEnv, node: Node) -> Result<RshExitStatus, Shell
 		let (alias,value) = arg.text().split_once('=').unwrap();
 		shellenv.set_alias(alias.into(), value.into());
 	}
-	Ok(RshExitStatus::Success { span: node.span() })
+	Ok(RshWaitStatus::Success { span: node.span() })
 }
 
-pub fn cd(shellenv: &mut ShellEnv, node: Node) -> Result<RshExitStatus,ShellError> {
+pub fn cd(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus,ShellError> {
 	let mut argv = node
 		.get_argv()?
 		.iter()
@@ -491,10 +491,10 @@ pub fn cd(shellenv: &mut ShellEnv, node: Node) -> Result<RshExitStatus,ShellErro
 	}
 	let path = Path::new(new_pwd.to_str().unwrap());
 	shellenv.change_dir(path, node.span())?;
-	Ok(RshExitStatus::Success { span: node.span() })
+	Ok(RshWaitStatus::Success { span: node.span() })
 }
 
-pub fn source(shellenv: &mut ShellEnv, node: Node) -> Result<RshExitStatus,ShellError> {
+pub fn source(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus,ShellError> {
 	let mut argv = node
 		.get_argv()?
 		.iter()
@@ -506,20 +506,20 @@ pub fn source(shellenv: &mut ShellEnv, node: Node) -> Result<RshExitStatus,Shell
 		let file_path = Path::new(OsStr::from_bytes(path.as_bytes()));
 		shellenv.source_file(file_path.to_path_buf(), node.span())?
 	}
-	Ok(RshExitStatus::Success { span: node.span() })
+	Ok(RshWaitStatus::Success { span: node.span() })
 }
 
-pub fn pwd(shellenv: &ShellEnv, span: Span) -> Result<RshExitStatus, ShellError> {
+pub fn pwd(shellenv: &ShellEnv, span: Span) -> Result<RshWaitStatus, ShellError> {
 	if let Some(pwd) = shellenv.get_variable("PWD") {
 		let stdout = helper::get_stdout();
 		write(stdout, pwd.as_bytes()).map_err(|e| ShellError::from_io(&e.to_string(), span))?;
-		Ok(RshExitStatus::Success { span })
+		Ok(RshWaitStatus::Success { span })
 	} else {
 		Err(ShellError::from_execf("PWD environment variable is unset", 1, span))
 	}
 }
 
-pub fn echo(node: Node, mut io: ProcIO) -> Result<RshExitStatus, ShellError> {
+pub fn echo(node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
 	let mut argv = node
 		.get_argv()?
 		.iter()
@@ -559,5 +559,5 @@ pub fn echo(node: Node, mut io: ProcIO) -> Result<RshExitStatus, ShellError> {
 
 	io.restore_fildescs()?;
 
-	result.map(|_| RshExitStatus::Success { span: node.span })
+	result.map(|_| RshWaitStatus::Success { span: node.span })
 }

@@ -8,7 +8,7 @@ use crate::event::ShellError;
 use crate::shellenv::ShellEnv;
 use crate::interp::token::{tokenize, RedirType, Tk, TkType};
 
-use super::token::{Redir, WdFlags};
+use super::token::{self, Redir, WdFlags};
 
 bitflags! {
 	#[derive(Debug,Clone,PartialEq)]
@@ -292,7 +292,7 @@ pub fn descend<'a>(input: &'a str, shellenv: &'a ShellEnv) -> Result<ParseState<
 		}
 	};
 
-	state = tokenize(state,true)?;
+	state = tokenize(state)?;
 
 	state = parse(state)?;
 
@@ -405,6 +405,10 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> Result<DescentContex
 				info!("Found subshell");
 				ctx.tokens.push_front(tk);
 				ctx = build_subshell(ctx)?;
+			}
+			FuncDef {..} => {
+				ctx.tokens.push_front(tk);
+				ctx = build_func_def(ctx)?;
 			}
 			Assignment => {
 				ctx.tokens.push_front(tk);
@@ -1446,8 +1450,30 @@ pub fn build_subshell(mut ctx: DescentContext) -> Result<DescentContext, ShellEr
 	Ok(ctx)
 }
 
-pub fn build_func_def(tokens: VecDeque<Tk>) -> Result<(Node, VecDeque<Tk>), ShellError> {
-	todo!("Implement build_func_def")
+pub fn build_func_def(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
+	let def = ctx.next_tk().unwrap();
+	if let TkType::FuncDef { ref name, ref body } = def.tk_type {
+		//TODO: initializing a new shellenv instead of cloning the current one here
+		//could cause issues later, keep an eye on this
+		let state = ParseState {
+			input: body.as_str(),
+			shellenv: &ShellEnv::new(false,false),
+			tokens: VecDeque::new(),
+			ast: Node::new()
+		};
+		let state = tokenize(state)?;
+		let state = parse(state)?;
+		let func_tree = state.ast.boxed();
+		let node = Node {
+			nd_type: NdType::FuncDef { name: name.to_string(), body: func_tree },
+			span: def.span(),
+			flags: NdFlags::empty(),
+			redirs: VecDeque::new()
+		};
+		ctx.attach_node(node);
+
+		Ok(ctx)
+	} else { unreachable!() }
 }
 
 pub fn build_assignment(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {

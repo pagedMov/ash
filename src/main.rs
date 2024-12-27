@@ -31,7 +31,7 @@ pub mod builtin;
 use std::{env, fs::File, io::Read, os::fd::{AsFd, BorrowedFd}};
 
 use event::{EventLoop, ShellError, ShellErrorFull};
-use execute::{NodeWalker, RshExitStatus};
+use execute::{NodeWalker, RshWaitStatus};
 use interp::parse::descend;
 use libc::STDERR_FILENO;
 use log::info;
@@ -57,17 +57,21 @@ async fn main() {
 
 async fn main_noninteractive(args: Vec<String>) {
 	let stderr = unsafe { BorrowedFd::borrow_raw(STDERR_FILENO) };
+	let mut pos_params: Vec<String> = vec![];
 	let input;
 
 	// Input Handling
 	if args[1] == "-c" {
 		if args.len() < 3 {
-			write(stderr.as_fd(), b"Expected an argument after '-c' flag\n").unwrap();
+			write(stderr.as_fd(), b"Expected a command after '-c' flag\n").unwrap();
 			return;
 		}
 		input = args[2].clone(); // Store the command string
 	} else {
 		let script_name = &args[1];
+		if args.len() > 2 {
+			pos_params = args[2..].to_vec();
+		}
 		let file = File::open(script_name);
 		match file {
 			Ok(mut script) => {
@@ -88,6 +92,10 @@ async fn main_noninteractive(args: Vec<String>) {
 	// Code Execution Logic
 	let mut shellenv = ShellEnv::new(false, false);
 	shellenv.set_last_input(&input);
+	for (index,param) in pos_params.into_iter().enumerate() {
+		let key = format!("{}",index + 1);
+		shellenv.set_parameter(key, param);
+	}
 	let state = descend(&input, &shellenv);
 	match state {
 		Ok(parse_state) => {
@@ -95,7 +103,7 @@ async fn main_noninteractive(args: Vec<String>) {
 			match walker.start_walk() {
 				Ok(code) => {
 					info!("Last exit status: {:?}", code);
-					if let RshExitStatus::Fail { code, cmd, span } = code {
+					if let RshWaitStatus::Fail { code, cmd, span } = code {
 						if code == 127 {
 							if let Some(cmd) = cmd {
 								let err = ShellErrorFull::from(shellenv.get_last_input(),ShellError::from_no_cmd(&cmd, span));

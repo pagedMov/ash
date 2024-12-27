@@ -1,4 +1,5 @@
 use libc::{c_int, pipe};
+use nix::sys::signal;
 use nix::unistd::{close, dup, dup2, execvpe, fork, ForkResult};
 use nix::fcntl::{open,OFlag};
 use nix::sys::stat::Mode;
@@ -111,26 +112,38 @@ impl Default for ProcIO {
 }
 
 #[derive(PartialEq,Debug)]
-pub enum RshExitStatus {
+pub enum RshWaitStatus {
 	Success { span: Span },
 	Fail { code: i32, cmd: Option<String>, span: Span },
+	Stopped { pid: i32 },
+	Terminated { signal: i32, pid: i32 },
+	Continued { pid: i32 },
+	Running { pid: i32 },
+	Killed { signal: i32, pid: i32 },
+	TimeOut { pid: i32 },
+
+	// These wait statuses are returned by builtins like `return` and `break`
+	SIGRETURN, // Return from a function
+	SIGCONT, // Restart a loop from the beginning
+	SIGBREAK, // Break a loop
+	SIGRSHEXIT // Internal call to exit early
 }
 
-impl RshExitStatus {
+impl RshWaitStatus {
 	pub fn new() -> Self {
-		RshExitStatus::Success { span: Span::new() }
+		RshWaitStatus::Success { span: Span::new() }
 	}
 	pub fn s(span: Span) -> Self {
-		RshExitStatus::Success { span }
+		RshWaitStatus::Success { span }
 	}
 	pub fn f(code: i32, cmd: Option<String>, span: Span) -> Self {
-		RshExitStatus::Fail { code, cmd, span }
+		RshWaitStatus::Fail { code, cmd, span }
 	}
 }
 
-impl Default for RshExitStatus {
+impl Default for RshWaitStatus {
 	fn default() -> Self {
-		RshExitStatus::new()
+		RshWaitStatus::new()
 	}
 }
 
@@ -147,9 +160,9 @@ impl<'a> NodeWalker<'a> {
 			shellenv
 		}
 	}
-	pub fn start_walk(&mut self) -> Result<RshExitStatus,ShellError> {
+	pub fn start_walk(&mut self) -> Result<RshWaitStatus,ShellError> {
 		info!("Going on a walk...");
-		let mut exit_status = RshExitStatus::new();
+		let mut exit_status = RshWaitStatus::new();
 		let mut nodes;
 		if let NdType::Root { ref mut deck } = self.ast.nd_type {
 			nodes = std::mem::take(deck);
@@ -169,16 +182,36 @@ impl<'a> NodeWalker<'a> {
 	/// stdout: Another optional arg containing a raw fd. This fd tells the kernel where to write
 	/// stdout to.
 	///
-	/// # Outputs: An RshExitStatus or a shell error.
-	fn walk(&mut self, node: Node, io: ProcIO) -> Result<RshExitStatus,ShellError> {
+	/// # Outputs: An RshWaitStatus or a shell error.
+	fn walk(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
 		let last_status;
 		match node.nd_type {
-			NdType::Command {..} => {
-				trace!("Found command: {:?}",node);
-				last_status = self.handle_command(node, io)?;
-			}
-			NdType::Builtin {..} => {
-				last_status = self.handle_builtin(node, io)?;
+			NdType::Command { ref argv } | NdType::Builtin { ref argv } => {
+				let mut node = node.clone();
+				let command_name = argv.front().unwrap();
+				let not_from_alias = !command_name.flags().contains(WdFlags::FROM_ALIAS);
+				let is_not_command_builtin = command_name.text() != "command";
+				if not_from_alias && is_not_command_builtin {
+					node = expand::expand_alias(self.shellenv, node.clone())?;
+				}
+				if let Some(_func) = self.shellenv.get_function(command_name.text()) {
+					last_status = self.handle_function(node, io)?;
+				} else if !matches!(node.nd_type, NdType::Command {..} | NdType::Builtin {..}) {
+					// If the resulting alias expansion returns a root node
+					// then walk the resulting sub-tree
+					return self.walk_root(node, None, io)
+				} else {
+					match node.nd_type {
+						NdType::Command {..} => {
+							trace!("Found command: {:?}",node);
+							last_status = self.handle_command(node, io)?;
+						}
+						NdType::Builtin {..} => {
+							last_status = self.handle_builtin(node, io)?;
+						}
+						_ => unreachable!()
+					}
+				}
 			}
 			//NdType::Function { .. } => {
 			//todo!("handle simple commands")
@@ -208,21 +241,21 @@ impl<'a> NodeWalker<'a> {
 				last_status = self.handle_subshell(node,io)?;
 			}
 			NdType::FuncDef {..} => {
-				todo!("handle function definition")
+				last_status = self.handle_func_def(node)?;
 			}
 			NdType::Assignment {..} => {
 				last_status = self.handle_assignment(node)?;
 			}
 			NdType::Cmdsep => {
-				last_status = RshExitStatus::new();
+				last_status = RshWaitStatus::new();
 			}
 			_ => unimplemented!("Support for node type `{:?}` is not yet implemented",node.nd_type)
 		}
 		Ok(last_status)
 	}
 
-	fn walk_root(&mut self, mut node: Node, break_condition: Option<bool>, io: ProcIO) -> Result<RshExitStatus,ShellError> {
-		let mut last_status = RshExitStatus::new();
+	fn walk_root(&mut self, mut node: Node, break_condition: Option<bool>, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
+		let mut last_status = RshWaitStatus::new();
 		if !node.redirs.is_empty() {
 			node = parse::propagate_redirections(node)?;
 		}
@@ -232,12 +265,12 @@ impl<'a> NodeWalker<'a> {
 				if let Some(condition) = break_condition {
 					match condition {
 						true => {
-							if let RshExitStatus::Fail {..} = last_status {
+							if let RshWaitStatus::Fail {..} = last_status {
 								break
 							}
 						}
 						false => {
-							if let RshExitStatus::Success {..} = last_status {
+							if let RshWaitStatus::Success {..} = last_status {
 								break
 							}
 						}
@@ -248,11 +281,19 @@ impl<'a> NodeWalker<'a> {
 		Ok(last_status)
 	}
 
+	fn handle_func_def(&mut self, node: Node) -> Result<RshWaitStatus, ShellError> {
+		let last_status = RshWaitStatus::new();
+		if let NdType::FuncDef { name, body } = node.nd_type {
+			self.shellenv.set_function(name, body)?;
+			Ok(last_status)
+		} else { unreachable!() }
+	}
+
 	/// For loops in bash can have multiple loop variables, e.g. `for a b c in 1 2 3 4 5 6`
 	/// In this case, loop_vars are also iterated through, e.g. a = 1, b = 2, c = 3, etc
 	/// Here, we use the modulo operator to figure out which variable to set on each iteration.
-	fn handle_for(&mut self, node: Node, io: ProcIO) -> Result<RshExitStatus, ShellError> {
-		let mut last_status = RshExitStatus::new();
+	fn handle_for(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus, ShellError> {
+		let mut last_status = RshWaitStatus::new();
 		let body_io = ProcIO::from(None, io.stdout, io.stderr);
 		let redirs = node.get_redirs()?;
 		self.handle_redirs(redirs.into())?;
@@ -283,8 +324,8 @@ impl<'a> NodeWalker<'a> {
 		Ok(last_status)
 	}
 
-	fn handle_loop(&mut self, node: Node, io: ProcIO) -> Result<RshExitStatus, ShellError> {
-		let mut last_status = RshExitStatus::new();
+	fn handle_loop(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus, ShellError> {
+		let mut last_status = RshWaitStatus::new();
 		let cond_io = ProcIO::from(io.stdin, None, None);
 		let body_io = ProcIO::from(None, io.stdout, io.stderr);
 
@@ -298,12 +339,12 @@ impl<'a> NodeWalker<'a> {
 
 				match condition {
 					true => {
-						if !matches!(condition_status,RshExitStatus::Success {..}) {
+						if !matches!(condition_status,RshWaitStatus::Success {..}) {
 							break; // Exit for a `while` loop when condition is false
 						}
 					}
 					false => {
-						if matches!(condition_status,RshExitStatus::Success {..}) {
+						if matches!(condition_status,RshWaitStatus::Success {..}) {
 							break; // Exit for an `until` loop when condition is true
 						}
 					}
@@ -314,8 +355,8 @@ impl<'a> NodeWalker<'a> {
 
 				// Check for break or continue signals
 				// match last_status {
-				// RshExitStatus::Break => return Ok(RshExitStatus::Break),
-				// RshExitStatus::Continue => continue,
+				// RshWaitStatus::Break => return Ok(RshWaitStatus::Break),
+				// RshWaitStatus::Continue => continue,
 				// _ => {}
 				// }
 			}
@@ -328,8 +369,8 @@ impl<'a> NodeWalker<'a> {
 		}
 	}
 
-	fn handle_if(&mut self, node: Node, io: ProcIO) -> Result<RshExitStatus, ShellError> {
-		let mut last_result = RshExitStatus::new();
+	fn handle_if(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus, ShellError> {
+		let mut last_result = RshWaitStatus::new();
 		let cond_io = ProcIO::from(io.stdin, None, None);
 		let body_io = ProcIO::from(None, io.stdout, io.stderr);
 
@@ -338,7 +379,7 @@ impl<'a> NodeWalker<'a> {
 				let cond = *block.condition;
 				let body = *block.body;
 				last_result = self.walk_root(cond,Some(false),cond_io.clone())?;
-				if let RshExitStatus::Success {..} = last_result {
+				if let RshWaitStatus::Success {..} = last_result {
 					return self.walk_root(body,None,body_io)
 				}
 			}
@@ -349,17 +390,17 @@ impl<'a> NodeWalker<'a> {
 		Ok(last_result)
 	}
 
-	fn handle_chain(&mut self, node: Node) -> Result<RshExitStatus, ShellError> {
-		let mut last_status = RshExitStatus::new();
+	fn handle_chain(&mut self, node: Node) -> Result<RshWaitStatus, ShellError> {
+		let mut last_status = RshWaitStatus::new();
 
 		if let NdType::Chain { left, right, op } = node.nd_type {
 			match self.walk(*left, ProcIO::new())? {
-				RshExitStatus::Success {..} => {
+				RshWaitStatus::Success {..} => {
 					if let NdType::And = op.nd_type {
 						last_status = self.walk(*right, ProcIO::new())?;
 					}
 				}
-				RshExitStatus::Fail {..} => {
+				_ => {
 					if let NdType::Or = op.nd_type {
 						last_status = self.walk(*right, ProcIO::new())?;
 					}
@@ -371,16 +412,16 @@ impl<'a> NodeWalker<'a> {
 	}
 
 
-	fn handle_assignment(&mut self, node: Node) -> Result<RshExitStatus,ShellError> {
+	fn handle_assignment(&mut self, node: Node) -> Result<RshWaitStatus,ShellError> {
 		let span = node.span();
 		if let NdType::Assignment { name, value } = node.nd_type {
 			let value = value.unwrap_or_default();
 			self.shellenv.set_variable(name, value);
 		}
-		Ok(RshExitStatus::s(span))
+		Ok(RshWaitStatus::s(span))
 	}
 
-	fn handle_builtin(&mut self, mut node: Node, io: ProcIO) -> Result<RshExitStatus,ShellError> {
+	fn handle_builtin(&mut self, mut node: Node, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
 		let argv = node.get_argv()?;
 		let mut expand_buffer = Vec::new();
 		for arg in &argv {
@@ -529,7 +570,7 @@ impl<'a> NodeWalker<'a> {
 			Ok(())
 	}
 
-	fn handle_subshell(&mut self, node: Node, io: ProcIO) -> Result<RshExitStatus,ShellError> {
+	fn handle_subshell(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
 		todo!()
 	}
 
@@ -547,7 +588,7 @@ impl<'a> NodeWalker<'a> {
 	///
 	/// # Returns
 	///
-	/// * `Result<RshExitStatus, ShellError>` - Returns the exit status of the last command in the pipeline.
+	/// * `Result<RshWaitStatus, ShellError>` - Returns the exit status of the last command in the pipeline.
 	/// * Returns an appropriate `ShellError` if there is an issue with setting up the pipeline or executing the commands.
 	///
 	/// # Examples
@@ -586,7 +627,7 @@ impl<'a> NodeWalker<'a> {
 	/// # Panics
 	///
 	/// This function does not panic.
-	fn handle_pipeline(&mut self, node: Node, io: ProcIO) -> Result<RshExitStatus, ShellError> {
+	fn handle_pipeline(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus, ShellError> {
 			let (left, right, both) = if let NdType::Pipeline { left, right, both } = &node.nd_type {
 					(*left.clone(), *right.clone(), both)
 			} else {
@@ -628,13 +669,36 @@ impl<'a> NodeWalker<'a> {
 			right_status
 	}
 
+	fn handle_function(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
+		if let NdType::Command { mut argv } = node.nd_type {
+			let func_name = argv.pop_front().unwrap();
+			let mut pos_params = vec![];
+			while let Some(token) = argv.pop_front() {
+				pos_params.push(token.text().to_string())
+			}
+			// Unwrap is safe here because we checked for Some() in self.walk()
+			let mut func = self.shellenv.get_function(func_name.text()).unwrap();
+			for redir in node.redirs {
+				func.redirs.push_back(redir.clone());
+			}
+			let mut sub_shellenv = self.shellenv.clone();
+			sub_shellenv.clear_pos_parameters();
+			for (index,param) in pos_params.into_iter().enumerate() {
+				sub_shellenv.set_parameter((index + 1).to_string(), param);
+			}
+			let mut sub_walker = NodeWalker::new(*func.clone(), &mut sub_shellenv);
 
-	fn handle_command(&mut self, node: Node, mut io: ProcIO) -> Result<RshExitStatus, ShellError> {
+			// Returns exit status or shell error
+			sub_walker.walk_root(*func, None, io)
+		} else { unreachable!() }
+	}
+
+
+	fn handle_command(&mut self, node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
 		// Let's expand aliases here
 		if let NdType::Command { ref argv } = node.nd_type {
 			// If the shellenv is allowing aliases, and the token is not from an expanded alias
-			if !self.shellenv.flags.contains(EnvFlags::NO_ALIAS) &&
-				 !argv.front().unwrap().flags().contains(WdFlags::FROM_ALIAS) {
+			if !argv.front().unwrap().flags().contains(WdFlags::FROM_ALIAS) {
 				let node = expand::expand_alias(self.shellenv, node.clone())?;
 
 				if !matches!(node.nd_type, NdType::Command {..}) {
@@ -672,9 +736,12 @@ impl<'a> NodeWalker<'a> {
 				// Wait for the child process to finish
 				match waitpid(child, None) {
 					Ok(WaitStatus::Exited(_, code)) => match code {
-						0 => Ok(RshExitStatus::Success { span }),
-						_ => Ok(RshExitStatus::Fail { code, cmd, span }),
+						0 => Ok(RshWaitStatus::Success { span }),
+						_ => Ok(RshWaitStatus::Fail { code, cmd, span }),
 					},
+					Ok(WaitStatus::Signaled(_,signal,_)) => {
+						Ok(RshWaitStatus::Fail { code: 128 + signal as i32, cmd, span })
+					}
 					Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result", 1, node.span())),
 					Err(err) => Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, node.span())),
 				}

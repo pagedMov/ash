@@ -1,3 +1,4 @@
+use crate::event::Signals;
 use crate::prompt::rustyline::Context;
 use im::HashSet;
 use nix::NixPath;
@@ -150,20 +151,30 @@ fn init_prompt(shellenv: &ShellEnv) -> Editor<RshHelper, DefaultHistory> {
 pub async fn prompt(sender: mpsc::Sender<ShellEvent>, shellenv: &mut ShellEnv) {
 	let mut rl = init_prompt(shellenv);
 	let hist_path = expand::expand_var(shellenv, "$HIST_FILE".into());
-	let readline = rl.readline(">> ");
-	if let Ok(line) = readline {
-		let _ = rl.history_mut().add(&line);
-		let _ = rl.history_mut().save(Path::new(&hist_path));
-		shellenv.set_last_input(&line);
-		let state = descend(&line,shellenv);
-		match state {
-			Ok(parse_state) => {
-				let _ = sender.send(ShellEvent::NewAST(parse_state.ast)).await;
-			}
-			Err(e) => {
-				let _ = sender.send(ShellEvent::CatchError(e)).await;
-				let _ = sender.send(ShellEvent::Prompt).await;
+	match rl.readline(">> ") {
+		Ok(line) => {
+			let _ = rl.history_mut().add(&line);
+			let _ = rl.history_mut().save(Path::new(&hist_path));
+			shellenv.set_last_input(&line);
+			let state = descend(&line,shellenv);
+			match state {
+				Ok(parse_state) => {
+					let _ = sender.send(ShellEvent::NewAST(parse_state.ast)).await;
+				}
+				Err(e) => {
+					let _ = sender.send(ShellEvent::CatchError(e)).await;
+				}
 			}
 		}
+		Err(ReadlineError::Interrupted) => {
+			let _ = sender.send(ShellEvent::Signal(Signals::SIGINT)).await;
+		}
+		Err(ReadlineError::Eof) => {
+			let _ = sender.send(ShellEvent::Signal(Signals::SIGQUIT)).await;
+		}
+		Err(e) => {
+			eprintln!("{:?}",e);
+		}
 	}
+	let _ = sender.send(ShellEvent::Prompt).await;
 }

@@ -85,6 +85,7 @@ pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
 		"dub_string" => r#"^\"([^\"]*)\"$"#,
 		"var_sub" => r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})",
 		"assignment" => r"^[A-Za-z_][A-Za-z0-9_]*=.*$",
+		"funcdef" => r"^[\x20-\x7E]*\(\)\s+\{[\x20-\x7E\n]*\}",
 		"operator" => r"(?:&&|\|\||[><]=?|[|&])",
 		"cmdsep" => r"^(?:\n|;)$",
 		"ident" => r"^[\x20-\x7E]*$",
@@ -117,6 +118,7 @@ pub enum TkType {
 	Function,
 
 	Redirection { redir: Redir },
+	FuncDef { name: String, body: String },
 	Assignment, // `=`
 	LogicAnd, // `&&`
 	LogicOr, // `||`
@@ -127,8 +129,6 @@ pub enum TkType {
 	// Grouping and Subshells
 	ProcessSub,
 	Subshell, // `(`
-	BraceGroupStart, // `{`
-	BraceGroupEnd,   // `}`
 
 	// Strings and Identifiers
 	String, // Generic string literal
@@ -138,7 +138,6 @@ pub enum TkType {
 	BraceExpansion,
 	VariableSub, // `$var`, `${var}`
 	CommandSub, // `$(command)`
-	ArithmeticSub, // `$((expression))`
 
 	// Comments
 	Comment, // `#`
@@ -207,15 +206,14 @@ impl Tk {
 				wd = wd.add_flag(WdFlags::IS_SUB);
 				TkType::ProcessSub
 			},
+			_ if REGEX["funcdef"].is_match(&text) => {
+				trace!("Matched function definition: {}",text);
+				Self::split_func(&wd)?
+			}
 			_ if REGEX["command_sub"].is_match(&text) => {
 				trace!("Matched command substitution: {}", text);
 				wd = wd.add_flag(WdFlags::IS_SUB);
 				TkType::CommandSub
-			},
-			_ if REGEX["arithmetic"].is_match(&text) => {
-				trace!("Matched arithmetic substitution: {}", text);
-				wd = wd.add_flag(WdFlags::IS_SUB);
-				TkType::ArithmeticSub
 			},
 			_ if REGEX["subshell"].is_match(&text) => {
 				trace!("Matched subshell: {}", text);
@@ -239,7 +237,6 @@ impl Tk {
 				trace!("Matched identifier: {}", text);
 				if text.starts_with("./") || text.starts_with('/') {
 					wd = wd.add_flag(WdFlags::IS_PATH);
-					dbg!(&wd.flags);
 				}
 				TkType::Ident
 			},
@@ -270,6 +267,27 @@ impl Tk {
 			"in" => Ok(TkType::In),
 			_ => Err(ShellError::from_parse(format!("Unrecognized keyword: {}",wd.text).as_str(), wd.span))
 		}
+	}
+	fn split_func(wd: &WordDesc) -> Result<TkType,ShellError> {
+		let func_raw = &wd.text;
+		let (mut name,mut body) = func_raw.split_once(' ').unwrap();
+		name = name.trim();
+		body = body.trim();
+		if name.ends_with("()") {
+			name = name.strip_suffix("()").unwrap();
+			name = name.trim();
+		}
+		if body.starts_with('{') && body.ends_with('}') {
+			body = body.strip_prefix('{').unwrap();
+			body = body.strip_suffix('}').unwrap();
+			body = body.trim();
+		} else {
+			return Err(ShellError::from_internal(format!("This body made it to split_func with no surrounding braces: {}",body).as_str(), wd.span));
+		}
+		let name = name.to_string();
+		let body = body.to_string();
+
+		Ok(TkType::FuncDef { name, body })
 	}
 	fn build_redir(wd: &WordDesc) -> Result<TkType,ShellError> {
 		let text = wd.text.clone();
@@ -440,7 +458,13 @@ impl WordDesc {
 	}
 }
 
-pub fn tokenize(state: ParseState,check_aliases: bool) -> Result<ParseState,ShellError> {
+fn skip_whitespace(chars: &mut VecDeque<char>) {
+	while chars.front().is_some_and(|ch| ch == &' ' || ch == &'\t') {
+		chars.pop_front();
+	}
+}
+
+pub fn tokenize(state: ParseState) -> Result<ParseState,ShellError> {
 	debug!("Starting tokenization with input: {:?}", state.input);
 
 	let mut word_desc = WordDesc {
@@ -539,9 +563,34 @@ pub fn tokenize(state: ParseState,check_aliases: bool) -> Result<ParseState,Shel
 					}
 				}
 			}
+
+			'(' if !word_desc.text.is_empty() && !word_desc.contains_flag(WdFlags::IS_ARG) => {
+				// This might be a function definition?
+				word_desc = word_desc.add_char(c);
+
+				if chars.front().is_none_or(|ch| ch != &')') {
+					return Err(ShellError::from_parse("This open parenthesis is misplaced", Span::from(word_desc.span.end,word_desc.span.end)))
+				}
+
+				word_desc = word_desc.add_char(chars.pop_front().unwrap());
+				// TODO: find a better way to handle whitespace here
+				word_desc = word_desc.add_char(' ');
+				skip_whitespace(&mut chars);
+
+				if chars.front().is_none_or(|ch| ch != &'{') {
+					return Err(ShellError::from_parse("Expected a body for this function definition", word_desc.span))
+				}
+				while let Some(ch) = chars.pop_front() {
+					word_desc = word_desc.add_char(ch);
+					if ch == '}' { break }
+				}
+				word_desc
+			}
+
 			'(' | '{' => {
 				word_desc.add_char(c).delimit(c)
 			}
+
 			_ if helper::quoted(&word_desc) => {
 				trace!("Inside quoted context: {:?}", word_desc.flags);
 				match c {
@@ -571,6 +620,7 @@ pub fn tokenize(state: ParseState,check_aliases: bool) -> Result<ParseState,Shel
 					}
 				}
 			}
+
 			'"' => {
 				if is_arg {
 					word_desc = word_desc.add_flag(WdFlags::IS_ARG);
@@ -579,6 +629,7 @@ pub fn tokenize(state: ParseState,check_aliases: bool) -> Result<ParseState,Shel
 				trace!("Double quote found, toggling DUB_QUOTED flag");
 				word_desc.toggle_flag(WdFlags::DUB_QUOTED)
 			}
+
 			'\'' => {
 				if is_arg {
 					word_desc = word_desc.add_flag(WdFlags::IS_ARG);
@@ -587,6 +638,7 @@ pub fn tokenize(state: ParseState,check_aliases: bool) -> Result<ParseState,Shel
 				trace!("Single quote found, toggling SNG_QUOTED flag");
 				word_desc.toggle_flag(WdFlags::SNG_QUOTED)
 			}
+
 			'&' | '|' => {
 				word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
 				word_desc = word_desc.add_char(c);
@@ -613,6 +665,7 @@ pub fn tokenize(state: ParseState,check_aliases: bool) -> Result<ParseState,Shel
 				word_desc = word_desc.add_flag(WdFlags::IS_OP);
 				helper::finalize_word(&word_desc, &mut tokens)?
 			}
+
 			_ if helper::cmdsep(&c) => {
 				trace!("Command separator found: {:?}", c);
 				if is_arg {
@@ -636,6 +689,7 @@ pub fn tokenize(state: ParseState,check_aliases: bool) -> Result<ParseState,Shel
 				is_arg = false; // Next word is part of a new command
 				word_desc
 			}
+
 			')' => {
 				trace!("Case separator found: {:?}", c);
 				word_desc = word_desc.add_flag(WdFlags::IS_ARG); // Make sure this doesn't get interpreted as a keyword
@@ -644,6 +698,7 @@ pub fn tokenize(state: ParseState,check_aliases: bool) -> Result<ParseState,Shel
 				is_arg = false; // Next word is part of a new command
 				word_desc
 			}
+
 			_ if helper::wspace(&c) => {
 				trace!("Whitespace found: {:?}", c);
 				trace!("is_arg: {}", is_arg);

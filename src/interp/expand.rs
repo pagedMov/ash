@@ -11,7 +11,8 @@ use super::parse::{self, NdType, Node, ParseState};
 use super::token;
 
 pub fn check_globs(string: String) -> bool {
-	string.chars().any(|t| matches!(t, '?' | '*'))
+	string.has_unescaped('?') ||
+	string.has_unescaped('*')
 }
 
 /// Handles the expansion of command arguments
@@ -61,7 +62,7 @@ pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellEr
 						ast: Node::new(),
 					};
 
-					let mut state = token::tokenize(state, false)?;
+					let mut state = token::tokenize(state)?;
 					let mut alias_tokens = state.tokens;
 					// Trim `SOI` and `EOI` tokens
 					alias_tokens.pop_back();
@@ -105,7 +106,14 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 	working_buffer.push_back(token.clone());
 	while let Some(mut token) = working_buffer.pop_front() {
 		let is_glob = check_globs(token.text().into());
+		let expand_home = token.flags().contains(WdFlags::IS_ARG) && token.text().has_unescaped('~');
 		let is_brace_expansion = helper::is_brace_expansion(token.text());
+
+		if expand_home {
+			// If this unwrap fails, god help you
+			let home = shellenv.get_variable("HOME").unwrap();
+			token.wd.text = token.wd.text.replace('~',&home);
+		}
 
 		if !is_glob && !is_brace_expansion {
 			debug!("expanding var for {}",token.text());

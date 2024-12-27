@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};
 
-use crate::execute::RshExitStatus;
+use crate::execute::RshWaitStatus;
 use crate::interp::parse::{Node, Span};
 use crate::{execute, prompt};
 use crate::shellenv::ShellEnv;
@@ -309,7 +309,6 @@ impl<'a> EventLoop<'a> {
 			match event {
 				ShellEvent::Prompt => {
 					// Trigger the prompt logic.
-					info!("Received prompt signal");
 					prompt::prompt(self.inbox(),self.shellenv).await;
 				}
 				ShellEvent::Exit(exit_code) => {
@@ -324,7 +323,7 @@ impl<'a> EventLoop<'a> {
 					match walker.start_walk() {
 						Ok(code) => {
 							info!("Last exit status: {:?}",code);
-							if let RshExitStatus::Fail { code, cmd, span } = code {
+							if let RshWaitStatus::Fail { code, cmd, span } = code {
 								if code == 127 {
 									if let Some(cmd) = cmd {
 										let err = ShellErrorFull::from(self.shellenv.get_last_input(),ShellError::from_no_cmd(&cmd, span));
@@ -338,9 +337,6 @@ impl<'a> EventLoop<'a> {
 							let _ = write(stderr, format!("{}",err).as_bytes());
 						}
 					}
-					if self.shellenv.is_interactive() {
-						self.inbox().send(ShellEvent::Prompt).await.unwrap()
-					}
 				}
 				ShellEvent::SubprocessExited(pid, exit_code) => {
 					// Log the exit of a subprocess.
@@ -348,7 +344,7 @@ impl<'a> EventLoop<'a> {
 				}
 				ShellEvent::Signal(signal) => {
 					// Handle received signals.
-					debug!("Received signal: {:?}", signal);
+					self.handle_signal(signal).await;
 				}
 				ShellEvent::CatchError(err) => {
 					// Handle errors, exiting if fatal.
@@ -365,11 +361,19 @@ impl<'a> EventLoop<'a> {
 		}
 		Ok(code)
 	}
+	async fn handle_signal(&self, signal: Signals) {
+		match signal {
+			Signals::SIGQUIT => {
+				std::process::exit(0);
+			}
+			_ => { },
+		}
+	}
 }
 
 pub struct SignalListener {
 	outbox: mpsc::Sender<ShellEvent>,
-	//sigint: Signal,
+	sigint: Signal,
 	sigio: Signal,
 	sigpipe: Signal,
 	sigtstp: Signal,
@@ -388,7 +392,7 @@ impl SignalListener {
 			// Signal listeners
 			// TODO: figure out what to do instead of unwrapping
 			outbox,
-			//sigint: signal(SignalKind::interrupt()).unwrap(),
+			sigint: signal(SignalKind::interrupt()).unwrap(),
 			sigio: signal(SignalKind::io()).unwrap(),
 			sigpipe: signal(SignalKind::pipe()).unwrap(),
 			sigtstp: signal(SignalKind::from_raw(20)).unwrap(),
@@ -402,7 +406,7 @@ impl SignalListener {
 		}
 	}
 	pub async fn signal_listen(&mut self) -> Result<i32, ShellError> {
-		//let sigint = &mut self.sigint;
+		let sigint = &mut self.sigint;
 		let sigio = &mut self.sigio;
 		let sigpipe = &mut self.sigpipe;
 		let sigtstp = &mut self.sigtstp;
@@ -416,10 +420,10 @@ impl SignalListener {
 
 		loop {
 			tokio::select! {
-				//_ = sigint.recv() => {
-				//self.outbox.send(ShellEvent::Signal(Signals::SIGINT)).await.unwrap();
+				_ = sigint.recv() => {
+					self.outbox.send(ShellEvent::Signal(Signals::SIGINT)).await.unwrap();
 				// Handle SIGINT
-				//}
+				}
 				_ = sigio.recv() => {
 					self.outbox.send(ShellEvent::Signal(Signals::SIGIO)).await.unwrap();
 					// Handle SIGIO
