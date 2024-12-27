@@ -36,6 +36,7 @@ use interp::parse::descend;
 use libc::STDERR_FILENO;
 use log::info;
 use nix::unistd::write;
+use shellenv::EnvFlags;
 
 //use crate::event::EventLoop;
 use crate::shellenv::ShellEnv;
@@ -90,7 +91,7 @@ async fn main_noninteractive(args: Vec<String>) {
 	}
 
 	// Code Execution Logic
-	let mut shellenv = ShellEnv::new(false, false);
+	let mut shellenv = ShellEnv::new(EnvFlags::empty());
 	shellenv.set_last_input(&input);
 	for (index,param) in pos_params.into_iter().enumerate() {
 		let key = format!("{}",index + 1);
@@ -127,7 +128,7 @@ async fn main_noninteractive(args: Vec<String>) {
 
 async fn main_interactive() {
 	env_logger::init();
-	let mut shellenv = ShellEnv::new(false,true);
+	let mut shellenv = ShellEnv::new(EnvFlags::INTERACTIVE);
 	let mut event_loop = EventLoop::new(&mut shellenv);
 	let _ = event_loop.listen().await;
 }

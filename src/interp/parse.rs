@@ -5,7 +5,7 @@ use log::{error,debug,info,trace};
 use std::mem::take;
 
 use crate::event::ShellError;
-use crate::shellenv::ShellEnv;
+use crate::shellenv::{EnvFlags, ShellEnv};
 use crate::interp::token::{tokenize, RedirType, Tk, TkType};
 
 use super::token::{self, Redir, WdFlags};
@@ -1457,7 +1457,7 @@ pub fn build_func_def(mut ctx: DescentContext) -> Result<DescentContext, ShellEr
 		//could cause issues later, keep an eye on this
 		let state = ParseState {
 			input: body.as_str(),
-			shellenv: &ShellEnv::new(false,false),
+			shellenv: &ShellEnv::new(EnvFlags::empty()),
 			tokens: VecDeque::new(),
 			ast: Node::new()
 		};

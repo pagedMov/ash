@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use bitflags::bitflags;
 use libc::STDERR_FILENO;
 use log::{debug, info, trace};
-use nix::unistd::write;
+use nix::unistd::{gethostname, write, User};
 
 use crate::event::{ShellError, ShellErrorFull};
 use crate::execute::{NodeWalker, RshWaitStatus};
@@ -29,6 +29,7 @@ bitflags! {
 		const IN_FUNC     = 0b00000000001000; // Enables the `return` builtin
 		const LOGIN_SHELL = 0b00000000010000;
 		const INTERACTIVE = 0b00000000100000;
+		const CLEAN       = 0b00000001000000; // Do not inherit env vars from parent
 	}
 }
 
@@ -47,17 +48,13 @@ pub struct ShellEnv {
 
 impl ShellEnv {
 	// Constructor
-	pub fn new(login: bool, interactive: bool) -> Self {
+	pub fn new(flags: EnvFlags) -> Self {
 		let mut open_fds = HashSet::new();
 		let stderr = helper::get_stderr();
 		let shopts = init_shopts();
-		let mut flags = EnvFlags::empty();
 		// TODO: probably need to find a way to initialize env vars that doesnt rely on a parent process
-		let mut env_vars = std::env::vars().collect::<HashMap<String,String>>();
-		env_vars.insert("HIST_FILE".into(),"${HOME}/.rsh_hist".into());
-
-		if login { flags |= EnvFlags::LOGIN_SHELL; }
-		if interactive { flags |= EnvFlags::INTERACTIVE; }
+		let clean_env = flags.contains(EnvFlags::CLEAN);
+		let env_vars = Self::init_env_vars(clean_env);
 		open_fds.insert(0);
 		open_fds.insert(1);
 		open_fds.insert(2);
@@ -82,7 +79,7 @@ impl ShellEnv {
 		} else {
 				eprintln!("Warning: Runtime commands file '{}' not found.", runtime_commands_path.display());
 		}
-    if login {
+    if flags.contains(EnvFlags::LOGIN_SHELL) {
 			let profile_path = expand_var(&shellenv, "${HOME}/.rsh_profile".into());
 			let profile_path = Path::new(&profile_path);
 			if profile_path.exists() {
@@ -93,6 +90,43 @@ impl ShellEnv {
 			}
     }
 		shellenv
+	}
+
+	fn init_env_vars(clean: bool) -> HashMap<String,String> {
+		let pathbuf_to_string = |pb: Result<PathBuf, std::io::Error>| pb.unwrap_or_default().to_string_lossy().to_string();
+		// First, inherit any env vars from the parent process if clean bit not set
+		let mut env_vars = HashMap::new();
+		if !clean {
+			env_vars = std::env::vars().collect::<HashMap<String,String>>();
+		}
+		let home;
+		let username;
+		let uid;
+		if let Some(user) = User::from_uid(nix::unistd::Uid::current()).ok().flatten() {
+			home = user.dir;
+			username = user.name;
+			uid = user.uid;
+		} else {
+			home = PathBuf::new();
+			username = "unknown".into();
+			uid = 0.into();
+		}
+		let home = pathbuf_to_string(Ok(home));
+		let hostname = gethostname().map(|hname| hname.to_string_lossy().to_string()).unwrap_or_default();
+
+		env_vars.insert("HOSTNAME".into(), hostname);
+		env_vars.insert("UID".into(), uid.to_string());
+		env_vars.insert("TMPDIR".into(), "/tmp".into());
+		env_vars.insert("TERM".into(), "xterm-256color".into());
+		env_vars.insert("LANG".into(), "en_US.UTF-8".into());
+		env_vars.insert("USER".into(), username.clone());
+		env_vars.insert("LOGNAME".into(), username);
+		env_vars.insert("PWD".into(), pathbuf_to_string(std::env::current_dir()));
+		env_vars.insert("OLDPWD".into(), pathbuf_to_string(std::env::current_dir()));
+		env_vars.insert("HOME".into(), home.clone());
+		env_vars.insert("SHELL".into(), pathbuf_to_string(std::env::current_exe()));
+		env_vars.insert("HIST_FILE".into(),format!("{}/.rsh_hist",home));
+		env_vars
 	}
 
 	pub fn mod_flags<F>(&mut self, transform: F) where F: FnOnce(&mut EnvFlags) {
@@ -154,6 +188,8 @@ impl ShellEnv {
 	}
 
 	pub fn change_dir(&mut self, path: &Path, span: Span) -> Result<(), ShellError> {
+		let old_pwd = self.env_vars.remove("PWD".into()).unwrap_or_default();
+		self.export_variable("OLDPWD".into(), old_pwd);
 		self.export_variable("PWD".into(), path.to_str().unwrap().to_string());
 		match env::set_current_dir(path) {
 			Ok(_) => Ok(()),
