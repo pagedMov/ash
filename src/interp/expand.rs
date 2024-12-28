@@ -598,7 +598,7 @@ pub fn expand_var(shellenv: &ShellEnv, string: String) -> String {
 			'_' => {
 				var_name.push(ch);
 			}
-			'*' | '?' | '$' | '#' => {
+			'-' | '*' | '?' | '$' | '#' => {
 				var_name.push(ch);
 				break
 			}

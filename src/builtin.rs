@@ -17,7 +17,7 @@ use crate::execute::{ProcIO, RshWaitStatus};
 use crate::interp::parse::{NdType, Node, Span};
 use crate::interp::{expand, helper, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType};
-use crate::shellenv::ShellEnv;
+use crate::shellenv::{EnvFlags, ShellEnv};
 use crate::event::ShellError;
 
 pub const BUILTINS: [&str; 14] = [
@@ -518,6 +518,55 @@ pub fn source(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus,Shell
 		shellenv.source_file(file_path.to_path_buf(), node.span())?
 	}
 	Ok(RshWaitStatus::Success { span: node.span() })
+}
+
+fn flags_from_chars(chars: &str) -> EnvFlags {
+	let flag_list = chars.chars();
+	let mut env_flags = EnvFlags::empty();
+	for ch in flag_list {
+		match ch {
+			'a' => env_flags |= EnvFlags::EXPORT_ALL_VARS,
+			'b' => env_flags |= EnvFlags::REPORT_JOBS_ASAP,
+			'e' => env_flags |= EnvFlags::EXIT_ON_ERROR,
+			'f' => env_flags |= EnvFlags::NO_GLOB,
+			'h' => env_flags |= EnvFlags::HASH_CMDS,
+			'k' => env_flags |= EnvFlags::ASSIGN_ANYWHERE,
+			'm' => env_flags |= EnvFlags::ENABLE_JOB_CTL,
+			'n' => env_flags |= EnvFlags::NO_EXECUTE,
+			'r' => env_flags |= EnvFlags::ENABLE_RSHELL,
+			't' => env_flags |= EnvFlags::EXIT_AFTER_EXEC,
+			'u' => env_flags |= EnvFlags::UNSET_IS_ERROR,
+			'v' => env_flags |= EnvFlags::PRINT_INPUT,
+			'x' => env_flags |= EnvFlags::STACK_TRACE,
+			'B' => env_flags |= EnvFlags::EXPAND_BRACES,
+			'C' => env_flags |= EnvFlags::NO_OVERWRITE,
+			'E' => env_flags |= EnvFlags::INHERIT_ERR,
+			'H' => env_flags |= EnvFlags::HIST_SUB,
+			'P' => env_flags |= EnvFlags::NO_CD_SYMLINKS,
+			'T' => env_flags |= EnvFlags::INHERIT_RET,
+			_ => eprintln!("set: no such option '{}'",ch)
+		}
+	}
+	env_flags
+}
+
+pub fn set_or_unset(shellenv: &mut ShellEnv, node: Node, set: bool) -> Result<RshWaitStatus,ShellError> {
+	let span = node.span();
+	if let NdType::Builtin { mut argv } = node.nd_type {
+		argv.pop_front(); // Ignore 'set'
+		if argv.front().is_none_or(|arg| !arg.text().starts_with('-')) {
+			return Err(ShellError::from_execf("Invalid 'set' invocation", 1, span))
+		}
+		let flag_arg = argv.pop_front().unwrap();
+		let set_flags = flag_arg.text();
+		let set_flags = set_flags.strip_prefix('-').unwrap();
+		let env_flags = flags_from_chars(set_flags);
+		match set {
+			true => shellenv.set_flags(env_flags),
+			false => shellenv.unset_flags(env_flags),
+		}
+		Ok(RshWaitStatus::new())
+	} else { unreachable!() }
 }
 
 pub fn pwd(shellenv: &ShellEnv, span: Span) -> Result<RshWaitStatus, ShellError> {

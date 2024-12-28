@@ -21,16 +21,37 @@ bitflags! {
 	#[derive(Debug,Copy,Clone,PartialEq)]
 	pub struct EnvFlags: u32 {
 		// Guard conditions against infinite alias/var/function recursion
-		const NO_ALIAS    = 0b00000000000001;
-		const NO_VAR      = 0b00000000000010;
-		const NO_FUNC     = 0b00000000000100;
+		const NO_ALIAS         = 0b00000000000000000000000000000001;
+		const NO_VAR           = 0b00000000000000000000000000000010;
+		const NO_FUNC          = 0b00000000000000000000000000000100;
 
 		// Context
-		const IN_FUNC     = 0b00000000001000; // Enables the `return` builtin
-		const LOGIN_SHELL = 0b00000000010000;
-		const INTERACTIVE = 0b00000000100000;
-		const CLEAN       = 0b00000001000000; // Do not inherit env vars from parent
-		const NO_RC       = 0b00000010000000;
+		const IN_FUNC          = 0b00000000000000000000000000001000; // Enables the `return` builtin
+		const LOGIN_SHELL      = 0b00000000000000000000000000010000;
+		const INTERACTIVE      = 0b00000000000000000000000000100000;
+		const CLEAN            = 0b00000000000000000000000001000000; // Do not inherit env vars from parent
+		const NO_RC            = 0b00000000000000000000000010000000;
+
+		// Options set by 'set' command
+		const EXPORT_ALL_VARS  = 0b00000000000000000000000100000000; // set -a
+		const REPORT_JOBS_ASAP = 0b00000000000000000000001000000000; // set -b
+		const EXIT_ON_ERROR    = 0b00000000000000000000010000000000; // set -e
+		const NO_GLOB          = 0b00000000000000000000100000000000; // set -f
+		const HASH_CMDS        = 0b00000000000000000001000000000000; // set -h
+		const ASSIGN_ANYWHERE  = 0b00000000000000000010000000000000; // set -k
+		const ENABLE_JOB_CTL   = 0b00000000000000000100000000000000; // set -m
+		const NO_EXECUTE       = 0b00000000000000001000000000000000; // set -n
+		const ENABLE_RSHELL    = 0b00000000000000010000000000000000; // set -r
+		const EXIT_AFTER_EXEC  = 0b00000000000000100000000000000000; // set -t
+		const UNSET_IS_ERROR   = 0b00000000000001000000000000000000; // set -u
+		const PRINT_INPUT      = 0b00000000000010000000000000000000; // set -v
+		const STACK_TRACE      = 0b00000000000100000000000000000000; // set -x
+		const EXPAND_BRACES    = 0b00000000001000000000000000000000; // set -B
+		const NO_OVERWRITE     = 0b00000000010000000000000000000000; // set -C
+		const INHERIT_ERR      = 0b00000000100000000000000000000000; // set -E
+		const HIST_SUB         = 0b00000001000000000000000000000000; // set -H
+		const NO_CD_SYMLINKS   = 0b00000010000000000000000000000000; // set -P
+		const INHERIT_RET      = 0b00000100000000000000000000000000; // set -T
 	}
 }
 
@@ -203,6 +224,46 @@ impl ShellEnv {
 		}
 	}
 
+	pub fn set_flags(&mut self, flags: EnvFlags) {
+		self.flags |= flags;
+		self.update_flags_param();
+	}
+
+	pub fn unset_flags(&mut self, flags:EnvFlags) {
+		self.flags &= !flags;
+		self.update_flags_param();
+	}
+
+	pub fn update_flags_param(&mut self) {
+		let mut flag_list = "abefhkmnrptuvxBCEHPT".chars();
+		let mut flag_string = String::new();
+		while let Some(ch) = flag_list.next() {
+			match ch {
+				'a' if self.flags.contains(EnvFlags::EXPORT_ALL_VARS) => flag_string.push(ch),
+				'b' if self.flags.contains(EnvFlags::REPORT_JOBS_ASAP) => flag_string.push(ch),
+				'e' if self.flags.contains(EnvFlags::EXIT_ON_ERROR) => flag_string.push(ch),
+				'f' if self.flags.contains(EnvFlags::NO_GLOB) => flag_string.push(ch),
+				'h' if self.flags.contains(EnvFlags::HASH_CMDS) => flag_string.push(ch),
+				'k' if self.flags.contains(EnvFlags::ASSIGN_ANYWHERE) => flag_string.push(ch),
+				'm' if self.flags.contains(EnvFlags::ENABLE_JOB_CTL) => flag_string.push(ch),
+				'n' if self.flags.contains(EnvFlags::NO_EXECUTE) => flag_string.push(ch),
+				'r' if self.flags.contains(EnvFlags::ENABLE_RSHELL) => flag_string.push(ch),
+				't' if self.flags.contains(EnvFlags::EXIT_AFTER_EXEC) => flag_string.push(ch),
+				'u' if self.flags.contains(EnvFlags::UNSET_IS_ERROR) => flag_string.push(ch),
+				'v' if self.flags.contains(EnvFlags::PRINT_INPUT) => flag_string.push(ch),
+				'x' if self.flags.contains(EnvFlags::STACK_TRACE) => flag_string.push(ch),
+				'B' if self.flags.contains(EnvFlags::EXPAND_BRACES) => flag_string.push(ch),
+				'C' if self.flags.contains(EnvFlags::NO_OVERWRITE) => flag_string.push(ch),
+				'E' if self.flags.contains(EnvFlags::INHERIT_ERR) => flag_string.push(ch),
+				'H' if self.flags.contains(EnvFlags::HIST_SUB) => flag_string.push(ch),
+				'P' if self.flags.contains(EnvFlags::NO_CD_SYMLINKS) => flag_string.push(ch),
+				'T' if self.flags.contains(EnvFlags::INHERIT_RET) => flag_string.push(ch),
+				_ => { /* Do nothing */ }
+			}
+		}
+		self.set_parameter("-".into(), flag_string);
+	}
+
 	pub fn open_fd(&mut self, fd: RawFd) {
 		self.open_fds.insert(fd);
 	}
@@ -339,7 +400,9 @@ impl ShellEnv {
 			} else {
 				pos_params = format!("{} {}",pos_params,value);
 			}
-			self.parameters.insert("@".into(),pos_params);
+			self.parameters.insert("@".into(),pos_params.clone());
+			let num_params = pos_params.split(' ').count();
+			self.parameters.insert("#".into(),num_params.to_string());
 		}
 		self.parameters.insert(key, value);
 	}

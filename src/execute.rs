@@ -10,7 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use log::{info,debug,trace};
 use glob::MatchOptions;
 
-use crate::builtin::{alias, cd, echo, export, pwd, source, test};
+use crate::builtin::{alias, cd, echo, export, pwd, set_or_unset, source, test};
 use crate::event::ShellError;
 use crate::interp::{expand, parse};
 use crate::interp::token::{Redir, RedirType, Tk, WdFlags};
@@ -433,6 +433,8 @@ impl<'a> NodeWalker<'a> {
 		}
 		match argv[0].text() {
 			"echo" => echo(node, io),
+			"set" => set_or_unset(self.shellenv, node, true),
+			"unset" => set_or_unset(self.shellenv, node, false),
 			"source" => source(self.shellenv, node),
 			"cd" => cd(self.shellenv, node),
 			"pwd" => pwd(self.shellenv, node.span()),
