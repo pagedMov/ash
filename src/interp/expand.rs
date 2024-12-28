@@ -335,7 +335,6 @@ pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellEr
 }
 
 pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
-	dbg!(&token.text());
 	trace!("expand(): Starting expansion with token: {:?}", token);
 	let mut working_buffer: VecDeque<Tk> = VecDeque::new();
 	let mut product_buffer: VecDeque<Tk> = VecDeque::new();

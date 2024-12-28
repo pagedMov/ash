@@ -212,10 +212,11 @@ impl ShellEnv {
 	}
 
 	pub fn change_dir(&mut self, path: &Path, span: Span) -> Result<(), ShellError> {
-		let old_pwd = self.env_vars.remove("PWD".into()).unwrap_or_default();
-		self.export_variable("OLDPWD".into(), old_pwd);
-		match env::set_current_dir(path) {
+		let result = helper::suppress_err(|| env::set_current_dir(path));
+		match result {
 			Ok(_) => {
+				let old_pwd = self.env_vars.remove("PWD").unwrap_or_default();
+				self.export_variable("OLDPWD".into(), old_pwd);
 				let new_dir = env::current_dir().unwrap().to_string_lossy().to_string();
 				self.export_variable("PWD".into(), new_dir);
 				Ok(())
@@ -429,6 +430,7 @@ fn init_shopts() -> HashMap<String,usize> {
 	shopts.insert("dotglob".into(),0);
 	shopts.insert("trunc_prompt_path".into(),4);
 	shopts.insert("int_comments".into(),1);
+	shopts.insert("autocd".into(),1);
 	shopts.insert("hist_ignore_dupes".into(),1);
 	shopts.insert("max_hist".into(),1000);
 	shopts.insert("edit_mode".into(),1);

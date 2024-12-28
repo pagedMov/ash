@@ -7,6 +7,7 @@ use nix::sys::wait::{waitpid, WaitStatus};
 use std::os::fd::RawFd;
 use std::ffi::CString;
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 use log::{info,debug,trace};
 use glob::MatchOptions;
 
@@ -497,51 +498,6 @@ impl<'a> NodeWalker<'a> {
 		args
 	}
 
-	/// Handles file descriptor redirections for a command.
-	///
-	/// This function processes a queue of redirection tokens (`Tk`) and performs the necessary file descriptor
-	/// redirections. It supports input, output, and append redirections. For each redirection token, it either
-	/// duplicates a file descriptor or opens a file and duplicates its file descriptor to the target file descriptor.
-	///
-	/// # Arguments
-	///
-	/// * `redirs` - A mutable `VecDeque` of `Tk` tokens representing redirections.
-	///
-	/// # Returns
-	///
-	/// * `Result<(), ShellError>` - Returns `Ok(())` if all redirections are successfully handled.
-	/// * Returns an appropriate `ShellError` if there is an issue with handling the redirections.
-	///
-	/// # Examples
-	///
-	/// ```
-	/// let redirs = vec![
-	///     Tk::new(TkType::Redirection { redir: Redir { fd_source: 1, op: RedirType::Output, fd_target: None, file_target: Some("output.txt".into()) } }),
-	///     Tk::new(TkType::Redirection { redir: Redir { fd_source: 0, op: RedirType::Input, fd_target: None, file_target: Some("input.txt".into()) } }),
-	/// ];
-	/// let mut redirs_deque = VecDeque::from(redirs);
-	/// let result = handle_redirs(&mut redirs_deque);
-	/// assert!(result.is_ok());
-	/// ```
-	///
-	/// # Redirection Types
-	///
-	/// - `RedirType::Input`: Opens the file for reading.
-	/// - `RedirType::Output`: Opens the file for writing, creating it if it does not exist and truncating it if it does.
-	/// - `RedirType::Append`: Opens the file for writing, creating it if it does not exist and appending to it if it does.
-	///
-	/// # Notes
-	///
-	/// - The function handles closing all file descriptors that were opened or duplicated during the redirection process.
-	/// - Heredocs and herestrings are not implemented yet and will result in a panic if encountered.
-	///
-	/// # Errors
-	///
-	/// - Returns `ShellError` if there is an issue with opening a file or duplicating a file descriptor.
-	///
-	/// # Panics
-	///
-	/// This function does not panic.
 	fn handle_redirs(&self, mut redirs: VecDeque<Node>) -> Result<(), ShellError> {
 			let mut fd_queue: VecDeque<i32> = VecDeque::new();
 			debug!("Handling redirections: {:?}", redirs);
@@ -579,59 +535,6 @@ impl<'a> NodeWalker<'a> {
 		todo!()
 	}
 
-	/// Handles the execution of a pipeline in a shell command.
-	///
-	/// This function processes a pipeline node, setting up the necessary file descriptors for input and output redirection,
-	/// and executes the commands on both sides of the pipeline. It supports both standard and combined standard error pipelines.
-	///
-	/// # Arguments
-	///
-	/// * `node` - The pipeline node containing the left and right commands and a flag indicating if standard error should be combined.
-	/// * `stdin` - An optional file descriptor for standard input.
-	/// * `stdout` - An optional file descriptor for standard output.
-	/// * `stderr` - A mutable optional file descriptor for standard error.
-	///
-	/// # Returns
-	///
-	/// * `Result<RshWaitStatus, ShellError>` - Returns the exit status of the last command in the pipeline.
-	/// * Returns an appropriate `ShellError` if there is an issue with setting up the pipeline or executing the commands.
-	///
-	/// # Examples
-	///
-	/// ```
-	/// let left_command = Node::new(NdType::Command { ... });
-	/// let right_command = Node::new(NdType::Command { ... });
-	/// let pipeline_node = Node::new(NdType::Pipeline { left: left_command, right: right_command, both: false });
-	/// let stdin = Some(0); // Standard input file descriptor
-	/// let stdout = Some(1); // Standard output file descriptor
-	/// let stderr = Some(2); // Standard error file descriptor
-	/// let result = shell.handle_pipeline(pipeline_node, stdin, stdout, stderr);
-	/// assert!(result.is_ok());
-	/// ```
-	///
-	/// # Pipeline Types
-	///
-	/// - Standard pipeline (`|`): Redirects the standard output of the left command to the standard input of the right command.
-	/// - Combined standard error pipeline (`|&`): Redirects both the standard output and standard error of the left command to the standard input of the right command.
-	///
-	/// # Notes
-	///
-	/// - The function sets up a pipe using the `pipe` system call.
-	/// - The function handles closing all file descriptors that were opened or duplicated during the pipeline process.
-	/// - The function uses the `walk` method to execute the commands on both sides of the pipeline.
-	///
-	/// # Errors
-	///
-	/// - Returns `ShellError::from_io` if there is an issue with setting up the pipe.
-	/// - Returns `ShellError` if there is an issue with executing the commands on either side of the pipeline.
-	///
-	/// # Safety
-	///
-	/// This function uses unsafe code to call the `pipe` system call and to duplicate file descriptors.
-	///
-	/// # Panics
-	///
-	/// This function does not panic.
 	fn handle_pipeline(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus, ShellError> {
 			let (left, right, both) = if let NdType::Pipeline { left, right, both } = &node.nd_type {
 					(*left.clone(), *right.clone(), both)
@@ -675,6 +578,7 @@ impl<'a> NodeWalker<'a> {
 	}
 
 	fn handle_function(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
+		let node_span = node.span();
 		if let NdType::Command { mut argv } | NdType::Builtin { mut argv } = node.nd_type {
 			let func_name = argv.pop_front().unwrap();
 			let mut pos_params = vec![];
@@ -694,7 +598,11 @@ impl<'a> NodeWalker<'a> {
 			let mut sub_walker = NodeWalker::new(*func.clone(), self.shellenv);
 
 			// Returns exit status or shell error
-			let result = sub_walker.walk_root(*func, None, io);
+			let mut result = sub_walker.walk_root(*func, None, io);
+			if let Err(ref mut e) = result {
+				// Use the span of the function call rather than the stuff inside the function
+				*e = e.overwrite_span(node_span)
+			}
 			self.shellenv.parameters = saved_parameters;
 			result
 		} else { unreachable!() }
@@ -702,6 +610,9 @@ impl<'a> NodeWalker<'a> {
 
 
 	fn handle_command(&mut self, node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
+		let argv = self.extract_args(node.get_argv()?);
+		let redirs = node.get_redirs()?;
+		let span = node.span();
 		// Let's expand aliases here
 		if let NdType::Command { ref argv } = node.nd_type {
 			// If the shellenv is allowing aliases, and the token is not from an expanded alias
@@ -714,10 +625,22 @@ impl<'a> NodeWalker<'a> {
 					return self.walk_root(node, None, io)
 				}
 			}
+			if self.shellenv.shopts.get("autocd").is_some_and(|opt| *opt > 0) && argv.len() == 1 {
+				let path_candidate = argv.front().unwrap();
+				if (path_candidate.text().starts_with('.') || path_candidate.text().contains('/')) && Path::new(path_candidate.text()).is_dir() {
+					let cd_token = Tk::new("cd".into(),span,path_candidate.flags());
+					let mut autocd_argv = argv.clone();
+					autocd_argv.push_front(cd_token);
+					let autocd = Node {
+						nd_type: NdType::Builtin { argv: autocd_argv },
+						span,
+						flags: node.flags,
+						redirs: node.redirs
+					};
+					return self.handle_builtin(autocd, io)
+				}
+			}
 		}
-		let argv = self.extract_args(node.get_argv()?);
-		let redirs = node.get_redirs()?;
-		let span = node.span();
 		io.backup_fildescs()?; // Save original stin, stdout, and stderr
 		io.do_plumbing()?; // Route pipe logic using fildescs
 
@@ -749,11 +672,11 @@ impl<'a> NodeWalker<'a> {
 					Ok(WaitStatus::Signaled(_,signal,_)) => {
 						Ok(RshWaitStatus::Fail { code: 128 + signal as i32, cmd, span })
 					}
-					Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result", 1, node.span())),
-					Err(err) => Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, node.span())),
+					Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
+					Err(err) => Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),
 				}
 			}
-			Err(_) => Err(ShellError::from_execf("Fork failed", 1, node.span())),
+			Err(_) => Err(ShellError::from_execf("Fork failed", 1, span)),
 		}
 	}
 }

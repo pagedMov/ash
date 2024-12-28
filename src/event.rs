@@ -40,6 +40,19 @@ impl ShellError {
 	pub fn from_internal(msg: &str, span: Span) -> Self {
 		ShellError::InternalError(msg.to_string(), span)
 	}
+	// This is used in the context of functions
+	// To prevent the error from trying to use the span
+	// Of the offending command that is inside of the function
+	pub fn overwrite_span(&self, new_span: Span) -> Self {
+		match self {
+			ShellError::IoError(msg,_) => ShellError::IoError(msg.to_string(),new_span),
+			ShellError::CommandNotFound(msg,_) => ShellError::CommandNotFound(msg.to_string(),new_span),
+			ShellError::InvalidSyntax(msg,_) => ShellError::InvalidSyntax(msg.to_string(),new_span),
+			ShellError::ParsingError(msg,_) => ShellError::ParsingError(msg.to_string(),new_span),
+			ShellError::ExecFailed(msg,code,_) => ShellError::ExecFailed(msg.to_string(),*code,new_span),
+			ShellError::InternalError(msg,_) => ShellError::InternalError(msg.to_string(),new_span),
+		}
+	}
 	pub fn is_fatal(&self) -> bool {
 		match self {
 			ShellError::IoError(..) => true,

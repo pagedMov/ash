@@ -1,7 +1,8 @@
 use crate::{event::ShellError, interp::{parse::Span, token::{Tk, WdFlags, WordDesc, BUILTINS, CMDSEP, KEYWORDS, REGEX, WHITESPACE}}};
 use libc::STDERR_FILENO;
 use log::{debug,trace};
-use std::{collections::VecDeque, os::fd::BorrowedFd};
+use nix::unistd::dup2;
+use std::{collections::VecDeque, fs, io, os::fd::{AsRawFd, BorrowedFd}};
 
 pub trait StrExtension {
     fn has_unescaped(&self, pat: &str) -> bool;
@@ -42,6 +43,23 @@ impl StrExtension for str {
 
 pub fn get_stderr<'a>() -> BorrowedFd<'a> {
 	unsafe { BorrowedFd::borrow_raw(STDERR_FILENO) }
+}
+
+// This is used when pesky system calls want to emit their own errors
+// Which ends up being redundant, since rsh has it's own error reporting system
+// Kind of hacky but fuck it
+// It works by taking the function as an argument and then executing it in
+// a context where stderr is redirected to /dev/null.
+pub fn suppress_err<F: FnOnce() -> T, T>(f: F) -> T {
+	let stderr = io::stderr();
+	let stderr_fd = stderr.as_raw_fd();
+	let devnull = fs::OpenOptions::new().write(true).open("/dev/null").unwrap();
+	let devnull_fd = devnull.as_raw_fd();
+
+	dup2(devnull_fd, stderr_fd).unwrap();
+	let result = f();
+	dup2(stderr_fd,stderr_fd).unwrap();
+	result
 }
 
 pub fn get_stdout<'a>() -> BorrowedFd<'a> {
