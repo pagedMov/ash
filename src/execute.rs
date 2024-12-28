@@ -422,16 +422,8 @@ impl<'a> NodeWalker<'a> {
 	}
 
 	fn handle_builtin(&mut self, mut node: Node, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
-		let argv = node.get_argv()?;
-		let mut expand_buffer = Vec::new();
-		for arg in &argv {
-			let mut expanded = expand::expand_token(self.shellenv, arg.clone());
-			expand_buffer.extend(expanded.drain(..));
-		}
-		if let NdType::Builtin {..} = node.nd_type {
-			node.nd_type = NdType::Builtin { argv: expand_buffer.into() }
-		}
-		match argv[0].text() {
+		let argv = expand::expand_arguments(self.shellenv, &mut node)?;
+		match argv.first().unwrap().text() {
 			"echo" => echo(node, io),
 			"set" => set_or_unset(self.shellenv, node, true),
 			"unset" => set_or_unset(self.shellenv, node, false),
@@ -441,6 +433,14 @@ impl<'a> NodeWalker<'a> {
 			"alias" => alias(self.shellenv, node),
 			"export" => export(self.shellenv, node),
 			"[" | "test" => test(node.get_argv()?.into()),
+			"builtin" => {
+				// This one allows you to safely wrap builtins in aliases/functions
+				if let NdType::Builtin { mut argv } = node.nd_type {
+					argv.pop_front();
+					node.nd_type = NdType::Builtin { argv };
+					self.handle_builtin(node, io)
+				} else { unreachable!() }
+			}
 			_ => unimplemented!("found this builtin: {}",argv[0].text())
 		}
 	}
@@ -675,7 +675,7 @@ impl<'a> NodeWalker<'a> {
 	}
 
 	fn handle_function(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
-		if let NdType::Command { mut argv } = node.nd_type {
+		if let NdType::Command { mut argv } | NdType::Builtin { mut argv } = node.nd_type {
 			let func_name = argv.pop_front().unwrap();
 			let mut pos_params = vec![];
 			while let Some(token) = argv.pop_front() {
@@ -686,15 +686,17 @@ impl<'a> NodeWalker<'a> {
 			for redir in node.redirs {
 				func.redirs.push_back(redir.clone());
 			}
-			let mut sub_shellenv = self.shellenv.clone();
-			sub_shellenv.clear_pos_parameters();
+			let saved_parameters = self.shellenv.parameters.clone();
+			self.shellenv.clear_pos_parameters();
 			for (index,param) in pos_params.into_iter().enumerate() {
-				sub_shellenv.set_parameter((index + 1).to_string(), param);
+				self.shellenv.set_parameter((index + 1).to_string(), param);
 			}
-			let mut sub_walker = NodeWalker::new(*func.clone(), &mut sub_shellenv);
+			let mut sub_walker = NodeWalker::new(*func.clone(), self.shellenv);
 
 			// Returns exit status or shell error
-			sub_walker.walk_root(*func, None, io)
+			let result = sub_walker.walk_root(*func, None, io);
+			self.shellenv.parameters = saved_parameters;
+			result
 		} else { unreachable!() }
 	}
 

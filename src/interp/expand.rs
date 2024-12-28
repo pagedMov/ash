@@ -335,6 +335,7 @@ pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellEr
 }
 
 pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
+	dbg!(&token.text());
 	trace!("expand(): Starting expansion with token: {:?}", token);
 	let mut working_buffer: VecDeque<Tk> = VecDeque::new();
 	let mut product_buffer: VecDeque<Tk> = VecDeque::new();
@@ -634,13 +635,17 @@ fn expand_params(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 	let right_token = Tk::new(right.to_string(), token.span(), token.flags());
 
 	// Push the left token into the deque
-	expanded_tokens.push_back(left_token);
+	if !left_token.text().is_empty() {
+		expanded_tokens.push_back(left_token);
+	}
 	for arg in arg_split {
 		// For each arg, make a new token and push it into the deque
 		let new_token = Tk::new(arg.to_string(),token.span(), token.flags() | WdFlags::FROM_VAR);
 		expanded_tokens.push_back(new_token);
 	}
 	// Now push the right token into the deque
-	expanded_tokens.push_back(right_token);
+	if !right_token.text().is_empty() {
+		expanded_tokens.push_back(right_token);
+	}
 	expanded_tokens
 }

@@ -16,8 +16,8 @@ pub const KEYWORDS: [&str;14] = [
 	"then", "elif", "else", "in",
 	"do", "done", "fi", "esac"
 ];
-pub const BUILTINS: [&str; 18] = [
-	"echo", "unset", "set", "test", "[", "shift", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node",
+pub const BUILTINS: [&str; 19] = [
+	"echo", "unset", "set", "builtin", "test", "[", "shift", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node",
 	"exec", "source", "wait",
 ];
 pub const FUNCTIONS: [&str; 1] = [
