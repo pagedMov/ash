@@ -211,8 +211,12 @@ impl ShellEnv {
 		self.open_fds.remove(&fd);
 	}
 
-	pub fn last_exit_status(&mut self, code: i32) {
-		todo!("this will set $? to the exit code of the most recently exited process")
+	pub fn handle_exit_status(&mut self, wait_status: RshWaitStatus) {
+		match wait_status {
+			RshWaitStatus::Success { .. } => self.set_parameter("?".into(), "0".into()),
+			RshWaitStatus::Fail { code, cmd: _, span: _ } => self.set_parameter("?".into(), code.to_string()),
+			_ => unimplemented!()
+		}
 	}
 
 	pub fn set_interactive(&mut self, interactive: bool) {
@@ -320,6 +324,10 @@ impl ShellEnv {
 
 	// Getters and Setters for `parameters`
 	pub fn get_parameter(&self, key: &str) -> Option<&String> {
+		if key == "*" {
+			// Return the un-split parameter string
+			return self.parameters.get("@")
+		}
 		self.parameters.get(key)
 	}
 

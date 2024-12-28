@@ -317,17 +317,20 @@ impl<'a> EventLoop<'a> {
 					debug!("new tree:\n {:#?}", tree);
 					let mut walker = execute::NodeWalker::new(tree,self.shellenv);
 					let stderr = unsafe { BorrowedFd::borrow_raw(2) };
+
 					match walker.start_walk() {
 						Ok(code) => {
 							info!("Last exit status: {:?}",code);
-							if let RshWaitStatus::Fail { code, cmd, span } = code {
-								if code == 127 {
+							if let RshWaitStatus::Fail { code, cmd, span } = &code {
+								if *code == 127 {
 									if let Some(cmd) = cmd {
-										let err = ShellErrorFull::from(self.shellenv.get_last_input(),ShellError::from_no_cmd(&cmd, span));
+										let err = ShellErrorFull::from(self.shellenv.get_last_input(),ShellError::from_no_cmd(cmd, *span));
 										write(stderr, format!("{}",err).as_bytes()).unwrap();
 									}
 								};
 							};
+
+							self.shellenv.handle_exit_status(code);
 						},
 						Err(e) => {
 							let err = ShellErrorFull::from(self.shellenv.get_last_input(),e);

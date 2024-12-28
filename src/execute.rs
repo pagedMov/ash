@@ -111,7 +111,7 @@ impl Default for ProcIO {
     }
 }
 
-#[derive(PartialEq,Debug)]
+#[derive(PartialEq,Debug,Clone)]
 pub enum RshWaitStatus {
 	Success { span: Span },
 	Fail { code: i32, cmd: Option<String>, span: Span },
