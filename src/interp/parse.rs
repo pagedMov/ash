@@ -1455,6 +1455,7 @@ pub fn build_func_def(mut ctx: DescentContext) -> Result<DescentContext, ShellEr
 	if let TkType::FuncDef { ref name, ref body } = def.tk_type {
 		//TODO: initializing a new shellenv instead of cloning the current one here
 		//could cause issues later, keep an eye on this
+		//Might be fine to just build the AST since nothing is being executed or expanded
 		let state = ParseState {
 			input: body.as_str(),
 			shellenv: &ShellEnv::new(EnvFlags::empty()),

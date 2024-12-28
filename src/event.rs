@@ -89,6 +89,7 @@ impl ShellErrorFull {
         let span_diff = span.end - span.start;
         let pointer = Self::get_pointer(span_diff, window_offset);
 
+				println!();
         println!("{};{}:", line + 1, col + 1);
         println!("{}", window);
         println!("{}", pointer);
@@ -188,7 +189,6 @@ impl fmt::Display for ShellErrorFull {
 			ShellError::IoError(msg, span) => {
 				writeln!(f, "I/O Error: {}", msg)?;
 				self.format_error_context(*span);
-				Ok(())
 			}
 			ShellError::ExecFailed(msg, code, span) => {
 				writeln!(
@@ -198,29 +198,26 @@ impl fmt::Display for ShellErrorFull {
 					msg
 				)?;
 				self.format_error_context(*span);
-				Ok(())
 			}
 			ShellError::ParsingError(msg, span) => {
 				writeln!(f, "Parsing error: {}", msg)?;
 				self.format_error_context(*span);
-				Ok(())
 			}
 			ShellError::InvalidSyntax(msg, span) => {
 				writeln!(f, "Syntax Error: {}", msg)?;
 				self.format_error_context(*span);
-				Ok(())
 			}
 			ShellError::CommandNotFound(msg, span) => {
 				writeln!(f, "Command not found: {}", msg)?;
 				self.format_error_context(*span);
-				Ok(())
 			}
 			ShellError::InternalError(msg, span) => {
 				writeln!(f, "Internal Error: {}", msg)?;
 				self.format_error_context(*span);
-				Ok(())
 			}
 		}
+		writeln!(f)?;
+		Ok(())
 	}
 }
 

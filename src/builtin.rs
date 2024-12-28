@@ -5,6 +5,7 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use bitflags::{bitflags, Flags};
 use libc::{getegid, geteuid};
 use log::{debug, info};
 use nix::fcntl::{open,OFlag};
@@ -14,7 +15,7 @@ use nix::NixPath;
 
 use crate::execute::{ProcIO, RshWaitStatus};
 use crate::interp::parse::{NdType, Node, Span};
-use crate::interp::{helper, token};
+use crate::interp::{expand, helper, token};
 use crate::interp::token::{Redir, RedirType, Tk};
 use crate::shellenv::ShellEnv;
 use crate::event::ShellError;
@@ -23,6 +24,15 @@ pub const BUILTINS: [&str; 14] = [
 	"echo", "set", "shift", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node",
 	"exec", "source", "wait",
 ];
+
+bitflags! {
+	#[derive(Debug)]
+	pub struct EchoFlags: u8 {
+		const USE_ESCAPE = 0b001;
+		const NO_NEWLINE = 0b010;
+		const NO_ESCAPE = 0b100;
+	}
+}
 
 fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<(i32, i32)>, ShellError> {
 	let mut fd_stack: Vec<(i32, i32)> = Vec::new();
@@ -84,18 +94,18 @@ pub fn catstr(mut c_strings: VecDeque<CString>,newline: bool) -> CString {
 		let bytes = c_string.to_bytes_with_nul();
 		if c_strings.is_empty() {
 			// Last string: include the null terminator
-			if newline {
-				cat.extend_from_slice(&bytes[..bytes.len() - 1]);
-			} else {
-				cat.extend_from_slice(bytes);
-			}
+			cat.extend_from_slice(&bytes[..bytes.len() - 1]);
 		} else {
 			// Intermediate strings: exclude the null terminator and add whitespace
 			cat.extend_from_slice(&bytes[..bytes.len() - 1]);
 			cat.extend_from_slice(space_bytes);
 		}
 	}
-	cat.extend_from_slice(newline_bytes);
+	if newline {
+		cat.extend_from_slice(newline_bytes);
+	} else {
+		cat.extend_from_slice(b"\0");
+	}
 
 	CString::from_vec_with_nul(cat).unwrap()
 }
@@ -469,7 +479,9 @@ pub fn alias(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus, Shell
 			return Err(ShellError::from_syntax(&format!("Expected an assignment pattern in alias args, got {}",arg.text()), arg.span()))
 		}
 		let (alias,value) = arg.text().split_once('=').unwrap();
-		shellenv.set_alias(alias.into(), value.into());
+		if let Err(e) = shellenv.set_alias(alias.into(), value.into()) {
+			return Err(ShellError::from_parse(e.as_str(), node.span()))
+		}
 	}
 	Ok(RshWaitStatus::Success { span: node.span() })
 }
@@ -502,7 +514,6 @@ pub fn source(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus,Shell
 		.collect::<VecDeque<CString>>();
 	argv.pop_front();
 	for path in argv {
-		dbg!(path.clone().into_string().unwrap());
 		let file_path = Path::new(OsStr::from_bytes(path.as_bytes()));
 		shellenv.source_file(file_path.to_path_buf(), node.span())?
 	}
@@ -520,18 +531,50 @@ pub fn pwd(shellenv: &ShellEnv, span: Span) -> Result<RshWaitStatus, ShellError>
 }
 
 pub fn echo(node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
-	let mut argv = node
-		.get_argv()?
-		.iter()
-		.map(|arg| CString::new(arg.text()).unwrap())
-		.collect::<VecDeque<CString>>();
+	let mut flags = EchoFlags::empty();
+	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
+	argv.pop_front(); // Remove 'echo' from argv
+	// Get flags
+	if argv.front().is_some_and(|arg| arg.text().starts_with('-')) {
+		let next_arg = argv.pop_front().unwrap();
+		let mut options = next_arg.text().strip_prefix('-').unwrap().chars();
+		loop {
+			match options.next() {
+				Some('e') => {
+					if flags.contains(EchoFlags::NO_ESCAPE) {
+						flags &= !EchoFlags::NO_ESCAPE
+					}
+					flags |= EchoFlags::USE_ESCAPE
+				}
+				Some('n') => flags |= EchoFlags::NO_NEWLINE,
+				Some('E') => {
+					if flags.contains(EchoFlags::USE_ESCAPE) {
+						flags &= !EchoFlags::USE_ESCAPE
+					}
+					flags |= EchoFlags::NO_ESCAPE
+				}
+				_ => break
+			}
+		}
+		if flags.is_empty() {
+			argv.push_front(next_arg);
+		}
+	}
+	let argv = argv.into_iter().map(|tk| {
+		let text = tk.text();
+		if flags.contains(EchoFlags::USE_ESCAPE) {
+			CString::new(expand::process_ansi_escapes(text)).unwrap()
+		} else {
+			CString::new(tk.text()).unwrap()
+		}
+	}).collect::<VecDeque<CString>>();
 
 	let redirs = node.get_redirs()?;
 	info!("Executing echo with argv: {:?}, and redirs: {:?}", argv,node.redirs);
 
 	io.backup_fildescs()?;
-	argv.pop_front(); // Remove 'echo' from argv
-	let output_str = catstr(argv, true);
+	let newline_opt = !flags.contains(EchoFlags::NO_NEWLINE);
+	let output_str = catstr(argv, newline_opt);
 
 	let fd_stack = if !redirs.is_empty() {
 		open_file_descriptors(redirs.into())?

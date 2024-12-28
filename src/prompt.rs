@@ -4,6 +4,7 @@ use im::HashSet;
 use nix::NixPath;
 use rustyline::completion::Candidate;
 use rustyline::history::FileHistory;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::env;
 
@@ -151,7 +152,8 @@ fn init_prompt(shellenv: &ShellEnv) -> Editor<RshHelper, DefaultHistory> {
 pub async fn prompt(sender: mpsc::Sender<ShellEvent>, shellenv: &mut ShellEnv) {
 	let mut rl = init_prompt(shellenv);
 	let hist_path = expand::expand_var(shellenv, "$HIST_FILE".into());
-	match rl.readline(">> ") {
+	let prompt = expand::expand_prompt(shellenv);
+	match rl.readline(&prompt) {
 		Ok(line) => {
 			let _ = rl.history_mut().add(&line);
 			let _ = rl.history_mut().save(Path::new(&hist_path));

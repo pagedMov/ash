@@ -1,7 +1,9 @@
+use chrono::Local;
 use glob::glob;
 use log::{debug, info, trace};
 use std::collections::VecDeque;
 use std::mem::take;
+use std::path::{Component, PathBuf};
 use crate::event::ShellError;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
 use crate::interp::helper::{self,StrExtension};
@@ -45,6 +47,243 @@ pub fn expand_arguments(shellenv: &ShellEnv, node: &mut Node) -> Result<Vec<Tk>,
 		}
 		_ => Err(ShellError::from_internal("Called expand arguments on a non-command node", node.span()))
 	}
+}
+
+pub fn esc_seq(c: char) -> Option<char> {
+	//TODO:
+	match c {
+		'a' => Some('\x07'),
+		'n' => Some('\n'),
+		't' => Some('\t'),
+		'\\' => Some('\\'),
+		'"' => Some('"'),
+		'\'' => Some('\''),
+		_ => panic!()
+	}
+}
+
+pub fn expand_time(fmt: &str) -> String {
+	let right_here_right_now = Local::now();
+	right_here_right_now.format(fmt).to_string()
+}
+
+pub fn expand_prompt(shellenv: &ShellEnv) -> String {
+	// TODO:
+	//\j - number of managed jobs
+	//\l - shell's terminal device name
+	//\v - rsh version
+	//\V - rsh release; version + patch level
+	//\! - history number of this command
+	//\# - command number of this command
+	let default_color = if shellenv.env_vars.get("UID").is_some_and(|uid| uid == "0") {
+		"31" // Red if uid is 0, aka root user
+	} else {
+		"32" // Green if anyone else
+	};
+	let cwd: String = shellenv.env_vars.get("PWD").map_or("", |cwd| cwd).to_string();
+	let default_path = if cwd.as_str() == "/" {
+		"\\e[36m\\w\\e[0m".to_string()
+	} else {
+		format!("\\e[1;{}m\\w\\e[1;36m/\\e[0m",default_color)
+	};
+	let ps1: String = shellenv.env_vars.get("PS1").map_or(format!("{}\\n\\e[{}m\\$\\e[36m>\\e[0m ",default_path,default_color), |ps1| ps1.clone());
+	let mut result = String::new();
+	let mut chars = ps1.chars().collect::<VecDeque<char>>();
+	while let Some(c) = chars.pop_front() {
+		match c {
+			'\\' => {
+				if let Some(esc_c) = chars.pop_front() {
+					match esc_c {
+						'a' => result.push('\x07'),
+						'n' => result.push('\n'),
+						'r' => result.push('\r'),
+						'\\' => result.push('\\'),
+						'\'' => result.push('\''),
+						'"' => result.push('"'),
+						'd' => result.push_str(expand_time("%a %b %d").as_str()),
+						't' => result.push_str(expand_time("%H:%M:%S").as_str()),
+						'T' => result.push_str(expand_time("%I:%M:%S").as_str()),
+						'A' => result.push_str(expand_time("%H:%M").as_str()),
+						'@' => result.push_str(expand_time("%I:%M %p").as_str()),
+						_ if esc_c.is_digit(8) => {
+								let mut octal_digits = String::new();
+								octal_digits.push(esc_c); // Add the first digit
+
+								for _ in 0..2 {
+										if let Some(next_c) = chars.front() {
+												if next_c.is_digit(8) {
+														octal_digits.push(chars.pop_front().unwrap());
+												} else {
+														break;
+												}
+										}
+								}
+
+								if let Ok(value) = u8::from_str_radix(&octal_digits, 8) {
+										result.push(value as char);
+								} else {
+										// Invalid sequence, treat as literal
+										result.push_str(&format!("\\{}", octal_digits));
+								}
+						}
+						'e' => {
+								result.push('\x1B');
+								if chars.front().is_some_and(|&ch| ch == '[') {
+										result.push(chars.pop_front().unwrap()); // Consume '['
+										while let Some(ch) = chars.pop_front() {
+												result.push(ch);
+												if ch == 'm' {
+														break; // End of ANSI sequence
+												}
+										}
+								}
+						}
+						'[' => {
+								// Handle \[ (start of non-printing sequence)
+								while let Some(ch) = chars.pop_front() {
+										if ch == ']' {
+												break; // Stop at the closing \]
+										}
+										result.push(ch); // Add non-printing content
+								}
+						}
+						']' => {
+								// Handle \] (end of non-printing sequence)
+								// Do nothing, it's just a marker
+						}
+						'w' => {
+								let mut cwd = shellenv.env_vars.get("PWD").map_or(String::new(), |pwd| pwd.to_string());
+								let home = shellenv.env_vars.get("HOME").map_or("", |home| home);
+								if cwd.starts_with(home) {
+										cwd = cwd.replacen(home, "~", 1); // Use `replacen` to replace only the first occurrence
+								}
+								// TODO: unwrap is probably safe here since this option is initialized with the environment but it might still cause issues later if this is left unhandled
+							let trunc_len = shellenv.shopts.get("trunc_prompt_path").unwrap_or(&0);
+							if *trunc_len > 0 {
+									let mut path = PathBuf::from(cwd);
+									let mut cwd_components: Vec<_> = path.components().collect();
+									if cwd_components.len() > *trunc_len {
+											cwd_components = cwd_components.split_off(cwd_components.len() - *trunc_len);
+											path = cwd_components.iter().collect(); // Rebuild the PathBuf
+									}
+									cwd = path.to_string_lossy().to_string();
+							}
+							result.push_str(&cwd);
+						}
+						'W' => {
+								let cwd = PathBuf::from(shellenv.env_vars.get("PWD").map_or("", |pwd| pwd));
+								let mut cwd = cwd.components().last().map(|comp| comp.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
+								let home = shellenv.env_vars.get("HOME").map_or("", |home| home);
+								if cwd.starts_with(home) {
+										cwd = cwd.replacen(home, "~", 1); // Replace HOME with '~'
+								}
+								result.push_str(&cwd);
+						}
+						'H' => {
+							let hostname = shellenv.env_vars.get("HOSTNAME").map_or("unknown host", |host| host);
+							result.push_str(hostname);
+						}
+						'h' => {
+							let hostname = shellenv.env_vars.get("HOSTNAME").map_or("unknown host", |host| host);
+							if let Some((hostname, _)) = hostname.split_once('.') {
+									result.push_str(hostname);
+							} else {
+									result.push_str(hostname); // No '.' found, use the full hostname
+							}
+						}
+						's' => {
+							let sh_name = shellenv.env_vars.get("SHELL").map_or("rsh", |sh| sh);
+							result.push_str(sh_name);
+						}
+						'u' => {
+							let user = shellenv.env_vars.get("USER").map_or("unknown", |user| user);
+							result.push_str(user);
+						}
+						'$' => {
+							let uid = shellenv.env_vars.get("UID").map_or("0", |uid| uid);
+							match uid {
+								"0" => result.push('#'),
+								_ => result.push('$'),
+							}
+						}
+						_ => {
+							result.push('\\');
+							result.push(esc_c);
+						}
+					}
+				} else {
+					result.push('\\');
+				}
+			}
+			_ => result.push(c)
+		}
+	}
+	result
+}
+
+pub fn process_ansi_escapes(input: &str) -> String {
+    let mut result = String::new();
+    let mut chars = input.chars().collect::<VecDeque<char>>();
+
+    while let Some(c) = chars.pop_front() {
+        if c == '\\' {
+            if let Some(next) = chars.pop_front() {
+                match next {
+                    'a' => result.push('\x07'), // Bell
+                    'b' => result.push('\x08'), // Backspace
+                    't' => result.push('\t'),   // Tab
+                    'n' => result.push('\n'),   // Newline
+                    'r' => result.push('\r'),   // Carriage return
+                    'e' | 'E' => result.push('\x1B'), // Escape (\033 in octal)
+                    '0' => {
+                        // Octal escape: \0 followed by up to 3 octal digits
+                        let mut octal_digits = String::new();
+                        while octal_digits.len() < 3 && chars.front().is_some_and(|ch| ch.is_digit(8)) {
+                            octal_digits.push(chars.pop_front().unwrap());
+                        }
+                        if let Ok(value) = u8::from_str_radix(&octal_digits, 8) {
+                            let character = value as char;
+                            result.push(character);
+                            // Check for ANSI sequence if the result is ESC (\033 or \x1B)
+                            if character == '\x1B' && chars.front().is_some_and(|&ch| ch == '[') {
+                                result.push(chars.pop_front().unwrap()); // Consume '['
+                                while let Some(ch) = chars.pop_front() {
+                                    result.push(ch);
+                                    if ch == 'm' {
+                                        break; // Stop at the end of the ANSI sequence
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        // Unknown escape, treat literally
+                        result.push('\\');
+                        result.push(next);
+                    }
+                }
+            } else {
+                // Trailing backslash, treat literally
+                result.push('\\');
+            }
+        } else if c == '\x1B' {
+            // Handle raw ESC characters (e.g., \033 in octal or actual ESC char)
+            result.push(c);
+            if chars.front().is_some_and(|&ch| ch == '[') {
+                result.push(chars.pop_front().unwrap()); // Consume '['
+                while let Some(ch) = chars.pop_front() {
+                    result.push(ch);
+                    if ch == 'm' {
+                        break; // Stop at the end of the ANSI sequence
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
 }
 
 pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellError> {
@@ -177,12 +416,15 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 		}
 	}
 
-	for token in &mut product_buffer {
+	product_buffer
+}
+
+pub fn clean_escape_chars(token_buffer: &mut VecDeque<Tk>) {
+	for token in token_buffer {
 		let mut text = std::mem::take(&mut token.wd.text);
 		text = text.replace('\\',"");
 		token.wd.text = text;
 	}
-	product_buffer
 }
 
 pub fn expand_braces(word: String) -> VecDeque<String> {
