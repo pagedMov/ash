@@ -14,7 +14,7 @@ use super::token;
 
 pub fn check_globs(string: String) -> bool {
 	string.has_unescaped("?") ||
-	string.has_unescaped("*")
+		string.has_unescaped("*")
 }
 
 /// Handles the expansion of command arguments
@@ -106,78 +106,78 @@ pub fn expand_prompt(shellenv: &ShellEnv) -> String {
 						'A' => result.push_str(expand_time("%H:%M").as_str()),
 						'@' => result.push_str(expand_time("%I:%M %p").as_str()),
 						_ if esc_c.is_digit(8) => {
-								let mut octal_digits = String::new();
-								octal_digits.push(esc_c); // Add the first digit
+							let mut octal_digits = String::new();
+							octal_digits.push(esc_c); // Add the first digit
 
-								for _ in 0..2 {
-										if let Some(next_c) = chars.front() {
-												if next_c.is_digit(8) {
-														octal_digits.push(chars.pop_front().unwrap());
-												} else {
-														break;
-												}
-										}
+							for _ in 0..2 {
+								if let Some(next_c) = chars.front() {
+									if next_c.is_digit(8) {
+										octal_digits.push(chars.pop_front().unwrap());
+									} else {
+										break;
+									}
 								}
+							}
 
-								if let Ok(value) = u8::from_str_radix(&octal_digits, 8) {
-										result.push(value as char);
-								} else {
-										// Invalid sequence, treat as literal
-										result.push_str(&format!("\\{}", octal_digits));
-								}
+							if let Ok(value) = u8::from_str_radix(&octal_digits, 8) {
+								result.push(value as char);
+							} else {
+								// Invalid sequence, treat as literal
+								result.push_str(&format!("\\{}", octal_digits));
+							}
 						}
 						'e' => {
-								result.push('\x1B');
-								if chars.front().is_some_and(|&ch| ch == '[') {
-										result.push(chars.pop_front().unwrap()); // Consume '['
-										while let Some(ch) = chars.pop_front() {
-												result.push(ch);
-												if ch == 'm' {
-														break; // End of ANSI sequence
-												}
-										}
+							result.push('\x1B');
+							if chars.front().is_some_and(|&ch| ch == '[') {
+								result.push(chars.pop_front().unwrap()); // Consume '['
+								while let Some(ch) = chars.pop_front() {
+									result.push(ch);
+									if ch == 'm' {
+										break; // End of ANSI sequence
+									}
 								}
+							}
 						}
 						'[' => {
-								// Handle \[ (start of non-printing sequence)
-								while let Some(ch) = chars.pop_front() {
-										if ch == ']' {
-												break; // Stop at the closing \]
-										}
-										result.push(ch); // Add non-printing content
+							// Handle \[ (start of non-printing sequence)
+							while let Some(ch) = chars.pop_front() {
+								if ch == ']' {
+									break; // Stop at the closing \]
 								}
+								result.push(ch); // Add non-printing content
+							}
 						}
 						']' => {
-								// Handle \] (end of non-printing sequence)
-								// Do nothing, it's just a marker
+							// Handle \] (end of non-printing sequence)
+							// Do nothing, it's just a marker
 						}
 						'w' => {
-								let mut cwd = shellenv.env_vars.get("PWD").map_or(String::new(), |pwd| pwd.to_string());
-								let home = shellenv.env_vars.get("HOME").map_or("", |home| home);
-								if cwd.starts_with(home) {
-										cwd = cwd.replacen(home, "~", 1); // Use `replacen` to replace only the first occurrence
-								}
-								// TODO: unwrap is probably safe here since this option is initialized with the environment but it might still cause issues later if this is left unhandled
+							let mut cwd = shellenv.env_vars.get("PWD").map_or(String::new(), |pwd| pwd.to_string());
+							let home = shellenv.env_vars.get("HOME").map_or("", |home| home);
+							if cwd.starts_with(home) {
+								cwd = cwd.replacen(home, "~", 1); // Use `replacen` to replace only the first occurrence
+							}
+							// TODO: unwrap is probably safe here since this option is initialized with the environment but it might still cause issues later if this is left unhandled
 							let trunc_len = shellenv.shopts.get("trunc_prompt_path").unwrap_or(&0);
 							if *trunc_len > 0 {
-									let mut path = PathBuf::from(cwd);
-									let mut cwd_components: Vec<_> = path.components().collect();
-									if cwd_components.len() > *trunc_len {
-											cwd_components = cwd_components.split_off(cwd_components.len() - *trunc_len);
-											path = cwd_components.iter().collect(); // Rebuild the PathBuf
-									}
-									cwd = path.to_string_lossy().to_string();
+								let mut path = PathBuf::from(cwd);
+								let mut cwd_components: Vec<_> = path.components().collect();
+								if cwd_components.len() > *trunc_len {
+									cwd_components = cwd_components.split_off(cwd_components.len() - *trunc_len);
+									path = cwd_components.iter().collect(); // Rebuild the PathBuf
+								}
+								cwd = path.to_string_lossy().to_string();
 							}
 							result.push_str(&cwd);
 						}
 						'W' => {
-								let cwd = PathBuf::from(shellenv.env_vars.get("PWD").map_or("", |pwd| pwd));
-								let mut cwd = cwd.components().last().map(|comp| comp.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
-								let home = shellenv.env_vars.get("HOME").map_or("", |home| home);
-								if cwd.starts_with(home) {
-										cwd = cwd.replacen(home, "~", 1); // Replace HOME with '~'
-								}
-								result.push_str(&cwd);
+							let cwd = PathBuf::from(shellenv.env_vars.get("PWD").map_or("", |pwd| pwd));
+							let mut cwd = cwd.components().last().map(|comp| comp.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
+							let home = shellenv.env_vars.get("HOME").map_or("", |home| home);
+							if cwd.starts_with(home) {
+								cwd = cwd.replacen(home, "~", 1); // Replace HOME with '~'
+							}
+							result.push_str(&cwd);
 						}
 						'H' => {
 							let hostname = shellenv.env_vars.get("HOSTNAME").map_or("unknown host", |host| host);
@@ -186,9 +186,9 @@ pub fn expand_prompt(shellenv: &ShellEnv) -> String {
 						'h' => {
 							let hostname = shellenv.env_vars.get("HOSTNAME").map_or("unknown host", |host| host);
 							if let Some((hostname, _)) = hostname.split_once('.') {
-									result.push_str(hostname);
+								result.push_str(hostname);
 							} else {
-									result.push_str(hostname); // No '.' found, use the full hostname
+								result.push_str(hostname); // No '.' found, use the full hostname
 							}
 						}
 						's' => {
@@ -222,68 +222,68 @@ pub fn expand_prompt(shellenv: &ShellEnv) -> String {
 }
 
 pub fn process_ansi_escapes(input: &str) -> String {
-    let mut result = String::new();
-    let mut chars = input.chars().collect::<VecDeque<char>>();
+	let mut result = String::new();
+	let mut chars = input.chars().collect::<VecDeque<char>>();
 
-    while let Some(c) = chars.pop_front() {
-        if c == '\\' {
-            if let Some(next) = chars.pop_front() {
-                match next {
-                    'a' => result.push('\x07'), // Bell
-                    'b' => result.push('\x08'), // Backspace
-                    't' => result.push('\t'),   // Tab
-                    'n' => result.push('\n'),   // Newline
-                    'r' => result.push('\r'),   // Carriage return
-                    'e' | 'E' => result.push('\x1B'), // Escape (\033 in octal)
-                    '0' => {
-                        // Octal escape: \0 followed by up to 3 octal digits
-                        let mut octal_digits = String::new();
-                        while octal_digits.len() < 3 && chars.front().is_some_and(|ch| ch.is_digit(8)) {
-                            octal_digits.push(chars.pop_front().unwrap());
-                        }
-                        if let Ok(value) = u8::from_str_radix(&octal_digits, 8) {
-                            let character = value as char;
-                            result.push(character);
-                            // Check for ANSI sequence if the result is ESC (\033 or \x1B)
-                            if character == '\x1B' && chars.front().is_some_and(|&ch| ch == '[') {
-                                result.push(chars.pop_front().unwrap()); // Consume '['
-                                while let Some(ch) = chars.pop_front() {
-                                    result.push(ch);
-                                    if ch == 'm' {
-                                        break; // Stop at the end of the ANSI sequence
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        // Unknown escape, treat literally
-                        result.push('\\');
-                        result.push(next);
-                    }
-                }
-            } else {
-                // Trailing backslash, treat literally
-                result.push('\\');
-            }
-        } else if c == '\x1B' {
-            // Handle raw ESC characters (e.g., \033 in octal or actual ESC char)
-            result.push(c);
-            if chars.front().is_some_and(|&ch| ch == '[') {
-                result.push(chars.pop_front().unwrap()); // Consume '['
-                while let Some(ch) = chars.pop_front() {
-                    result.push(ch);
-                    if ch == 'm' {
-                        break; // Stop at the end of the ANSI sequence
-                    }
-                }
-            }
-        } else {
-            result.push(c);
-        }
-    }
+	while let Some(c) = chars.pop_front() {
+		if c == '\\' {
+			if let Some(next) = chars.pop_front() {
+				match next {
+					'a' => result.push('\x07'), // Bell
+					'b' => result.push('\x08'), // Backspace
+					't' => result.push('\t'),   // Tab
+					'n' => result.push('\n'),   // Newline
+					'r' => result.push('\r'),   // Carriage return
+					'e' | 'E' => result.push('\x1B'), // Escape (\033 in octal)
+					'0' => {
+						// Octal escape: \0 followed by up to 3 octal digits
+						let mut octal_digits = String::new();
+						while octal_digits.len() < 3 && chars.front().is_some_and(|ch| ch.is_digit(8)) {
+							octal_digits.push(chars.pop_front().unwrap());
+						}
+						if let Ok(value) = u8::from_str_radix(&octal_digits, 8) {
+							let character = value as char;
+							result.push(character);
+							// Check for ANSI sequence if the result is ESC (\033 or \x1B)
+							if character == '\x1B' && chars.front().is_some_and(|&ch| ch == '[') {
+								result.push(chars.pop_front().unwrap()); // Consume '['
+								while let Some(ch) = chars.pop_front() {
+									result.push(ch);
+									if ch == 'm' {
+										break; // Stop at the end of the ANSI sequence
+									}
+								}
+							}
+						}
+					}
+					_ => {
+						// Unknown escape, treat literally
+						result.push('\\');
+						result.push(next);
+					}
+				}
+			} else {
+				// Trailing backslash, treat literally
+				result.push('\\');
+			}
+		} else if c == '\x1B' {
+			// Handle raw ESC characters (e.g., \033 in octal or actual ESC char)
+			result.push(c);
+			if chars.front().is_some_and(|&ch| ch == '[') {
+				result.push(chars.pop_front().unwrap()); // Consume '['
+				while let Some(ch) = chars.pop_front() {
+					result.push(ch);
+					if ch == 'm' {
+						break; // Stop at the end of the ANSI sequence
+					}
+				}
+			}
+		} else {
+			result.push(c);
+		}
+	}
 
-    result
+	result
 }
 
 pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellError> {
@@ -488,37 +488,37 @@ fn parse_first_brace(word: &str) -> Option<(String, String, String)> {
 
 	// Parse amble
 	while let Some(c) = char_iter.next() {
-			debug!("amble: found char {}", c);
-			debug!("Current brace stack: {:?}", brace_stack);
+		debug!("amble: found char {}", c);
+		debug!("Current brace stack: {:?}", brace_stack);
 
-			match c {
-					'{' => {
-							brace_stack.push_back(c);
-							amble.push(c);
-					}
-					'}' => {
-							if brace_stack.pop_back().is_none() {
-									debug!("Unmatched closing brace found");
-									break; // Or handle the error gracefully
-							}
-							if brace_stack.is_empty() {
-									break;
-							} else {
-									amble.push(c);
-							}
-					}
-					'\\' => {
-							amble.push(c);
-							if let Some(ch) = char_iter.next() {
-									amble.push(ch);
-							} else {
-									debug!("Dangling backslash found at end of input");
-							}
-					}
-					_ => amble.push(c),
+		match c {
+			'{' => {
+				brace_stack.push_back(c);
+				amble.push(c);
 			}
+			'}' => {
+				if brace_stack.pop_back().is_none() {
+					debug!("Unmatched closing brace found");
+					break; // Or handle the error gracefully
+				}
+				if brace_stack.is_empty() {
+					break;
+				} else {
+					amble.push(c);
+				}
+			}
+			'\\' => {
+				amble.push(c);
+				if let Some(ch) = char_iter.next() {
+					amble.push(ch);
+				} else {
+					debug!("Dangling backslash found at end of input");
+				}
+			}
+			_ => amble.push(c),
+		}
 
-			debug!("Remaining input: {:?}", char_iter.clone().collect::<String>());
+		debug!("Remaining input: {:?}", char_iter.clone().collect::<String>());
 	}
 
 	// Parse postfix

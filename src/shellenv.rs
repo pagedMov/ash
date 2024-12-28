@@ -95,15 +95,15 @@ impl ShellEnv {
 			let runtime_commands_path = &expand_var(&shellenv, "${HOME}/.rshrc".into());
 			let runtime_commands_path = Path::new(runtime_commands_path);
 			if runtime_commands_path.exists() {
-					if let Err(e) = shellenv.source_file(runtime_commands_path.to_path_buf(), Span::new()) {
-						let err = ShellErrorFull::from(shellenv.get_last_input(),e);
-						write(stderr,format!("Failed to source ~/.rshrc: {}",err).as_bytes()).unwrap();
-					}
+				if let Err(e) = shellenv.source_file(runtime_commands_path.to_path_buf(), Span::new()) {
+					let err = ShellErrorFull::from(shellenv.get_last_input(),e);
+					write(stderr,format!("Failed to source ~/.rshrc: {}",err).as_bytes()).unwrap();
+				}
 			} else {
-					eprintln!("Warning: Runtime commands file '{}' not found.", runtime_commands_path.display());
+				eprintln!("Warning: Runtime commands file '{}' not found.", runtime_commands_path.display());
 			}
 		}
-    if flags.contains(EnvFlags::LOGIN_SHELL) {
+		if flags.contains(EnvFlags::LOGIN_SHELL) {
 			let profile_path = expand_var(&shellenv, "${HOME}/.rsh_profile".into());
 			let profile_path = Path::new(&profile_path);
 			if profile_path.exists() {
@@ -112,7 +112,7 @@ impl ShellEnv {
 					write(stderr,format!("Failed to source ~/.rshrc: {}",err).as_bytes()).unwrap();
 				}
 			}
-    }
+		}
 		shellenv
 	}
 

@@ -16,7 +16,7 @@ bitflags! {
 		// General Contexts
 		const VALID_OPERAND      = 0b00000000000000000000000000000001; // Can be a target for redirection
 		const IS_OP              = 0b00000000000000000000000000000010; // Is an operator
-		const COMBINE_OUT        = 0b00000000000000000000000000000010; // Combine stderr and stdout
+		const COMBINE_OUT        = 0b00000000000000000000000000000100; // Combine stderr and stdout
 	}
 }
 
@@ -165,9 +165,9 @@ impl Node {
 }
 
 impl Default for Node {
-    fn default() -> Self {
-        Self::new()
-    }
+	fn default() -> Self {
+		Self::new()
+	}
 }
 #[derive(Debug,Clone,PartialEq)]
 pub enum NdType {
@@ -754,11 +754,11 @@ fn get_flow_ctl_redirections(node: &Node) -> Result<(Vec<Node>, Vec<Node>),Shell
 	// Output redirections like `while true; do echo hello world; done >> hello.txt` go to the body
 	let redirs = node.get_redirs()?;
 	let (cond_redirs, body_redirs): (Vec<Node>, Vec<Node>) = redirs.into_iter().partition(|redir_nd| {
-			if let NdType::Redirection { ref redir } = redir_nd.nd_type {
-					matches!(redir.op, RedirType::Input)
-			} else {
-					false
-			}
+		if let NdType::Redirection { ref redir } = redir_nd.nd_type {
+			matches!(redir.op, RedirType::Input)
+		} else {
+			false
+		}
 	});
 	Ok((cond_redirs,body_redirs))
 }
@@ -791,34 +791,34 @@ pub fn build_redirection(mut ctx: DescentContext) -> Result<DescentContext,Shell
 	let redir_tk = ctx.next_tk()
 		.ok_or_else(|| ShellError::from_internal("Called build_redirection with an empty token queue", Span::from(span_start, ctx.mark_end()) ))?;
 
-	let span = redir_tk.span();
+		let span = redir_tk.span();
 
-	let mut redir = if let TkType::Redirection { redir } = redir_tk.class() {
-		redir
-	} else {
-		return Err(ShellError::from_internal(format!("Called build_redirection() with a non-redirection token: {:?}",redir_tk).as_str(), span))
-	};
+		let mut redir = if let TkType::Redirection { redir } = redir_tk.class() {
+			redir
+		} else {
+			return Err(ShellError::from_internal(format!("Called build_redirection() with a non-redirection token: {:?}",redir_tk).as_str(), span))
+		};
 
-	if redir.fd_target.is_none() && redir.file_target.is_none() {
-		let target = ctx.next_tk()
-			.ok_or_else(|| ShellError::from_parse("Did not find an output for this redirection operator", span))?;
+		if redir.fd_target.is_none() && redir.file_target.is_none() {
+			let target = ctx.next_tk()
+				.ok_or_else(|| ShellError::from_parse("Did not find an output for this redirection operator", span))?;
 
-			if !matches!(target.class(), TkType::Ident | TkType::String) {
-				return Err(ShellError::from_parse(format!("Expected identifier after redirection operator, found this: {}",target.text()).as_str(), span))
-			}
+				if !matches!(target.class(), TkType::Ident | TkType::String) {
+					return Err(ShellError::from_parse(format!("Expected identifier after redirection operator, found this: {}",target.text()).as_str(), span))
+				}
 
-			redir.file_target = Some(Box::new(target));
-	}
+				redir.file_target = Some(Box::new(target));
+		}
 
-	let node = Node {
-		nd_type: NdType::Redirection { redir },
-		span,
-		flags: NdFlags::IS_OP,
-		redirs: VecDeque::new()
-	};
-	ctx.attach_node(node);
+		let node = Node {
+			nd_type: NdType::Redirection { redir },
+			span,
+			flags: NdFlags::IS_OP,
+			redirs: VecDeque::new()
+		};
+		ctx.attach_node(node);
 
-	Ok(ctx)
+		Ok(ctx)
 }
 
 pub fn build_if(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {

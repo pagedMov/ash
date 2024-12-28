@@ -599,7 +599,7 @@ pub fn echo(node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
 	let mut flags = EchoFlags::empty();
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
 	argv.pop_front(); // Remove 'echo' from argv
-	// Get flags
+										// Get flags
 	if argv.front().is_some_and(|arg| arg.text().starts_with('-')) {
 		let next_arg = argv.pop_front().unwrap();
 		let mut options = next_arg.text().strip_prefix('-').unwrap().chars();

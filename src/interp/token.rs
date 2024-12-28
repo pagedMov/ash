@@ -61,7 +61,7 @@ bitflags! {
 		const FROM_FUNC  = 0b001000000000000000;
 		const FROM_VAR   = 0b010000000000000000;
 	}
-}
+	}
 
 macro_rules! define_patterns {
 	($($name:expr => $pattern:expr),* $(,)?) => {{
@@ -466,7 +466,7 @@ impl WordDesc {
 		};
 		self.add_flag(flag)
 	}
-}
+	}
 
 fn skip_whitespace(chars: &mut VecDeque<char>) {
 	while chars.front().is_some_and(|ch| ch == &' ' || ch == &'\t') {

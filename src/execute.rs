@@ -57,19 +57,19 @@ impl ProcIO {
 		if !self.backup.is_empty() {
 			// Dup2 to restore file descriptors
 			if let Some(saved_in) = self.backup.get(&0) {
-					dup2(*saved_in, 0).map_err(|e| ShellError::from_io(&e.to_string(), Span::new()))?;
-					close(*saved_in).unwrap();
-					self.backup.remove(&0);
+				dup2(*saved_in, 0).map_err(|e| ShellError::from_io(&e.to_string(), Span::new()))?;
+				close(*saved_in).unwrap();
+				self.backup.remove(&0);
 			}
 			if let Some(saved_out) = self.backup.get(&1) {
-					dup2(*saved_out, 1).map_err(|e| ShellError::from_io(&e.to_string(), Span::new()))?;
-					close(*saved_out).unwrap();
-					self.backup.remove(&1);
+				dup2(*saved_out, 1).map_err(|e| ShellError::from_io(&e.to_string(), Span::new()))?;
+				close(*saved_out).unwrap();
+				self.backup.remove(&1);
 			}
 			if let Some(saved_err) = self.backup.get(&2) {
-					dup2(*saved_err, 2).map_err(|e| ShellError::from_io(&e.to_string(), Span::new()))?;
-					close(*saved_err).unwrap();
-					self.backup.remove(&2);
+				dup2(*saved_err, 2).map_err(|e| ShellError::from_io(&e.to_string(), Span::new()))?;
+				close(*saved_err).unwrap();
+				self.backup.remove(&2);
 			}
 		}
 		Ok(())
@@ -82,7 +82,7 @@ impl ProcIO {
 			}
 			close(err_pipe)
 				.map_err(|e| ShellError::from_io(format!("failed to close error pipe: {}",e).as_str(), Span::new()))?;
-		}
+				}
 		// Redirect stdout
 		if let Some(w_pipe) = self.stdout {
 			if let Err(err) = dup2(w_pipe, 1) {
@@ -91,7 +91,7 @@ impl ProcIO {
 			}
 			close(w_pipe)
 				.map_err(|e| ShellError::from_io(format!("failed to close error pipe: {}",e).as_str(), Span::new()))?;
-		}
+				}
 
 		// Redirect stdin
 		if let Some(r_pipe) = self.stdin {
@@ -101,15 +101,15 @@ impl ProcIO {
 			}
 			close(r_pipe)
 				.map_err(|e| ShellError::from_io(format!("failed to close error pipe: {}",e).as_str(), Span::new()))?;
-		}
+				}
 		Ok(())
 	}
 }
 
 impl Default for ProcIO {
-    fn default() -> Self {
-        Self::new()
-    }
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 #[derive(PartialEq,Debug,Clone)]
@@ -499,36 +499,36 @@ impl<'a> NodeWalker<'a> {
 	}
 
 	fn handle_redirs(&self, mut redirs: VecDeque<Node>) -> Result<(), ShellError> {
-			let mut fd_queue: VecDeque<i32> = VecDeque::new();
-			debug!("Handling redirections: {:?}", redirs);
+		let mut fd_queue: VecDeque<i32> = VecDeque::new();
+		debug!("Handling redirections: {:?}", redirs);
 
-			while let Some(redir) = redirs.pop_front() {
-					if let NdType::Redirection { redir } = redir.nd_type {
-							let Redir { fd_source, op, fd_target, file_target } = redir;
-							if let Some(target) = fd_target {
-									dup2(target, fd_source).unwrap();
-									fd_queue.push_back(target);
-							} else if let Some(file_path) = file_target {
-									info!("Opening file for redirection: {:?}", file_path);
-									let flags = match op {
-											RedirType::Input => OFlag::O_RDONLY,
-											RedirType::Output => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
-											RedirType::Append => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_APPEND,
-											_ => unimplemented!("Heredocs and herestrings are not implemented yet."),
-									};
-									let file_fd: RawFd = open(file_path.text(), flags, Mode::from_bits(0o644).unwrap()).unwrap();
-									info!("Duping file FD {} to FD {}", file_fd, fd_source);
-									dup2(file_fd, fd_source).unwrap();
-									fd_queue.push_back(file_fd);
-							}
-					}
+		while let Some(redir) = redirs.pop_front() {
+			if let NdType::Redirection { redir } = redir.nd_type {
+				let Redir { fd_source, op, fd_target, file_target } = redir;
+				if let Some(target) = fd_target {
+					dup2(target, fd_source).unwrap();
+					fd_queue.push_back(target);
+				} else if let Some(file_path) = file_target {
+					info!("Opening file for redirection: {:?}", file_path);
+					let flags = match op {
+						RedirType::Input => OFlag::O_RDONLY,
+						RedirType::Output => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
+						RedirType::Append => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_APPEND,
+						_ => unimplemented!("Heredocs and herestrings are not implemented yet."),
+					};
+					let file_fd: RawFd = open(file_path.text(), flags, Mode::from_bits(0o644).unwrap()).unwrap();
+					info!("Duping file FD {} to FD {}", file_fd, fd_source);
+					dup2(file_fd, fd_source).unwrap();
+					fd_queue.push_back(file_fd);
+				}
 			}
+		}
 
-			debug!("Closing FDs: {:?}", fd_queue);
-			while let Some(fd) = fd_queue.pop_front() {
-					let _ = close(fd);
-			}
-			Ok(())
+		debug!("Closing FDs: {:?}", fd_queue);
+		while let Some(fd) = fd_queue.pop_front() {
+			let _ = close(fd);
+		}
+		Ok(())
 	}
 
 	fn handle_subshell(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
@@ -536,45 +536,45 @@ impl<'a> NodeWalker<'a> {
 	}
 
 	fn handle_pipeline(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus, ShellError> {
-			let (left, right, both) = if let NdType::Pipeline { left, right, both } = &node.nd_type {
-					(*left.clone(), *right.clone(), both)
-			} else {
-					unreachable!()
-			};
+		let (left, right, both) = if let NdType::Pipeline { left, right, both } = &node.nd_type {
+			(*left.clone(), *right.clone(), both)
+		} else {
+			unreachable!()
+		};
 
-			let mut fds: [c_int; 2] = [0; 2];
-			let result = unsafe { pipe(fds.as_mut_ptr()) };
-			if result != 0 {
-					return Err(ShellError::from_io(&std::io::Error::last_os_error().to_string(), node.span()));
-			}
+		let mut fds: [c_int; 2] = [0; 2];
+		let result = unsafe { pipe(fds.as_mut_ptr()) };
+		if result != 0 {
+			return Err(ShellError::from_io(&std::io::Error::last_os_error().to_string(), node.span()));
+		}
 
-			let r_pipe = fds[0];
-			let w_pipe = fds[1];
+		let r_pipe = fds[0];
+		let w_pipe = fds[1];
 
-			let mut stderr_left = None;
-			if *both { // If the operator is '|&'
-					stderr_left = Some(dup(w_pipe).unwrap());
-			}
+		let mut stderr_left = None;
+		if *both { // If the operator is '|&'
+			stderr_left = Some(dup(w_pipe).unwrap());
+		}
 
-			// `left_io` works like this:
-			// 1. takes stdin from the io arg, representing input from a previous command if any
-			// 2. takes the write pipe as stdout
-			// 3. takes the duped stderr fildesc if any
-			let left_io = ProcIO::from(io.stdin,Some(w_pipe), stderr_left);
-			// `right_io` works like this:
-			// 1. takes the read pipe as stdin
-			// 2. takes stdout from the io arg, representing the output to the next command if any
-			// 3. takes stderr from the io arg, representing the error output the the next command if any
-			let right_io = ProcIO::from(Some(r_pipe), io.stdout, io.stderr);
-			// Walk left side of the pipeline
-			let left_status = self.walk(left, left_io);
+		// `left_io` works like this:
+		// 1. takes stdin from the io arg, representing input from a previous command if any
+		// 2. takes the write pipe as stdout
+		// 3. takes the duped stderr fildesc if any
+		let left_io = ProcIO::from(io.stdin,Some(w_pipe), stderr_left);
+		// `right_io` works like this:
+		// 1. takes the read pipe as stdin
+		// 2. takes stdout from the io arg, representing the output to the next command if any
+		// 3. takes stderr from the io arg, representing the error output the the next command if any
+		let right_io = ProcIO::from(Some(r_pipe), io.stdout, io.stderr);
+		// Walk left side of the pipeline
+		let left_status = self.walk(left, left_io);
 
-			// Walk right side of the pipeline
-			let right_status = self.walk(right, right_io);
+		// Walk right side of the pipeline
+		let right_status = self.walk(right, right_io);
 
-			// Return status of the last command
-			left_status?;
-			right_status
+		// Return status of the last command
+		left_status?;
+		right_status
 	}
 
 	fn handle_function(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
