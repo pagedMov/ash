@@ -486,8 +486,10 @@ impl<'a> NodeWalker<'a> {
 			let tokens = expand::expand_token(self.shellenv, word);
 			debug!("got expanded tokens: {:?}",tokens);
 			for token in tokens {
-				let cstring = CString::new(token.text()).unwrap();
-				args.push(cstring);
+				if !token.text().is_empty() {
+					let cstring = CString::new(token.text()).unwrap();
+					args.push(cstring);
+				}
 			}
 		}
 		args

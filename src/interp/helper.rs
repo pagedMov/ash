@@ -4,20 +4,39 @@ use log::{debug,trace};
 use std::{collections::VecDeque, os::fd::BorrowedFd};
 
 pub trait StrExtension {
-    fn has_unescaped(&self, check_char: char) -> bool;
+    fn has_unescaped(&self, pat: &str) -> bool;
 }
 
 impl StrExtension for str {
 	/// Checks to see if a string slice contains a specified unescaped character. This method assumes that '\\' is the escape character.
 	///
-	fn has_unescaped(&self, check_char: char) -> bool {
-		let mut chars = self.chars();
-		let mut prev_char = None;
-		chars.any(|c| {
-			let check = c == check_char && prev_char != Some('\\');
-			prev_char = Some(c);
-			check
-		})
+	fn has_unescaped(&self, pat: &str) -> bool {
+			let mut chars = self.chars().collect::<VecDeque<char>>();
+			let mut working_pat = String::new();
+			let mut escaped = false;
+
+			while let Some(ch) = chars.pop_front() {
+					if !escaped && working_pat == pat {
+							return true;
+					}
+					match ch {
+							' ' | '\t' => {
+									// Check for unescaped match when encountering a space/tab
+									// Reset for next segment
+									escaped = false;
+									working_pat.clear();
+							}
+							'\\' => {
+									escaped = true;
+							}
+							_ => {
+									working_pat.push(ch);
+							}
+					}
+			}
+
+			// Check for unescaped match at the end of the string
+			!escaped && working_pat == pat
 	}
 }
 

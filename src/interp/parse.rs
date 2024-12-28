@@ -1458,7 +1458,7 @@ pub fn build_func_def(mut ctx: DescentContext) -> Result<DescentContext, ShellEr
 		//Might be fine to just build the AST since nothing is being executed or expanded
 		let state = ParseState {
 			input: body.as_str(),
-			shellenv: &ShellEnv::new(EnvFlags::empty()),
+			shellenv: &ShellEnv::new(EnvFlags::NO_RC),
 			tokens: VecDeque::new(),
 			ast: Node::new()
 		};

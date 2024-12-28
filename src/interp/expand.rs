@@ -13,8 +13,8 @@ use super::parse::{self, NdType, Node, ParseState};
 use super::token;
 
 pub fn check_globs(string: String) -> bool {
-	string.has_unescaped('?') ||
-	string.has_unescaped('*')
+	string.has_unescaped("?") ||
+	string.has_unescaped("*")
 }
 
 /// Handles the expansion of command arguments
@@ -86,7 +86,7 @@ pub fn expand_prompt(shellenv: &ShellEnv) -> String {
 	} else {
 		format!("\\e[1;{}m\\w\\e[1;36m/\\e[0m",default_color)
 	};
-	let ps1: String = shellenv.env_vars.get("PS1").map_or(format!("{}\\n\\e[{}m\\$\\e[36m>\\e[0m ",default_path,default_color), |ps1| ps1.clone());
+	let ps1: String = shellenv.env_vars.get("PS1").map_or(format!("\\n{}\\n\\e[{}m\\$\\e[36m>\\e[0m ",default_path,default_color), |ps1| ps1.clone());
 	let mut result = String::new();
 	let mut chars = ps1.chars().collect::<VecDeque<char>>();
 	while let Some(c) = chars.pop_front() {
@@ -345,28 +345,41 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 	working_buffer.push_back(token.clone());
 	while let Some(mut token) = working_buffer.pop_front() {
 		let is_glob = check_globs(token.text().into());
-		let expand_home = token.flags().contains(WdFlags::IS_ARG) && token.text().has_unescaped('~');
 		let is_brace_expansion = helper::is_brace_expansion(token.text());
 
+		let expand_home = token.flags().contains(WdFlags::IS_ARG) && token.text().has_unescaped("~");
 		if expand_home {
 			// If this unwrap fails, god help you
 			let home = shellenv.get_variable("HOME").unwrap();
-			token.wd.text = token.wd.text.replace('~',&home);
+			token.wd.text = token.wd.text.replace("~",&home);
 		}
 
 		if !is_glob && !is_brace_expansion {
 			debug!("expanding var for {}",token.text());
-			if token.text().has_unescaped('$') && !token.wd.contains_flag(WdFlags::SNG_QUOTED) {
+			if token.text().has_unescaped("$") && !token.wd.flags.intersects(WdFlags::FROM_VAR | WdFlags::SNG_QUOTED) {
 				info!("found unescaped dollar in: {}",token.text());
+				if token.text().has_unescaped("$@") {
+					let mut param_tokens = expand_params(shellenv,token);
+					while let Some(param) = param_tokens.pop_back() {
+						working_buffer.push_front(param);
+					}
+					continue
+				}
 				token.wd.text = expand_var(shellenv, token.text().into());
 			}
-			if helper::is_brace_expansion(token.text()) || token.text().has_unescaped('$') {
+			if helper::is_brace_expansion(token.text()) || token.text().has_unescaped("$") {
 				working_buffer.push_front(token);
 			} else {
+				let expand_home = token.flags().contains(WdFlags::IS_ARG) && token.text().has_unescaped("~");
+				if expand_home {
+					// If this unwrap fails, god help you
+					let home = shellenv.get_variable("HOME").unwrap();
+					token.wd.text = token.wd.text.replace("~",&home);
+				}
 				product_buffer.push_back(token)
 			}
 
-		} else if is_brace_expansion && token.text().has_unescaped('{') && token.tk_type != TkType::String {
+		} else if is_brace_expansion && token.text().has_unescaped("{") && token.tk_type != TkType::String {
 			trace!("expand(): Beginning brace expansion on {}", token.text());
 			// Perform brace expansion
 			let expanded = expand_braces(token.text().to_string());
@@ -412,6 +425,12 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 				);
 			}
 		} else {
+			let expand_home = token.flags().contains(WdFlags::IS_ARG) && token.text().has_unescaped("~");
+			if expand_home {
+				// If this unwrap fails, god help you
+				let home = shellenv.get_variable("HOME").unwrap();
+				token.wd.text = token.wd.text.replace("~",&home);
+			}
 			product_buffer.push_back(token);
 		}
 	}
@@ -591,9 +610,33 @@ pub fn expand_var(shellenv: &ShellEnv, string: String) -> String {
 
 	let value = shellenv.get_variable(&var_name).unwrap_or_default();
 	let expanded = format!("{}{}{}",left,value,right);
-	if expanded.has_unescaped('$') {
+	if expanded.has_unescaped("$") {
 		expand_var(shellenv,expanded)
 	} else {
 		expanded
 	}
+}
+
+fn expand_params(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
+	let mut expanded_tokens = VecDeque::new();
+	// Get the positional parameter string from shellenv and split it
+	let arg_string = shellenv.get_variable("@").unwrap_or_default();
+	let arg_split = arg_string.split(' ');
+
+	// Split the token's text at the first instance of '$@' and make two new tokens
+	// Subsequent instances will be handled in later iterations of expand()
+	let (left,right) = token.text().split_once("$@").unwrap();
+	let left_token = Tk::new(left.to_string(), token.span(), token.flags());
+	let right_token = Tk::new(right.to_string(), token.span(), token.flags());
+
+	// Push the left token into the deque
+	expanded_tokens.push_back(left_token);
+	for arg in arg_split {
+		// For each arg, make a new token and push it into the deque
+		let new_token = Tk::new(arg.to_string(),token.span(), token.flags() | WdFlags::FROM_VAR);
+		expanded_tokens.push_back(new_token);
+	}
+	// Now push the right token into the deque
+	expanded_tokens.push_back(right_token);
+	expanded_tokens
 }

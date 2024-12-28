@@ -85,7 +85,7 @@ pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
 		"dub_string" => r#"^\"([^\"]*)\"$"#,
 		"var_sub" => r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})",
 		"assignment" => r"^[A-Za-z_][A-Za-z0-9_]*=.*$",
-		"funcdef" => r"^[\x20-\x7E]*\(\)\s+\{[\x20-\x7E\n]*\}",
+		"funcdef" => r"^[\x20-\x7E]*\(\)\s+\{[\s\S]*?\}",
 		"operator" => r"(?:&&|\|\||[><]=?|[|&])",
 		"cmdsep" => r"^(?:\n|;)$",
 		"ident" => r"^[\x20-\x7E]*$",
@@ -153,6 +153,16 @@ pub enum TkType {
 }
 
 impl Tk {
+	pub fn new(text: String, span: Span, flags: WdFlags) -> Self {
+		Self {
+			tk_type: TkType::String,
+			wd: WordDesc {
+				text,
+				span,
+				flags
+			}
+		}
+	}
 	pub fn start_of_input() -> Self {
 		Tk {
 			tk_type: TkType::SOI,

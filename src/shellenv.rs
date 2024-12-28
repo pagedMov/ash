@@ -30,6 +30,7 @@ bitflags! {
 		const LOGIN_SHELL = 0b00000000010000;
 		const INTERACTIVE = 0b00000000100000;
 		const CLEAN       = 0b00000001000000; // Do not inherit env vars from parent
+		const NO_RC       = 0b00000010000000;
 	}
 }
 
@@ -69,15 +70,17 @@ impl ShellEnv {
 			open_fds,
 			last_input: None
 		};
-		let runtime_commands_path = &expand_var(&shellenv, "${HOME}/.rshrc".into());
-		let runtime_commands_path = Path::new(runtime_commands_path);
-		if runtime_commands_path.exists() {
-				if let Err(e) = shellenv.source_file(runtime_commands_path.to_path_buf(), Span::new()) {
-					let err = ShellErrorFull::from(shellenv.get_last_input(),e);
-					write(stderr,format!("Failed to source ~/.rshrc: {}",err).as_bytes()).unwrap();
-				}
-		} else {
-				eprintln!("Warning: Runtime commands file '{}' not found.", runtime_commands_path.display());
+		if !flags.contains(EnvFlags::NO_RC) {
+			let runtime_commands_path = &expand_var(&shellenv, "${HOME}/.rshrc".into());
+			let runtime_commands_path = Path::new(runtime_commands_path);
+			if runtime_commands_path.exists() {
+					if let Err(e) = shellenv.source_file(runtime_commands_path.to_path_buf(), Span::new()) {
+						let err = ShellErrorFull::from(shellenv.get_last_input(),e);
+						write(stderr,format!("Failed to source ~/.rshrc: {}",err).as_bytes()).unwrap();
+					}
+			} else {
+					eprintln!("Warning: Runtime commands file '{}' not found.", runtime_commands_path.display());
+			}
 		}
     if flags.contains(EnvFlags::LOGIN_SHELL) {
 			let profile_path = expand_var(&shellenv, "${HOME}/.rsh_profile".into());
@@ -321,6 +324,15 @@ impl ShellEnv {
 	}
 
 	pub fn set_parameter(&mut self, key: String, value: String) {
+		if key.chars().next().unwrap().is_ascii_digit() {
+			let mut pos_params = self.parameters.remove("@").unwrap_or_default();
+			if pos_params.is_empty() {
+				pos_params = value.clone();
+			} else {
+				pos_params = format!("{} {}",pos_params,value);
+			}
+			self.parameters.insert("@".into(),pos_params);
+		}
 		self.parameters.insert(key, value);
 	}
 
