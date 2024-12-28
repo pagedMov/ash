@@ -501,7 +501,7 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,ShellError> {
 				word_desc
 			}
 			// Redirection Operators
-			'>' | '<' | '&' | '0'..='9' if helper::check_redirection(&c,&mut chars) => {
+			'>' | '<' | '&' | '0'..='9' if !word_desc.flags.intersects(WdFlags::DUB_QUOTED | WdFlags::SNG_QUOTED) && helper::check_redirection(&c,&mut chars) => {
 				trace!("Detected redirection operator");
 				word_desc = if !word_desc.text.is_empty() {
 					debug!("WORD_DESC NOT EMPTY");

@@ -16,7 +16,7 @@ use nix::NixPath;
 use crate::execute::{ProcIO, RshWaitStatus};
 use crate::interp::parse::{NdType, Node, Span};
 use crate::interp::{expand, helper, token};
-use crate::interp::token::{Redir, RedirType, Tk};
+use crate::interp::token::{Redir, RedirType, Tk, TkType};
 use crate::shellenv::ShellEnv;
 use crate::event::ShellError;
 
@@ -528,6 +528,22 @@ pub fn pwd(shellenv: &ShellEnv, span: Span) -> Result<RshWaitStatus, ShellError>
 	} else {
 		Err(ShellError::from_execf("PWD environment variable is unset", 1, span))
 	}
+}
+
+pub fn export(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus, ShellError> {
+	let last_status = RshWaitStatus::Success { span: node.span() };
+	if let NdType::Builtin { mut argv } = node.nd_type {
+		argv.pop_front(); // Ignore "export"
+		while let Some(ass) = argv.pop_front() {
+			if let TkType::Assignment = ass.tk_type {
+				let (key,value) = ass.text().split_once('=').unwrap();
+				shellenv.export_variable(key.to_string(), value.to_string());
+			} else {
+				return Err(ShellError::from_execf(format!("Expected a variable assignment in export, got this: {}", ass.text()).as_str(), 1, ass.span()))
+			}
+		}
+		Ok(last_status)
+	} else { unreachable!() }
 }
 
 pub fn echo(node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {

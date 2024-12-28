@@ -260,8 +260,14 @@ impl ShellEnv {
 	}
 
 	pub fn export_variable(&mut self, key: String, value: String) {
-		self.variables.insert(key.clone(),value.clone());
-		self.env_vars.insert(key,value);
+		let value = value.trim_matches(|ch| ch == '"').to_string();
+		if value.as_str() == "" {
+			self.variables.remove(&key);
+			self.env_vars.remove(&key);
+		} else {
+			self.variables.insert(key.clone(),value.clone());
+			self.env_vars.insert(key,value);
+		}
 	}
 
 	pub fn remove_variable(&mut self, key: &str) -> Option<String> {

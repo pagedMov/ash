@@ -10,7 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use log::{info,debug,trace};
 use glob::MatchOptions;
 
-use crate::builtin::{alias, cd, echo, pwd, source, test};
+use crate::builtin::{alias, cd, echo, export, pwd, source, test};
 use crate::event::ShellError;
 use crate::interp::{expand, parse};
 use crate::interp::token::{Redir, RedirType, Tk, WdFlags};
@@ -437,6 +437,7 @@ impl<'a> NodeWalker<'a> {
 			"cd" => cd(self.shellenv, node),
 			"pwd" => pwd(self.shellenv, node.span()),
 			"alias" => alias(self.shellenv, node),
+			"export" => export(self.shellenv, node),
 			"[" | "test" => test(node.get_argv()?.into()),
 			_ => unimplemented!("found this builtin: {}",argv[0].text())
 		}
