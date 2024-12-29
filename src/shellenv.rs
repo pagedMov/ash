@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use bitflags::bitflags;
 use libc::STDERR_FILENO;
 use log::{debug, info, trace};
-use nix::unistd::{gethostname, write, User};
+use nix::unistd::{close, dup, dup2, gethostname, write, User};
 
 use crate::event::{ShellError, ShellErrorFull};
 use crate::execute::{NodeWalker, RshWaitStatus};
@@ -92,7 +92,6 @@ impl ShellEnv {
 	// Constructor
 	pub fn new(flags: EnvFlags) -> Self {
 		let mut open_fds = HashSet::new();
-		let stderr = helper::get_stderr();
 		let shopts = init_shopts();
 		// TODO: probably need to find a way to initialize env vars that doesnt rely on a parent process
 		let clean_env = flags.contains(EnvFlags::CLEAN);
@@ -118,7 +117,7 @@ impl ShellEnv {
 			if runtime_commands_path.exists() {
 				if let Err(e) = shellenv.source_file(runtime_commands_path.to_path_buf(), Span::new()) {
 					let err = ShellErrorFull::from(shellenv.get_last_input(),e);
-					write(stderr,format!("Failed to source ~/.rshrc: {}",err).as_bytes()).unwrap();
+					eprintln!("Failed to source ~/.rshrc: {}",err);
 				}
 			} else {
 				eprintln!("Warning: Runtime commands file '{}' not found.", runtime_commands_path.display());
@@ -201,7 +200,6 @@ impl ShellEnv {
 	pub fn source_file(&mut self, path: PathBuf, span: Span) -> Result<(),ShellError> {
 		let mut file = File::open(&path).map_err(|e| ShellError::from_io(&e.to_string(), span))?;
 		let mut buffer = String::new();
-		let stderr = unsafe { BorrowedFd::borrow_raw(STDERR_FILENO) };
 		file.read_to_string(&mut buffer).map_err(|e| ShellError::from_io(&e.to_string(), span))?;
 		self.last_input = Some(buffer.clone());
 
@@ -217,20 +215,20 @@ impl ShellEnv {
 							if code == 127 {
 								if let Some(cmd) = cmd {
 									let err = ShellErrorFull::from(self.get_last_input(),ShellError::from_no_cmd(&format!("Command not found: {}",cmd), span));
-									write(stderr, format!("{}", err).as_bytes()).unwrap();
+									eprintln!("{}", err);
 								}
 							}
 						}
 					}
 					Err(e) => {
 						let err = ShellErrorFull::from(self.get_last_input(), e);
-						write(stderr.as_fd(), format!("{}", err).as_bytes()).unwrap();
+						eprintln!("{}", err);
 					}
 				}
 			}
 			Err(e) => {
 				let err = ShellErrorFull::from(self.get_last_input(), e);
-				write(stderr.as_fd(), format!("Encountered error while sourcing file: {}\n{}",path.display(), err).as_bytes()).unwrap();
+				eprintln!("Encountered error while sourcing file: {}\n{}",path.display(), err);
 			}
 		}
 		Ok(())

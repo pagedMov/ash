@@ -13,7 +13,7 @@ use log::info;
 use rustyline::{self, completion::{Completer, FilenameCompleter}, config::Configurer, error::ReadlineError, history::{DefaultHistory, History}, ColorMode, Config, EditMode, Editor, Helper, Highlighter, Hinter, Validator};
 
 use crate::{event::ShellEvent, shellenv::ShellEnv};
-use crate::interp::parse::descend;
+use crate::interp::parse::{descend, NdType};
 use crate::interp::expand;
 
 
@@ -84,7 +84,11 @@ pub async fn prompt(sender: mpsc::Sender<ShellEvent>, shellenv: &mut ShellEnv) {
 			let state = descend(&line,shellenv);
 			match state {
 				Ok(parse_state) => {
-					let _ = sender.send(ShellEvent::NewAST(parse_state.ast)).await;
+					if let NdType::Root { deck } = &parse_state.ast.nd_type {
+						if !deck.is_empty() {
+							let _ = sender.send(ShellEvent::NewAST(parse_state.ast)).await;
+						}
+					}
 				}
 				Err(e) => {
 					let _ = sender.send(ShellEvent::CatchError(e)).await;

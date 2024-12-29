@@ -78,7 +78,7 @@ impl<'a> Completer for RshHelper<'a> {
 					completions.extend(matches.iter().map(|c| c.display().to_string()));
 
 					// Invoke fuzzyfinder if there are matches
-					if !completions.is_empty() {
+					if !completions.is_empty() && completions.len() > 1 {
 							if let Some(selected) = skim_comp(completions.clone()) {
 									return Ok((start, vec![selected]));
 							}
