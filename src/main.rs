@@ -63,17 +63,14 @@ async fn main() {
 
 }
 
-
-
 async fn main_noninteractive(args: Vec<String>, mut shellenv: ShellEnv) {
-	let stderr = unsafe { BorrowedFd::borrow_raw(STDERR_FILENO) };
 	let mut pos_params: Vec<String> = vec![];
 	let input;
 
 	// Input Handling
 	if args[1] == "-c" {
 		if args.len() < 3 {
-			write(stderr.as_fd(), b"Expected a command after '-c' flag\n").unwrap();
+			eprintln!("Expected a command after '-c' flag");
 			return;
 		}
 		input = args[2].clone(); // Store the command string
@@ -87,13 +84,13 @@ async fn main_noninteractive(args: Vec<String>, mut shellenv: ShellEnv) {
 			Ok(mut script) => {
 				let mut buffer = vec![];
 				if let Err(e) = script.read_to_end(&mut buffer) {
-					write(stderr.as_fd(), format!("Error reading file: {}\n", e).as_bytes()).unwrap();
+					eprintln!("Error reading file: {}",e);
 					return;
 				}
 				input = String::from_utf8_lossy(&buffer).to_string(); // Convert file contents to String
 			}
 			Err(e) => {
-				write(stderr.as_fd(), format!("Error opening file: {}\n", e).as_bytes()).unwrap();
+				eprintln!("Error opening file: {}",e);
 				return;
 			}
 		}
@@ -116,20 +113,20 @@ async fn main_noninteractive(args: Vec<String>, mut shellenv: ShellEnv) {
 						if code == 127 {
 							if let Some(cmd) = cmd {
 								let err = ShellErrorFull::from(shellenv.get_last_input(),ShellError::from_no_cmd(&cmd, span));
-								write(stderr, format!("{}", err).as_bytes()).unwrap();
+								eprintln!("{}", err);
 							}
 						}
 					}
 				}
 				Err(e) => {
 					let err = ShellErrorFull::from(shellenv.get_last_input(),e);
-					write(stderr.as_fd(), format!("{}", err).as_bytes()).unwrap();
+					eprintln!("{}", err);
 				}
 			}
 		}
 		Err(e) => {
 			let err = ShellErrorFull::from(shellenv.get_last_input(),e);
-			write(stderr.as_fd(), format!("{}", err).as_bytes()).unwrap();
+			eprintln!("{}", err);
 		}
 	}
 }

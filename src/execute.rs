@@ -163,6 +163,10 @@ impl<'a> NodeWalker<'a> {
 	}
 	pub fn start_walk(&mut self) -> Result<RshWaitStatus,ShellError> {
 		info!("Going on a walk...");
+		// Save file descs just in case
+		let saved_in = dup(0).unwrap();
+		let saved_out = dup(1).unwrap();
+		let saved_err = dup(2).unwrap();
 		let mut exit_status = RshWaitStatus::new();
 		let mut nodes;
 		if let NdType::Root { ref mut deck } = self.ast.nd_type {
@@ -171,6 +175,13 @@ impl<'a> NodeWalker<'a> {
 		while let Some(node) = nodes.pop_front() {
 			exit_status = self.walk(node, ProcIO::new())?;
 		}
+		// Restore file descs just in case
+		dup2(saved_in, 0).unwrap();
+		close(saved_in).unwrap();
+		dup2(saved_out, 1).unwrap();
+		close(saved_out).unwrap();
+		dup2(saved_err, 2).unwrap();
+		close(saved_err).unwrap();
 		Ok(exit_status)
 	}
 
@@ -500,16 +511,14 @@ impl<'a> NodeWalker<'a> {
 
 	fn handle_redirs(&self, mut redirs: VecDeque<Node>) -> Result<(), ShellError> {
 		let mut fd_queue: VecDeque<i32> = VecDeque::new();
-		debug!("Handling redirections: {:?}", redirs);
+		let mut fd_dupes: VecDeque<Redir> = VecDeque::new();
 
 		while let Some(redir) = redirs.pop_front() {
 			if let NdType::Redirection { redir } = redir.nd_type {
-				let Redir { fd_source, op, fd_target, file_target } = redir;
-				if let Some(target) = fd_target {
-					dup2(target, fd_source).unwrap();
-					fd_queue.push_back(target);
+				let Redir { fd_source, op, fd_target, file_target } = &redir;
+				if fd_target.is_some() {
+					fd_dupes.push_back(redir);
 				} else if let Some(file_path) = file_target {
-					info!("Opening file for redirection: {:?}", file_path);
 					let flags = match op {
 						RedirType::Input => OFlag::O_RDONLY,
 						RedirType::Output => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
@@ -518,15 +527,21 @@ impl<'a> NodeWalker<'a> {
 					};
 					let file_fd: RawFd = open(file_path.text(), flags, Mode::from_bits(0o644).unwrap()).unwrap();
 					info!("Duping file FD {} to FD {}", file_fd, fd_source);
-					dup2(file_fd, fd_source).unwrap();
+					dup2(file_fd, *fd_source).unwrap();
 					fd_queue.push_back(file_fd);
 				}
 			}
 		}
 
-		debug!("Closing FDs: {:?}", fd_queue);
+		while let Some(dupe_redir) = fd_dupes.pop_front() {
+			let Redir { fd_source, op, fd_target, file_target } = dupe_redir;
+			dup2(fd_target.unwrap(),fd_source).unwrap();
+		}
+
 		while let Some(fd) = fd_queue.pop_front() {
-			let _ = close(fd);
+			if fd > 2 {
+				let _ = close(fd);
+			}
 		}
 		Ok(())
 	}

@@ -1,7 +1,7 @@
 use std::fmt;
 use std::os::fd::BorrowedFd;
 
-use nix::unistd::write;
+use nix::unistd::{close, dup, dup2, write};
 use tokio::sync::mpsc;
 use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};
@@ -328,9 +328,8 @@ impl<'a> EventLoop<'a> {
 				ShellEvent::NewAST(tree) => {
 					// Log and process a new AST node.
 					debug!("new tree:\n {:#?}", tree);
-					let mut walker = execute::NodeWalker::new(tree,self.shellenv);
-					let stderr = unsafe { BorrowedFd::borrow_raw(2) };
 
+					let mut walker = execute::NodeWalker::new(tree,self.shellenv);
 					match walker.start_walk() {
 						Ok(code) => {
 							info!("Last exit status: {:?}",code);
@@ -338,7 +337,7 @@ impl<'a> EventLoop<'a> {
 								if *code == 127 {
 									if let Some(cmd) = cmd {
 										let err = ShellErrorFull::from(self.shellenv.get_last_input(),ShellError::from_no_cmd(cmd, *span));
-										write(stderr, format!("{}",err).as_bytes()).unwrap();
+										eprintln!("{}",err);
 									}
 								};
 							};
@@ -347,7 +346,7 @@ impl<'a> EventLoop<'a> {
 						},
 						Err(e) => {
 							let err = ShellErrorFull::from(self.shellenv.get_last_input(),e);
-							let _ = write(stderr, format!("{}",err).as_bytes());
+							eprintln!("{}",err);
 						}
 					}
 				}

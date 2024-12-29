@@ -41,10 +41,6 @@ impl StrExtension for str {
 	}
 }
 
-pub fn get_stderr<'a>() -> BorrowedFd<'a> {
-	unsafe { BorrowedFd::borrow_raw(STDERR_FILENO) }
-}
-
 // This is used when pesky system calls want to emit their own errors
 // Which ends up being redundant, since rsh has it's own error reporting system
 // Kind of hacky but fuck it

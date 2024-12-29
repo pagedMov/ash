@@ -28,14 +28,16 @@ pub const BUILTINS: [&str; 14] = [
 bitflags! {
 	#[derive(Debug)]
 	pub struct EchoFlags: u8 {
-		const USE_ESCAPE = 0b001;
-		const NO_NEWLINE = 0b010;
-		const NO_ESCAPE = 0b100;
+		const USE_ESCAPE = 0b0001;
+		const NO_NEWLINE = 0b0010;
+		const NO_ESCAPE = 0b0100;
+		const STDERR = 0b1000;
 	}
 }
 
 fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<(i32, i32)>, ShellError> {
 	let mut fd_stack: Vec<(i32, i32)> = Vec::new();
+	let mut fd_dupes: Vec<(i32, i32)> = Vec::new();
 	info!("Handling redirections for builtin: {:?}", redirs);
 
 	for redir_tk in redirs {
@@ -48,9 +50,7 @@ fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<(i32, i32)>, Shel
 			fd_stack.push((*fd_source, backup_fd));
 
 			if let Some(target) = fd_target {
-				dup2(*target, *fd_source).map_err(|e| {
-					ShellError::from_execf(&format!("Failed to redirect FD {} to {}: {}", fd_source, target, e), 1, redir_tk.span())
-				})?;
+				fd_dupes.push((*target,*fd_source));
 			} else if let Some(file_path) = file_target {
 				let flags = match op {
 					RedirType::Input => OFlag::O_RDONLY,
@@ -69,6 +69,10 @@ fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<(i32, i32)>, Shel
 				});
 			}
 		}
+	}
+
+	while let Some((target,source)) = fd_dupes.pop() {
+		dup2(target,source).unwrap();
 	}
 
 	Ok(fd_stack)
@@ -413,7 +417,7 @@ pub fn test(mut argv: VecDeque<Tk>) -> Result<RshWaitStatus, ShellError> {
 					return Err(ShellError::from_syntax("Expected a comparison operator after integer in test", command.span()));
 				}
 			}
-			_ if is_path(&arg) => {
+			_ if is_path(&arg) && argv.front().is_some_and(|arg| matches!(arg.text(), "-ef" | "-nt" | "-ot")) => {
 				if let Some(cmp) = argv.pop_front() {
 					match cmp.text() {
 						"-ef" => do_cmp(arg, &mut argv, to_meta, |left, right| left.dev() == right.dev() && left.ino() == right.ino())?,
@@ -611,6 +615,7 @@ pub fn echo(node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
 					}
 					flags |= EchoFlags::USE_ESCAPE
 				}
+				Some('r') => flags |= EchoFlags::STDERR,
 				Some('n') => flags |= EchoFlags::NO_NEWLINE,
 				Some('E') => {
 					if flags.contains(EchoFlags::USE_ESCAPE) {
@@ -647,7 +652,10 @@ pub fn echo(node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
 		Vec::new()
 	};
 
-	let output_fd = io.stdout.unwrap_or(1); // Default to standard output
+	let output_fd = match flags.contains(EchoFlags::STDERR) {
+    true => 2,
+    false => 1,
+	};
 	let output = unsafe { BorrowedFd::borrow_raw(output_fd) };
 
 	if let Some(fd) = io.stderr {
