@@ -27,6 +27,7 @@ pub mod execute;
 pub mod shellenv;
 pub mod interp;
 pub mod builtin;
+pub mod comp;
 
 use std::{env, fs::File, io::Read, os::fd::{AsFd, BorrowedFd}};
 
@@ -46,17 +47,25 @@ use crate::shellenv::ShellEnv;
 async fn main() {
 	let args = env::args().collect::<Vec<String>>();
 
+	let mut shellenv = ShellEnv::new(EnvFlags::empty());
+	if args[0].starts_with('-') {
+		shellenv.source_profile().ok();
+	}
 	match args.len() {
 		1 => {
-			main_interactive().await;
+			shellenv.set_flags(EnvFlags::INTERACTIVE);
+			main_interactive(shellenv).await;
 		},
 		_ => {
-			main_noninteractive(args).await;
+			main_noninteractive(args,shellenv).await;
 		}
 	}
+
 }
 
-async fn main_noninteractive(args: Vec<String>) {
+
+
+async fn main_noninteractive(args: Vec<String>, mut shellenv: ShellEnv) {
 	let stderr = unsafe { BorrowedFd::borrow_raw(STDERR_FILENO) };
 	let mut pos_params: Vec<String> = vec![];
 	let input;
@@ -91,7 +100,6 @@ async fn main_noninteractive(args: Vec<String>) {
 	}
 
 	// Code Execution Logic
-	let mut shellenv = ShellEnv::new(EnvFlags::empty());
 	shellenv.set_last_input(&input);
 	for (index,param) in pos_params.into_iter().enumerate() {
 		let key = format!("{}",index + 1);
@@ -126,9 +134,8 @@ async fn main_noninteractive(args: Vec<String>) {
 	}
 }
 
-async fn main_interactive() {
+async fn main_interactive(mut shellenv: ShellEnv) {
 	env_logger::init();
-	let mut shellenv = ShellEnv::new(EnvFlags::INTERACTIVE);
 	let mut event_loop = EventLoop::new(&mut shellenv);
 	let _ = event_loop.listen().await;
 }

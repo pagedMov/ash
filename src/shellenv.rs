@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::Read;
 use std::os::fd::{AsFd,BorrowedFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use bitflags::bitflags;
 use libc::STDERR_FILENO;
@@ -27,37 +28,56 @@ bitflags! {
 
 		// Context
 		const IN_FUNC          = 0b00000000000000000000000000001000; // Enables the `return` builtin
-		const LOGIN_SHELL      = 0b00000000000000000000000000010000;
-		const INTERACTIVE      = 0b00000000000000000000000000100000;
-		const CLEAN            = 0b00000000000000000000000001000000; // Do not inherit env vars from parent
-		const NO_RC            = 0b00000000000000000000000010000000;
+		const INTERACTIVE      = 0b00000000000000000000000000010000;
+		const CLEAN            = 0b00000000000000000000000000100000; // Do not inherit env vars from parent
+		const NO_RC            = 0b00000000000000000000000001000000;
 
 		// Options set by 'set' command
-		const EXPORT_ALL_VARS  = 0b00000000000000000000000100000000; // set -a
-		const REPORT_JOBS_ASAP = 0b00000000000000000000001000000000; // set -b
-		const EXIT_ON_ERROR    = 0b00000000000000000000010000000000; // set -e
-		const NO_GLOB          = 0b00000000000000000000100000000000; // set -f
-		const HASH_CMDS        = 0b00000000000000000001000000000000; // set -h
-		const ASSIGN_ANYWHERE  = 0b00000000000000000010000000000000; // set -k
-		const ENABLE_JOB_CTL   = 0b00000000000000000100000000000000; // set -m
-		const NO_EXECUTE       = 0b00000000000000001000000000000000; // set -n
-		const ENABLE_RSHELL    = 0b00000000000000010000000000000000; // set -r
-		const EXIT_AFTER_EXEC  = 0b00000000000000100000000000000000; // set -t
-		const UNSET_IS_ERROR   = 0b00000000000001000000000000000000; // set -u
-		const PRINT_INPUT      = 0b00000000000010000000000000000000; // set -v
-		const STACK_TRACE      = 0b00000000000100000000000000000000; // set -x
-		const EXPAND_BRACES    = 0b00000000001000000000000000000000; // set -B
-		const NO_OVERWRITE     = 0b00000000010000000000000000000000; // set -C
-		const INHERIT_ERR      = 0b00000000100000000000000000000000; // set -E
-		const HIST_SUB         = 0b00000001000000000000000000000000; // set -H
-		const NO_CD_SYMLINKS   = 0b00000010000000000000000000000000; // set -P
-		const INHERIT_RET      = 0b00000100000000000000000000000000; // set -T
+		const EXPORT_ALL_VARS  = 0b00000000000000000000000010000000; // set -a
+		const REPORT_JOBS_ASAP = 0b00000000000000000000000100000000; // set -b
+		const EXIT_ON_ERROR    = 0b00000000000000000000001000000000; // set -e
+		const NO_GLOB          = 0b00000000000000000000010000000000; // set -f
+		const HASH_CMDS        = 0b00000000000000000000100000000000; // set -h
+		const ASSIGN_ANYWHERE  = 0b00000000000000000001000000000000; // set -k
+		const ENABLE_JOB_CTL   = 0b00000000000000000010000000000000; // set -m
+		const NO_EXECUTE       = 0b00000000000000000100000000000000; // set -n
+		const ENABLE_RSHELL    = 0b00000000000000001000000000000000; // set -r
+		const EXIT_AFTER_EXEC  = 0b00000000000000010000000000000000; // set -t
+		const UNSET_IS_ERROR   = 0b00000000000000100000000000000000; // set -u
+		const PRINT_INPUT      = 0b00000000000001000000000000000000; // set -v
+		const STACK_TRACE      = 0b00000000000010000000000000000000; // set -x
+		const EXPAND_BRACES    = 0b00000000000100000000000000000000; // set -B
+		const NO_OVERWRITE     = 0b00000000001000000000000000000000; // set -C
+		const INHERIT_ERR      = 0b00000000010000000000000000000000; // set -E
+		const HIST_SUB         = 0b00000000100000000000000000000000; // set -H
+		const NO_CD_SYMLINKS   = 0b00000001000000000000000000000000; // set -P
+		const INHERIT_RET      = 0b00000010000000000000000000000000; // set -T
 	}
 }
 
-#[derive(Debug,PartialEq,Clone)]
+impl PartialEq for ShellEnv {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare the inner value of `output_buffer`
+        let self_output = self.output_buffer.lock().unwrap();
+        let other_output = other.output_buffer.lock().unwrap();
+
+        *self_output == *other_output
+            && self.flags == other.flags
+            && self.env_vars == other.env_vars
+            && self.variables == other.variables
+            && self.aliases == other.aliases
+            && self.shopts == other.shopts
+            && self.functions == other.functions
+            && self.parameters == other.parameters
+            && self.open_fds == other.open_fds
+            && self.last_input == other.last_input
+    }
+}
+
+#[derive(Debug,Clone)]
 pub struct ShellEnv {
 	pub flags: EnvFlags,
+	pub output_buffer: Arc<Mutex<String>>,
 	pub env_vars: HashMap<String, String>,
 	pub variables: HashMap<String, String>,
 	pub aliases: HashMap<String, String>,
@@ -82,6 +102,7 @@ impl ShellEnv {
 		open_fds.insert(2);
 		let mut shellenv = Self {
 			flags: EnvFlags::empty(),
+			output_buffer: Arc::new(Mutex::new(String::new())),
 			env_vars,
 			variables: HashMap::new(),
 			aliases: HashMap::new(),
@@ -101,16 +122,6 @@ impl ShellEnv {
 				}
 			} else {
 				eprintln!("Warning: Runtime commands file '{}' not found.", runtime_commands_path.display());
-			}
-		}
-		if flags.contains(EnvFlags::LOGIN_SHELL) {
-			let profile_path = expand_var(&shellenv, "${HOME}/.rsh_profile".into());
-			let profile_path = Path::new(&profile_path);
-			if profile_path.exists() {
-				if let Err(e) = shellenv.source_file(profile_path.to_path_buf(), Span::new()) {
-					let err = ShellErrorFull::from(shellenv.get_last_input(),e);
-					write(stderr,format!("Failed to source ~/.rshrc: {}",err).as_bytes()).unwrap();
-				}
 			}
 		}
 		shellenv
@@ -138,18 +149,30 @@ impl ShellEnv {
 		let home = pathbuf_to_string(Ok(home));
 		let hostname = gethostname().map(|hname| hname.to_string_lossy().to_string()).unwrap_or_default();
 
-		env_vars.insert("HOSTNAME".into(), hostname);
+		env_vars.insert("HOSTNAME".into(), hostname.clone());
+		env::set_var("HOSTNAME", hostname);
 		env_vars.insert("UID".into(), uid.to_string());
+		env::set_var("UID", uid.to_string());
 		env_vars.insert("TMPDIR".into(), "/tmp".into());
+		env::set_var("TMPDIR", "/tmp");
 		env_vars.insert("TERM".into(), "xterm-256color".into());
+		env::set_var("TERM", "xterm-256color");
 		env_vars.insert("LANG".into(), "en_US.UTF-8".into());
+		env::set_var("LANG", "en_US.UTF-8");
 		env_vars.insert("USER".into(), username.clone());
-		env_vars.insert("LOGNAME".into(), username);
+		env::set_var("USER", username.clone());
+		env_vars.insert("LOGNAME".into(), username.clone());
+		env::set_var("LOGNAME", username);
 		env_vars.insert("PWD".into(), pathbuf_to_string(std::env::current_dir()));
+		env::set_var("PWD", pathbuf_to_string(std::env::current_dir()));
 		env_vars.insert("OLDPWD".into(), pathbuf_to_string(std::env::current_dir()));
+		env::set_var("OLDPWD", pathbuf_to_string(std::env::current_dir()));
 		env_vars.insert("HOME".into(), home.clone());
+		env::set_var("HOME", home.clone());
 		env_vars.insert("SHELL".into(), pathbuf_to_string(std::env::current_exe()));
+		env::set_var("SHELL", pathbuf_to_string(std::env::current_exe()));
 		env_vars.insert("HIST_FILE".into(),format!("{}/.rsh_hist",home));
+		env::set_var("HIST_FILE",format!("{}/.rsh_hist",home));
 		env_vars
 	}
 
@@ -161,16 +184,18 @@ impl ShellEnv {
 		self.flags.contains(EnvFlags::INTERACTIVE)
 	}
 
-	pub fn is_login(&self) -> bool {
-		self.flags.contains(EnvFlags::LOGIN_SHELL)
-	}
-
 	pub fn set_last_input(&mut self, input: &str) {
 		self.last_input = Some(input.to_string())
 	}
 
 	pub fn get_last_input(&mut self) -> String {
 		self.last_input.clone().unwrap_or_default()
+	}
+
+	pub fn source_profile(&mut self) -> Result<(),ShellError> {
+		let home = self.get_variable("HOME").unwrap();
+		let path = PathBuf::from(format!("{}/.rsh_profile",home));
+		self.source_file(path, Span::new())
 	}
 
 	pub fn source_file(&mut self, path: PathBuf, span: Span) -> Result<(),ShellError> {

@@ -1,7 +1,7 @@
+use crate::comp::{self, RshHelper};
 use crate::event::Signals;
 use crate::prompt::rustyline::Context;
 use im::HashSet;
-use nix::NixPath;
 use rustyline::completion::Candidate;
 use rustyline::history::FileHistory;
 use std::collections::VecDeque;
@@ -16,84 +16,7 @@ use crate::{event::ShellEvent, shellenv::ShellEnv};
 use crate::interp::parse::descend;
 use crate::interp::expand;
 
-#[derive(Hinter,Highlighter,Validator,Helper)]
 
-struct RshHelper<'a> {
-	filename_comp: FilenameCompleter,
-	commands: Vec<String>, // List of built-in or cached commands
-	shellenv: &'a ShellEnv
-}
-
-impl<'a> RshHelper<'a> {
-	pub fn new(shellenv: &'a ShellEnv) -> Self {
-		// Prepopulate some built-in commands (could also load dynamically)
-		let commands = vec![
-			"cd".to_string(),
-			"ls".to_string(),
-			"echo".to_string(),
-			"exit".to_string(),
-		];
-
-		let mut helper = RshHelper {
-			filename_comp: FilenameCompleter::new(),
-			commands,
-			shellenv
-		};
-		helper.update_commands_from_path();
-		helper
-	}
-
-	// Dynamically add commands (if needed, e.g., external binaries in $PATH)
-	fn update_commands_from_path(&mut self) {
-		if let Some(paths) = env::var_os("PATH") {
-			let mut external_commands = HashSet::new();
-			for path in env::split_paths(&paths) {
-				if let Ok(entries) = std::fs::read_dir(path) {
-					for entry in entries.flatten() {
-						if let Ok(file_name) = entry.file_name().into_string() {
-							external_commands.insert(file_name);
-						}
-					}
-				}
-			}
-			self.commands.extend(external_commands);
-		}
-	}
-}
-
-impl<'a> Completer for RshHelper<'a> {
-	type Candidate = String;
-
-	fn complete(&self, line: &str, pos: usize, _: &Context<'_>) -> Result<(usize, Vec<Self::Candidate>),ReadlineError> {
-		let mut completions = Vec::new();
-		let num_words = line.split(' ').count();
-
-		// Determine if this is a file path or a command completion
-		if !line.is_empty() && num_words > 1 {
-			let hist_path = expand::expand_var(self.shellenv, "$HIST_FILE".into());
-			info!("history path in init_prompt(): {}",hist_path);
-			let hist_path = PathBuf::from(hist_path);
-			// Delegate to FilenameCompleter for file path completion
-			let mut history = FileHistory::new();
-			history.load(&hist_path).unwrap();
-			let (start, matches) = self.filename_comp.complete(line, pos, &Context::new(&history))?;
-			completions.extend(matches.iter().map(|c| c.display().to_string()));
-			return Ok((start, completions));
-		}
-
-		// Command completion
-		let prefix = &line[..pos]; // The part of the line to match
-		completions.extend(
-			self.commands
-			.iter()
-			.filter(|cmd| cmd.starts_with(prefix)) // Match prefix
-			.cloned(), // Clone matched command names
-		);
-
-		// Return completions, starting from the beginning of the word
-		Ok((0, completions))
-	}
-}
 
 fn init_prompt(shellenv: &ShellEnv) -> Editor<RshHelper, DefaultHistory> {
 	let mut config = Config::builder();

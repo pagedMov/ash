@@ -31,7 +31,13 @@
             inherit rust-toolchain;
           };
           devShells.default = mkShell {
-            buildInputs = [ rust-bin.nightly.latest.default ];
+            buildInputs = [
+              rust-bin.nightly.latest.default
+              clang
+              llvm
+              libclang
+              pam
+            ];
             shellHook = ''
               exec zsh
             '';

@@ -637,7 +637,7 @@ impl<'a> NodeWalker<'a> {
 						flags: node.flags,
 						redirs: node.redirs
 					};
-					return self.handle_builtin(autocd, io)
+					return self.walk(autocd, io)
 				}
 			}
 		}

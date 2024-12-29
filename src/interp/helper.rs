@@ -9,7 +9,7 @@ pub trait StrExtension {
 }
 
 impl StrExtension for str {
-	/// Checks to see if a string slice contains a specified unescaped character. This method assumes that '\\' is the escape character.
+	/// Checks to see if a string slice contains a specified unescaped text pattern. This method assumes that '\' is the escape character.
 	///
 	fn has_unescaped(&self, pat: &str) -> bool {
 		let mut chars = self.chars().collect::<VecDeque<char>>();
@@ -49,7 +49,7 @@ pub fn get_stderr<'a>() -> BorrowedFd<'a> {
 // Which ends up being redundant, since rsh has it's own error reporting system
 // Kind of hacky but fuck it
 // It works by taking the function as an argument and then executing it in
-// a context where stderr is redirected to /dev/null.
+// an isolated context where stderr is briefly redirected to /dev/null.
 pub fn suppress_err<F: FnOnce() -> T, T>(f: F) -> T {
 	let stderr = io::stderr();
 	let stderr_fd = stderr.as_raw_fd();

@@ -22,3 +22,5 @@ bitflags = "2.6.0"
 im = "15.1.0"
 rustyline = { version = "15.0.0", features = [ "derive" ] }
 chrono = "0.4.39"
+crossterm = "0.28.1"
+skim = "0.15.7"
