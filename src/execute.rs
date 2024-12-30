@@ -492,22 +492,6 @@ impl<'a> NodeWalker<'a> {
 	/// - Variable substitutions (`$var`) are resolved using the `shellenv`'s `get_variable` method.
 	/// - If a variable substitution is not found, an empty `CString` is added to the arguments.
 	///
-	fn extract_args(&mut self, argv: Vec<Tk>) -> Vec<CString> {
-		let mut args = Vec::new();
-		trace!("Extracting arguments from: {:?}", argv);
-		for word in argv {
-			debug!("checking word: {}",word.text());
-			let tokens = expand::expand_token(self.shellenv, word);
-			debug!("got expanded tokens: {:?}",tokens);
-			for token in tokens {
-				if !token.text().is_empty() {
-					let cstring = CString::new(token.text()).unwrap();
-					args.push(cstring);
-				}
-			}
-		}
-		args
-	}
 
 	fn handle_redirs(&self, mut redirs: VecDeque<Node>) -> Result<(), ShellError> {
 		let mut fd_queue: VecDeque<i32> = VecDeque::new();
@@ -624,8 +608,12 @@ impl<'a> NodeWalker<'a> {
 	}
 
 
-	fn handle_command(&mut self, node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
-		let argv = self.extract_args(node.get_argv()?);
+	fn handle_command(&mut self, mut node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
+		let argv = expand::expand_arguments(self.shellenv, &mut node)?;
+		let argv = argv
+			.iter()
+			.map(|arg| CString::new(arg.text()).unwrap())
+			.collect::<Vec<CString>>();
 		let redirs = node.get_redirs()?;
 		let span = node.span();
 		// Let's expand aliases here

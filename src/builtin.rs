@@ -645,12 +645,8 @@ pub fn echo(node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
 	io.backup_fildescs()?;
 	let newline_opt = !flags.contains(EchoFlags::NO_NEWLINE);
 	let output_str = catstr(argv, newline_opt);
-
-	let fd_stack = if !redirs.is_empty() {
-		open_file_descriptors(redirs.into())?
-	} else {
-		Vec::new()
-	};
+	let mut fd_stack = vec![];
+	fd_stack.extend(open_file_descriptors(redirs.into())?);
 
 	let output_fd = match flags.contains(EchoFlags::STDERR) {
     true => 2,

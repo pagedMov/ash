@@ -38,12 +38,12 @@ pub fn expand_arguments(shellenv: &ShellEnv, node: &mut Node) -> Result<Vec<Tk>,
 	}
 	match &node.nd_type {
 		NdType::Builtin {..} => {
-			node.nd_type = NdType::Builtin { argv: expand_buffer.into() };
-			Ok(argv)
+			node.nd_type = NdType::Builtin { argv: expand_buffer.clone().into() };
+			Ok(expand_buffer)
 		}
 		NdType::Command {..}  => {
-			node.nd_type = NdType::Command { argv: expand_buffer.into() };
-			Ok(argv)
+			node.nd_type = NdType::Command { argv: expand_buffer.clone().into() };
+			Ok(expand_buffer)
 		}
 		_ => Err(ShellError::from_internal("Called expand arguments on a non-command node", node.span()))
 	}
@@ -347,7 +347,7 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 		let is_glob = check_globs(token.text().into());
 		let is_brace_expansion = helper::is_brace_expansion(token.text());
 
-		let expand_home = token.flags().contains(WdFlags::IS_ARG) && token.text().has_unescaped("~");
+		let expand_home = token.text().has_unescaped("~");
 		if expand_home {
 			// If this unwrap fails, god help you
 			let home = shellenv.get_variable("HOME").unwrap();
@@ -370,7 +370,7 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 			if helper::is_brace_expansion(token.text()) || token.text().has_unescaped("$") {
 				working_buffer.push_front(token);
 			} else {
-				let expand_home = token.flags().contains(WdFlags::IS_ARG) && token.text().has_unescaped("~");
+				let expand_home = token.text().has_unescaped("~");
 				if expand_home {
 					// If this unwrap fails, god help you
 					let home = shellenv.get_variable("HOME").unwrap();
@@ -425,7 +425,7 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 				);
 			}
 		} else {
-			let expand_home = token.flags().contains(WdFlags::IS_ARG) && token.text().has_unescaped("~");
+			let expand_home = token.text().has_unescaped("~");
 			if expand_home {
 				// If this unwrap fails, god help you
 				let home = shellenv.get_variable("HOME").unwrap();
