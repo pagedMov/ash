@@ -1,3 +1,4 @@
+use lazy_static::lazy_static;
 use nix::sys::signal;
 use nix::unistd::{close, dup, dup2, execvpe, fork, pipe, ForkResult};
 use nix::fcntl::{open,OFlag};
@@ -6,7 +7,7 @@ use nix::sys::wait::{waitpid, WaitStatus};
 use std::fmt::Display;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::ffi::CString;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use log::{info,debug,trace};
@@ -32,134 +33,106 @@ pub struct SmartFd {
 }
 
 impl SmartFd {
-	pub fn new(fd: RawFd) -> io::Result<Self> {
+	pub fn new(fd: RawFd) -> Result<Self,ShellError> {
 		if fd < 0 {
-			return Err(io::Error::new(
-					io::ErrorKind::InvalidInput,
-					"Invalid file descriptor"
-			));
+			return Err(ShellError::from_internal("Attempted to create a new SmartFd from a negative FD"));
 		}
 		Ok(SmartFd { fd })
 	}
 
 	/// Create a `SmartFd` from a duplicate of `stdin` (FD 0)
-	pub fn from_stdin() -> io::Result<Self> {
-			let fd = dup(0).map_err(|e| {
-					io::Error::new(io::ErrorKind::Other, format!("Failed to duplicate stdin: {}", e))
-			})?;
+	pub fn from_stdin() -> Result<Self,ShellError> {
+			let fd = dup(0).map_err(|_| ShellError::from_io())?;
 			Ok(Self { fd })
 	}
 
 	/// Create a `SmartFd` from a duplicate of `stdout` (FD 1)
-	pub fn from_stdout() -> io::Result<Self> {
-			let fd = dup(1).map_err(|e| {
-					io::Error::new(io::ErrorKind::Other, format!("Failed to duplicate stdout: {}", e))
-			})?;
+	pub fn from_stdout() -> Result<Self,ShellError> {
+			let fd = dup(1).map_err(|_| ShellError::from_io())?;
 			Ok(Self { fd })
 	}
 
 	/// Create a `SmartFd` from a duplicate of `stderr` (FD 2)
-	pub fn from_stderr() -> io::Result<Self> {
-			let fd = dup(2).map_err(|e| {
-					io::Error::new(io::ErrorKind::Other, format!("Failed to duplicate stderr: {}", e))
-			})?;
+	pub fn from_stderr() -> Result<Self,ShellError> {
+			let fd = dup(2).map_err(|_| ShellError::from_io())?;
 			Ok(Self { fd })
 	}
 
 	/// Create a `SmartFd` from a type that provides an owned or borrowed FD
-	pub fn from_fd<T: AsFd>(fd: T) -> io::Result<Self> {
+	pub fn from_fd<T: AsFd>(fd: T) -> Result<Self,ShellError> {
 		let raw_fd = fd.as_fd().as_raw_fd();
 		if raw_fd < 0 {
-			return Err(io::Error::new(
-					io::ErrorKind::InvalidInput,
-					"Invalid file descriptor",
-			));
+			return Err(ShellError::from_internal("Attempted to convert to SmartFd from a negative FD"));
 		}
 		Ok(SmartFd { fd: raw_fd })
 	}
 
 	/// Create a `SmartFd` by consuming ownership of an FD
-	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> io::Result<Self> {
+	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> Result<Self,ShellError> {
 		let raw_fd = fd.into_raw_fd(); // Consumes ownership
 		if raw_fd < 0 {
-			return Err(io::Error::new(
-					io::ErrorKind::InvalidInput,
-					"Invalid file descriptor",
-			));
+			return Err(ShellError::from_internal("Attempted to convert to SmartFd from a negative FD"));
 		}
 		Ok(SmartFd { fd: raw_fd })
 	}
 
-	pub fn write(&self, buffer: &[u8]) -> io::Result<()> {
+	pub fn write(&self, buffer: &[u8]) -> Result<(),ShellError> {
 		if !self.is_valid() {
-			return Err(io::Error::new(
-					io::ErrorKind::InvalidInput,
-					"Attempted to call write() on an invalid file descriptor",
-			));
+			return Err(ShellError::from_internal("Attempted to write to an invalid SmartFd"));
 		}
 		let result = unsafe { libc::write(self.fd, buffer.as_ptr() as *const libc::c_void, buffer.len()) };
 		if result < 0 {
-			Err(io::Error::last_os_error())
+			Err(ShellError::from_io())
 		} else {
 			Ok(())
 		}
 	}
 
-	pub fn pipe() -> io::Result<(Self,Self)> {
-		let (r_pipe,w_pipe) = pipe()?;
+	pub fn pipe() -> Result<(Self,Self),ShellError> {
+		let (r_pipe,w_pipe) = pipe().map_err(|_| ShellError::from_io())?;
 		let r_fd = SmartFd::from_owned_fd(r_pipe)?;
 		let w_fd = SmartFd::from_owned_fd(w_pipe)?;
 		Ok((r_fd,w_fd))
 	}
 
-	pub fn dup(&self) -> io::Result<SmartFd> {
+	pub fn dup(&self) -> Result<Self,ShellError> {
 		if !self.is_valid() {
-			return Err(io::Error::new(
-					io::ErrorKind::Other,
-					"Attempted to call dup on a closed fd"
-			));
+			return Err(ShellError::from_internal("Attempted to dup an invalid fd"));
 		}
-		let new_fd = dup(self.fd)?;
+		let new_fd = dup(self.fd).map_err(|_| ShellError::from_io())?;
 		Ok(SmartFd { fd: new_fd })
 	}
 
-	pub fn dup2<T: AsRawFd>(&self, target: &T) -> io::Result<()> {
+	pub fn dup2<T: AsRawFd>(&self, target: &T) -> Result<(),ShellError> {
 		let target_fd = target.as_raw_fd();
 		if self.fd == target_fd {
 			// Nothing to do here
 			return Ok(())
 		}
 		if !self.is_valid() || target_fd < 0 {
-			return Err(io::Error::new(
-					io::ErrorKind::Other,
-					"Attempted to call dup2 on a closed fd"
-			));
+			return Err(ShellError::from_io());
 		}
 
-		dup2(self.fd, target_fd)?;
+		dup2(self.fd, target_fd).map_err(|_| ShellError::from_io())?;
 		Ok(())
 	}
 
-	pub fn open(path: &Path, flags: OFlag, mode: Mode) -> io::Result<Self> {
-		let file_fd: RawFd = open(path, flags, mode).map_err(|e| {
-			io::Error::new(
-				io::ErrorKind::Other,
-				format!("Failed to open file {}: {}", path.display(), e),
-			)
-		})?;
+	pub fn open(path: &Path, flags: OFlag, mode: Mode) -> Result<Self,ShellError> {
+		let file_fd: RawFd = open(path, flags, mode).map_err(|_| ShellError::from_io())?;
 		Ok(Self { fd: file_fd })
 	}
 
-	pub fn close(&mut self) -> io::Result<()> {
+	pub fn close(&mut self) -> Result<(),ShellError> {
 		if !self.is_valid() {
-			return Err(io::Error::new(
-					io::ErrorKind::InvalidInput,
-					"Double-closed file descriptor"
-			));
+			return Err(ShellError::from_internal("Attempted to close an invalid SmartFd"));
 		}
-		close(self.fd)?;
+		close(self.fd).map_err(|_| ShellError::from_io())?;
 		self.fd = -1;
 		Ok(())
+	}
+
+	pub fn mk_shared(self) -> Arc<Mutex<Self>> {
+		Arc::new(Mutex::new(self))
 	}
 
 	pub fn is_valid(&self) -> bool {
@@ -224,12 +197,9 @@ impl ProcIO {
 	pub fn backup_fildescs(&mut self) -> Result<(), ShellError> {
 		let mut backup = HashMap::new();
 		// Get duped file descriptors
-		let dup_in = SmartFd::from_stdin().map_err(|_|
-			ShellError::from_internal("Failed to duplicate stdin",Span::new()))?;
-		let dup_out = SmartFd::from_stdout().map_err(|_|
-			ShellError::from_internal("Failed to duplicate stdout",Span::new()))?;
-		let dup_err = SmartFd::from_stderr().map_err(|_|
-			ShellError::from_internal("Failed to duplicate stderr",Span::new()))?;
+		let dup_in = SmartFd::from_stdin()?;
+		let dup_out = SmartFd::from_stdout()?;
+		let dup_err = SmartFd::from_stderr()?;
 		// Store them in a hashmap
 		backup.insert(0,dup_in);
 		backup.insert(1,dup_out);
@@ -242,16 +212,16 @@ impl ProcIO {
 		if !self.backup.is_empty() {
 			// Dup2 to restore file descriptors
 			if let Some(mut saved_in) = self.backup.remove(&0) {
-				saved_in.dup2(&0);
-				saved_in.close();
+				saved_in.dup2(&0)?;
+				saved_in.close()?;
 			}
 			if let Some(mut saved_out) = self.backup.remove(&1) {
-				saved_out.dup2(&1);
-				saved_out.close();
+				saved_out.dup2(&1)?;
+				saved_out.close()?;
 			}
 			if let Some(mut saved_err) = self.backup.remove(&2) {
-				saved_err.dup2(&2);
-				saved_err.close();
+				saved_err.dup2(&2)?;
+				saved_err.close()?;
 			}
 		}
 		Ok(())
@@ -259,33 +229,21 @@ impl ProcIO {
 	pub fn do_plumbing(&mut self) -> Result<(), ShellError> {
 		if let Some(ref mut err_pipe) = self.stderr {
 			let mut pipe = err_pipe.lock().unwrap();
-			if let Err(err) = pipe.dup2(&2) {
-				eprintln!("Failed to duplicate stderr: {}", err);
-				std::process::exit(1);
-			}
-			pipe.close()
-				.map_err(|e| ShellError::from_io(format!("failed to close error pipe: {}",e).as_str(), Span::new()))?;
+			pipe.dup2(&2)?;
+			pipe.close()?;
 		}
 		// Redirect stdout
 		if let Some(ref mut w_pipe) = self.stdout {
 			let mut pipe = w_pipe.lock().unwrap();
-			if let Err(err) = pipe.dup2(&2) {
-				eprintln!("Failed to duplicate stderr: {}", err);
-				std::process::exit(1);
-			}
-			pipe.close()
-				.map_err(|e| ShellError::from_io(format!("failed to close error pipe: {}",e).as_str(), Span::new()))?;
+			pipe.dup2(&1)?;
+			pipe.close()?;
 		}
 
 		// Redirect stdin
 		if let Some(ref mut r_pipe) = self.stdin {
 			let mut pipe = r_pipe.lock().unwrap();
-			if let Err(err) = pipe.dup2(&2) {
-				eprintln!("Failed to duplicate stderr: {}", err);
-				std::process::exit(1);
-			}
-			pipe.close()
-			.map_err(|e| ShellError::from_io(format!("failed to close error pipe: {}",e).as_str(), Span::new()))?;
+			pipe.dup2(&0)?;
+			pipe.close()?;
 		}
 		Ok(())
 	}
@@ -353,12 +311,9 @@ impl<'a> NodeWalker<'a> {
 	pub fn start_walk(&mut self) -> Result<RshWaitStatus,ShellError> {
 		info!("Going on a walk...");
 		// Save file descs just in case
-		let saved_in = SmartFd::from_stdin()
-			.map_err(|_| ShellError::from_internal("Failed to duplicate stdin",Span::new()))?;
-		let saved_out = SmartFd::from_stdout()
-			.map_err(|_| ShellError::from_internal("Failed to duplicate stdout",Span::new()))?;
-		let saved_err = SmartFd::from_stderr()
-			.map_err(|_| ShellError::from_internal("Failed to duplicate stderr",Span::new()))?;
+		let saved_in = SmartFd::from_stdin()?;
+		let saved_out = SmartFd::from_stdout()?;
+		let saved_err = SmartFd::from_stderr()?;
 		let mut exit_status = RshWaitStatus::new();
 		let mut nodes;
 		if let NdType::Root { ref mut deck } = self.ast.nd_type {
@@ -368,12 +323,9 @@ impl<'a> NodeWalker<'a> {
 			exit_status = self.walk(node, ProcIO::new())?;
 		}
 		// Restore file descs just in case
-		saved_in.dup2(&0)
-			.map_err(|_| ShellError::from_internal("failed to duplicate stdout",Span::new()))?;
-		saved_out.dup2(&1)
-			.map_err(|_| ShellError::from_internal("failed to duplicate stdout",Span::new()))?;
-		saved_err.dup2(&2)
-			.map_err(|_| ShellError::from_internal("failed to duplicate stdout",Span::new()))?;
+		saved_in.dup2(&0)?;
+		saved_out.dup2(&1)?;
+		saved_err.dup2(&2)?;
 		Ok(exit_status)
 	}
 
@@ -616,8 +568,6 @@ impl<'a> NodeWalker<'a> {
 	}
 
 	fn handle_builtin(&mut self, mut node: Node, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
-		dbg!(&node);
-		dbg!(&io);
 		let argv = expand::expand_arguments(self.shellenv, &mut node)?;
 		match argv.first().unwrap().text() {
 			"echo" => echo(node, io),
@@ -675,35 +625,39 @@ impl<'a> NodeWalker<'a> {
 	/// - The function uses `trace!` and `debug!` macros for logging purposes.
 	/// - Variable substitutions (`$var`) are resolved using the `shellenv`'s `get_variable` method.
 	/// - If a variable substitution is not found, an empty `CString` is added to the arguments.
-	///
-
 	fn handle_redirs(&self, mut redirs: VecDeque<Node>) -> Result<VecDeque<SmartFd>, ShellError> {
 		let mut fd_queue: VecDeque<SmartFd> = VecDeque::new();
 		let mut fd_dupes: VecDeque<Redir> = VecDeque::new();
 
-		while let Some(redir) = redirs.pop_front() {
-			if let NdType::Redirection { redir } = redir.nd_type {
+		while let Some(redir_tk) = redirs.pop_front() {
+			if let NdType::Redirection { ref redir } = redir_tk.nd_type {
 				let Redir { fd_source, op, fd_target, file_target } = &redir;
 				if fd_target.is_some() {
-					fd_dupes.push_back(redir);
+					fd_dupes.push_back(redir.clone());
 				} else if let Some(file_path) = file_target {
+					let source_fd = SmartFd::new(*fd_source)?;
 					let flags = match op {
 						RedirType::Input => OFlag::O_RDONLY,
 						RedirType::Output => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
 						RedirType::Append => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_APPEND,
 						_ => unimplemented!("Heredocs and herestrings are not implemented yet."),
 					};
-					let file_fd: SmartFd = SmartFd::open(&Path::new(file_path.text()), flags, Mode::from_bits(0o644).unwrap()).unwrap();
+					let mut file_fd: SmartFd = SmartFd::open(Path::new(file_path.text()), flags, Mode::from_bits(0o644).unwrap())?;
 					info!("Duping file FD {} to FD {}", file_fd, fd_source);
-					file_fd.dup2(fd_source);
-					fd_queue.push_back(file_fd);
+					file_fd.dup2(&source_fd)?;
+					file_fd.close()?;
+					fd_queue.push_back(source_fd);
 				}
 			}
 		}
 
 		while let Some(dupe_redir) = fd_dupes.pop_front() {
-			let Redir { fd_source, op, fd_target, file_target } = dupe_redir;
-			dup2(fd_target.unwrap(),fd_source).unwrap();
+			let Redir { fd_source, op: _, fd_target, file_target: _ } = dupe_redir;
+			let mut target_fd = SmartFd::new(fd_target.unwrap())?;
+			let source_fd = SmartFd::new(fd_source)?;
+			target_fd.dup2(&source_fd)?;
+			target_fd.close()?;
+			fd_queue.push_back(source_fd);
 		}
 
 		Ok(fd_queue)
@@ -720,13 +674,11 @@ impl<'a> NodeWalker<'a> {
 			unreachable!()
 		};
 
-		let (r_pipe,w_pipe) = SmartFd::pipe()
-			.map_err(|_| ShellError::from_internal("Failed to open pipes in handle_pipeline()", node.span()))?;
+		let (r_pipe,w_pipe) = SmartFd::pipe()?;
 
 		let mut stderr_left = None;
 		if *both { // If the operator is '|&'
-			stderr_left = Some(Arc::new(Mutex::new(w_pipe.dup()
-				.map_err(|_| ShellError::from_internal("Failed to dupe write pipe to stderr", node.span()))?)));
+			stderr_left = Some(Arc::new(Mutex::new(w_pipe.dup()?)));
 		}
 
 		// `left_io` works like this:
@@ -741,11 +693,9 @@ impl<'a> NodeWalker<'a> {
 		let right_io = ProcIO::from(Some(Arc::new(Mutex::new(r_pipe))), io.stdout, io.stderr);
 		// Walk left side of the pipeline
 		let left_status = self.walk(left, left_io);
-		dbg!("exited left side of pipe");
 
 		// Walk right side of the pipeline
 		let right_status = self.walk(right, right_io);
-		dbg!("exited right side of pipe");
 
 		// Return status of the last command
 		left_status?;
@@ -833,8 +783,6 @@ impl<'a> NodeWalker<'a> {
 		let command = &argv[0];
 		let envp = self.shellenv.get_cvars();
 
-		dbg!(&node);
-		dbg!(&io);
 		match unsafe { fork() } {
 			Ok(ForkResult::Child) => {
 				// Handle redirections
@@ -848,7 +796,6 @@ impl<'a> NodeWalker<'a> {
 				std::process::exit(127);
 			}
 			Ok(ForkResult::Parent { child }) => {
-				dbg!("returning to parent");
 				io.restore_fildescs()?;
 
 				// Wait for the child process to finish
@@ -871,6 +818,115 @@ impl<'a> NodeWalker<'a> {
 
 #[cfg(test)]
 mod tests {
+	// Probably need to re-write this later
+	// These handle basic uses but cap_output isn't a strong enough implementation to handle complex stuff it seems
 	use super::*;
+	use std::process;
+	use std::fs::File;
+	use std::io::Read;
+	use libc::{fork, waitpid, WIFEXITED, WEXITSTATUS, c_int};
 
+	fn cap_output(input: &str) -> String {
+		// Your existing cap_output logic here
+		let mut io = ProcIO::new();
+		io.backup_fildescs();
+		let (r_pipe, w_pipe) = SmartFd::pipe().unwrap();
+		let mut output = vec![];
+		io.stdout = Some(w_pipe.mk_shared());
+		let mut output_file = unsafe { File::from_raw_fd(r_pipe.as_raw_fd()) };
+
+		let shellenv = ShellEnv::new(EnvFlags::NO_RC | EnvFlags::CLEAN);
+		let mut shellenv2 = ShellEnv::new(EnvFlags::NO_RC | EnvFlags::CLEAN);
+		let state = parse::descend(input, &shellenv).unwrap();
+		let mut walker = NodeWalker::new(state.ast.clone(), &mut shellenv2);
+
+		walker.walk_root(state.ast, None, io.try_clone()).unwrap();
+
+		if let Some(w_pipe) = io.stdout {
+			let mut w_fd = w_pipe.lock().unwrap();
+			if w_fd.is_valid() {
+				w_fd.close().unwrap();
+			}
+		}
+
+		output_file.read_to_end(&mut output).unwrap();
+		String::from_utf8_lossy(&output).to_string()
+	}
+
+	fn fork_test<F: FnOnce() -> bool>(test_fn: F) -> bool {
+		unsafe {
+			match fork() {
+				-1 => panic!("Failed to fork"),
+				0 => {
+					// Child process
+					if test_fn() {
+						process::exit(0)
+					} else {
+						process::exit(1)
+					}
+				}
+				pid => {
+					// Parent process
+					let mut status: c_int = 0;
+					waitpid(pid, &mut status, 0);
+					WIFEXITED(status) && WEXITSTATUS(status) == 0
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn test_command() {
+		assert!(fork_test(|| {
+			let input = "echo hello world";
+			let output = cap_output(input);
+			output.trim() == "hello world"
+		}));
+	}
+
+	#[test]
+	fn test_builtin_pipeline() {
+		assert!(fork_test(|| {
+			let input = "echo hello world | sed 's/hello/goodbye/'";
+			let output = cap_output(input);
+			output.trim() == "goodbye world"
+		}));
+	}
+
+	#[test]
+	fn test_pipeline() {
+		assert!(fork_test(|| {
+			let input = "echo hello world | cat | sed 's/hello/goodbye/'";
+			let output = cap_output(input);
+			output.trim() == "goodbye world"
+		}));
+	}
+
+	#[test]
+	fn test_sub() {
+		assert!(fork_test(|| {
+			let input = "name=world; echo hello $name";
+			let output = cap_output(input);
+			output.trim() == "hello world"
+		}));
+	}
+
+	#[test]
+	fn test_if() {
+		assert!(fork_test(|| {
+			let input = "if true; then echo this should print; fi; if false; then echo this should not print; fi";
+			let output = cap_output(input);
+			output.trim() == "this should print"
+		}));
+	}
+
+	#[test]
+	fn test_for() {
+		assert!(fork_test(|| {
+			let input = "for i in 1 2 3; do echo hello; done";
+			let output = cap_output(input);
+			dbg!(&output);
+			output.trim() == "hello\nhello\nhello"
+		}));
+	}
 }

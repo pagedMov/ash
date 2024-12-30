@@ -1,6 +1,7 @@
 use chrono::Local;
 use glob::glob;
 use log::{debug, info, trace};
+use nix::NixPath;
 use std::collections::VecDeque;
 use std::mem::take;
 use std::path::{Component, PathBuf};
@@ -17,24 +18,17 @@ pub fn check_globs(string: String) -> bool {
 		string.has_unescaped("*")
 }
 
-/// Handles the expansion of command arguments
-/// Replaces a command node's argv field with the resulting expansions
-///
-/// # Arguments
-///
-/// * `shellenv` - The shell environment containing information used for variable expansion
-/// # `node` - The AST node being operated on
-///
-/// # Returns
-///
-/// A result containing either the produced vector of tokens, or a `ShellError` if `node.get_argv()` fails,
-/// or if the method is called with a node that is not a Builtin or a Command.
 pub fn expand_arguments(shellenv: &ShellEnv, node: &mut Node) -> Result<Vec<Tk>,ShellError> {
 	let argv = node.get_argv()?;
 	let mut expand_buffer = Vec::new();
 	for arg in &argv {
 		let mut expanded = expand_token(shellenv, arg.clone());
-		expand_buffer.extend(expanded.drain(..));
+		while let Some(token) = expanded.pop_front() {
+			if !token.text().is_empty() {
+				// Do not return empty tokens
+				expand_buffer.push(token);
+			}
+		}
 	}
 	match &node.nd_type {
 		NdType::Builtin {..} => {
@@ -45,7 +39,7 @@ pub fn expand_arguments(shellenv: &ShellEnv, node: &mut Node) -> Result<Vec<Tk>,
 			node.nd_type = NdType::Command { argv: expand_buffer.clone().into() };
 			Ok(expand_buffer)
 		}
-		_ => Err(ShellError::from_internal("Called expand arguments on a non-command node", node.span()))
+		_ => Err(ShellError::from_internal("Called expand arguments on a non-command node"))
 	}
 }
 

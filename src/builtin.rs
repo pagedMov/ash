@@ -47,31 +47,27 @@ fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<SmartFd>, ShellEr
 			if let Some(target) = fd_target {
 				fd_dupes.push((*target,*fd_source));
 			} else if let Some(file_path) = file_target {
-				let source_fd = SmartFd::new(*fd_source)
-					.map_err(|_| ShellError::from_internal("Failed to create smartfd from source_fd", redir_tk.span()))?;
+				let source_fd = SmartFd::new(*fd_source)?;
 				let flags = match op {
 					RedirType::Input => OFlag::O_RDONLY,
 					RedirType::Output => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
 					RedirType::Append => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_APPEND,
 					_ => unimplemented!("Heredocs and herestrings are not implemented yet."),
 				};
-				let mut file_fd = SmartFd::open(&Path::new(file_path.text()), flags, Mode::from_bits(0o644).unwrap()).map_err(|e| {
-					ShellError::from_execf(&format!("Failed to open file {}: {}", file_path.text(), e), 1, redir_tk.span())
-				})?;
-				file_fd.dup2(&source_fd)
-					.map_err(|e| ShellError::from_execf(&format!("Failed to redirect FD {} to file {}: {}", fd_source, file_path.text(), e), 1, redir_tk.span()))?;
+				let mut file_fd = SmartFd::open(&Path::new(file_path.text()), flags, Mode::from_bits(0o644).unwrap())?;
+				file_fd.dup2(&source_fd)?;
+				file_fd.close();
 				fd_stack.push(source_fd);
 			}
 		}
 	}
 
 	while let Some((target,source)) = fd_dupes.pop() {
-		let source_fd = SmartFd::new(source)
-			.map_err(|_| ShellError::from_internal("Failed to create SmartFd from source_fd", Span::new()))?;
-		let target_fd = SmartFd::new(target)
-			.map_err(|_| ShellError::from_internal("Failed to create SmartFd from target_fd", Span::new()))?;
-		target_fd.dup2(&source_fd)
-			.map_err(|_| ShellError::from_internal("Failed to dup target to source", Span::new()))?;
+		let mut target_fd = SmartFd::new(target)?;
+		let source_fd = SmartFd::new(source)?;
+		target_fd.dup2(&source_fd)?;
+		target_fd.close();
+
 		fd_stack.push(source_fd);
 	}
 
@@ -508,7 +504,7 @@ pub fn source(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus,Shell
 	argv.pop_front();
 	for path in argv {
 		let file_path = Path::new(OsStr::from_bytes(path.as_bytes()));
-		shellenv.source_file(file_path.to_path_buf(), node.span())?
+		shellenv.source_file(file_path.to_path_buf())?
 	}
 	Ok(RshWaitStatus::Success { span: node.span() })
 }
@@ -564,8 +560,8 @@ pub fn set_or_unset(shellenv: &mut ShellEnv, node: Node, set: bool) -> Result<Rs
 
 pub fn pwd(shellenv: &ShellEnv, span: Span) -> Result<RshWaitStatus, ShellError> {
 	if let Some(pwd) = shellenv.get_variable("PWD") {
-		let stdout = helper::get_stdout();
-		write(stdout, pwd.as_bytes()).map_err(|e| ShellError::from_io(&e.to_string(), span))?;
+		let stdout = SmartFd::from_stdout()?;
+		stdout.write(pwd.as_bytes())?;
 		Ok(RshWaitStatus::Success { span })
 	} else {
 		Err(ShellError::from_execf("PWD environment variable is unset", 1, span))
@@ -637,40 +633,32 @@ pub fn echo(node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
 	let mut fd_stack = vec![];
 	fd_stack.extend(open_file_descriptors(redirs.into())?);
 
-	let output_fd = match flags.contains(EchoFlags::STDERR) {
-		true => io.stderr.as_ref()
-			.and_then(|arc_mutex_fd| arc_mutex_fd.lock().ok().map(|fd| fd.dup().unwrap()))
-			.unwrap_or_else(|| SmartFd::from_stderr().unwrap()),
-		false => io.stdout.as_ref()
-			.and_then(|arc_mutex_fd| arc_mutex_fd.lock().ok().map(|fd| fd.dup().unwrap()))
-			.unwrap_or_else(|| SmartFd::from_stdout().unwrap()),
+	let output_fd = if flags.contains(EchoFlags::STDERR) {
+		if let Some(ref err_fd) = io.stderr {
+			err_fd.lock().unwrap().dup().unwrap_or_else(|_| SmartFd::from_stderr().unwrap())
+		} else {
+			SmartFd::from_stderr()?
+		}
+	} else if let Some(ref out_fd) = io.stdout {
+			out_fd.lock().unwrap().dup().unwrap_or_else(|_| SmartFd::from_stdout().unwrap())
+		} else {
+			SmartFd::from_stdout()?
 	};
 
 	if let Some(ref fd) = io.stderr {
 		if !flags.contains(EchoFlags::STDERR) {
 			let fd = fd.lock().unwrap();
-			output_fd.dup2(&fd.as_raw_fd())
-				.map_err(|_| ShellError::from_internal("Failed to dup output to stderr in echo", node.span()))?;
+			output_fd.dup2(&fd.as_raw_fd())?;
 		}
 	}
 
-	let result = output_fd.write(output_str.as_bytes()).map_err(|e| {
-		ShellError::from_execf(&format!("Failed to write output in echo: {}", e), 1, node.span())
-	});
+	output_fd.write(output_str.as_bytes())?;
 
-	dbg!("closing fds");
 	for mut fd in fd_stack {
 		fd.close().unwrap();
 	}
-	if let Some(ref mut w_pipe) = io.stdout {
-		w_pipe.lock().unwrap().close().unwrap();
-		dbg!("closed w pipe");
-	}
-
-	dbg!("closed fds, restoring fildescs...");
 
 	io.restore_fildescs()?;
-	dbg!("restored fildescs");
 
-	result.map(|_| RshWaitStatus::Success { span: node.span })
+	Ok(RshWaitStatus::Success { span: node.span })
 }

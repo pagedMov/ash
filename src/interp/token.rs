@@ -293,7 +293,7 @@ impl Tk {
 			body = body.strip_suffix('}').unwrap();
 			body = body.trim();
 		} else {
-			return Err(ShellError::from_internal(format!("This body made it to split_func with no surrounding braces: {}",body).as_str(), wd.span));
+			return Err(ShellError::from_internal(format!("This body made it to split_func with no surrounding braces: {}",body).as_str()));
 		}
 		let name = name.to_string();
 		let body = body.to_string();

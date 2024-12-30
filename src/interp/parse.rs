@@ -149,12 +149,12 @@ impl Node {
 				}
 				Ok(arg_vec)
 			}
-			_ => Err(ShellError::from_internal("Attempt to call `get_argv()` on a non-command node", self.span)),
+			_ => Err(ShellError::from_internal("Attempt to call `get_argv()` on a non-command node")),
 		}
 	}
 	pub fn get_redirs(&self) -> Result<Vec<Node>,ShellError> {
 		if !self.flags.contains(NdFlags::VALID_OPERAND) {
-			return Err(ShellError::from_internal("Called get_redirs with an invalid operand", self.span()))
+			return Err(ShellError::from_internal("Called get_redirs with an invalid operand"))
 		}
 		let mut redir_vec = vec![];
 		for redir in &self.redirs {
@@ -520,9 +520,11 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, Shel
 	ctx.root.extend(buffer.drain(..));
 
 	// Second pass: Pipeline operators
+	let mut found_one = false;
 	while let Some(node) = ctx.next_node() {
 		match node.nd_type {
 			NdType::Pipe | NdType::PipeBoth => {
+				found_one = true;
 				let both = match node.nd_type {
 					NdType::PipeBoth => true,
 					NdType::Pipe => false,
@@ -553,10 +555,12 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, Shel
 				}
 			}
 			NdType::Cmdsep => {
-				while !buffer.is_empty() {
-					ctx.root.push_front(buffer.pop_back().unwrap());
+				if found_one {
+					while !buffer.is_empty() {
+						ctx.root.push_front(buffer.pop_back().unwrap());
+					}
+					break
 				}
-				break
 			}
 			_ => buffer.push_back(node)
 		}
@@ -564,9 +568,11 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, Shel
 	ctx.root.extend(buffer.drain(..));
 
 	// Third pass: Chain operators
+	found_one = false;
 	while let Some(node) = ctx.next_node() {
 		match node.nd_type {
 			NdType::And | NdType::Or => {
+				found_one = true;
 				if let Some(left) = buffer.pop_back() {
 					if let Some(right) = ctx.next_node() {
 						if !check_valid_operand(&left) {
@@ -593,10 +599,12 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, Shel
 				}
 			}
 			NdType::Cmdsep => {
-				while !buffer.is_empty() {
-					ctx.root.push_front(buffer.pop_back().unwrap());
+				if found_one {
+					while !buffer.is_empty() {
+						ctx.root.push_front(buffer.pop_back().unwrap());
+					}
+					break
 				}
-				break
 			}
 			_ => buffer.push_back(node)
 		}
@@ -789,14 +797,14 @@ fn get_conditional(cond_root: VecDeque<Node>, cond_span: Span, body_root: VecDeq
 pub fn build_redirection(mut ctx: DescentContext) -> Result<DescentContext,ShellError> {
 	let span_start = ctx.mark_start();
 	let redir_tk = ctx.next_tk()
-		.ok_or_else(|| ShellError::from_internal("Called build_redirection with an empty token queue", Span::from(span_start, ctx.mark_end()) ))?;
+		.ok_or_else(|| ShellError::from_internal("Called build_redirection with an empty token queue"))?;
 
 		let span = redir_tk.span();
 
 		let mut redir = if let TkType::Redirection { redir } = redir_tk.class() {
 			redir
 		} else {
-			return Err(ShellError::from_internal(format!("Called build_redirection() with a non-redirection token: {:?}",redir_tk).as_str(), span))
+			return Err(ShellError::from_internal(format!("Called build_redirection() with a non-redirection token: {:?}",redir_tk).as_str()))
 		};
 
 		if redir.fd_target.is_none() && redir.file_target.is_none() {

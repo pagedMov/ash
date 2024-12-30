@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, io};
 use std::os::fd::BorrowedFd;
 
 use tokio::sync::mpsc;
@@ -16,13 +16,14 @@ pub enum ShellError {
 	InvalidSyntax(String, Span),
 	ParsingError(String, Span),
 	ExecFailed(String, i32, Span),
-	IoError(String, Span),
-	InternalError(String, Span),
+	IoError(String),
+	InternalError(String),
 }
 
 impl ShellError {
-	pub fn from_io(msg: &str, span: Span) -> Self {
-		ShellError::IoError(msg.to_string(), span)
+	pub fn from_io() -> Self {
+		let err = io::Error::last_os_error();
+		ShellError::IoError(err.to_string())
 	}
 	pub fn from_execf(msg: &str, code: i32, span: Span) -> Self {
 		ShellError::ExecFailed(msg.to_string(), code, span)
@@ -36,20 +37,20 @@ impl ShellError {
 	pub fn from_no_cmd(msg: &str, span: Span) -> Self {
 		ShellError::CommandNotFound(msg.to_string(), span)
 	}
-	pub fn from_internal(msg: &str, span: Span) -> Self {
-		ShellError::InternalError(msg.to_string(), span)
+	pub fn from_internal(msg: &str) -> Self {
+		ShellError::InternalError(msg.to_string())
 	}
 	// This is used in the context of functions
 	// To prevent the error from trying to use the span
 	// Of the offending command that is inside of the function
 	pub fn overwrite_span(&self, new_span: Span) -> Self {
 		match self {
-			ShellError::IoError(msg,_) => ShellError::IoError(msg.to_string(),new_span),
+			ShellError::IoError(err) => ShellError::IoError(err.to_string()),
 			ShellError::CommandNotFound(msg,_) => ShellError::CommandNotFound(msg.to_string(),new_span),
 			ShellError::InvalidSyntax(msg,_) => ShellError::InvalidSyntax(msg.to_string(),new_span),
 			ShellError::ParsingError(msg,_) => ShellError::ParsingError(msg.to_string(),new_span),
 			ShellError::ExecFailed(msg,code,_) => ShellError::ExecFailed(msg.to_string(),*code,new_span),
-			ShellError::InternalError(msg,_) => ShellError::InternalError(msg.to_string(),new_span),
+			ShellError::InternalError(msg) => ShellError::InternalError(msg.to_string()),
 		}
 	}
 	pub fn is_fatal(&self) -> bool {
@@ -95,16 +96,18 @@ impl ShellErrorFull {
 	/// # Arguments
 	///
 	/// * `span` - The span indicating the start and end positions of the error in the input.
-	fn format_error_context(&self, span: Span) {
-		let (line, col) = Self::get_line_col(&self.input, span.start);
-		let (window, window_offset) = Self::generate_window(&self.input, line, col);
-		let span_diff = span.end - span.start;
-		let pointer = Self::get_pointer(span_diff, window_offset);
+	fn format_error_context(&self, span: Option<Span>) {
+		if let Some(span) = span {
+			let (line, col) = Self::get_line_col(&self.input, span.start);
+			let (window, window_offset) = Self::generate_window(&self.input, line, col);
+			let span_diff = span.end - span.start;
+			let pointer = Self::get_pointer(span_diff, window_offset);
 
-		println!();
-		println!("{};{}:", line + 1, col + 1);
-		println!("{}", window);
-		println!("{}", pointer);
+			println!();
+			println!("{};{}:", line + 1, col + 1);
+			println!("{}", window);
+			println!("{}", pointer);
+		}
 	}
 
 	/// Generates a string pointer indicating the location of the error in the input.
@@ -198,9 +201,9 @@ impl ShellErrorFull {
 impl fmt::Display for ShellErrorFull {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match &self.error {
-			ShellError::IoError(msg, span) => {
-				writeln!(f, "I/O Error: {}", msg)?;
-				self.format_error_context(*span);
+			ShellError::IoError(err) => {
+				writeln!(f, "I/O Error: {}", err)?;
+				self.format_error_context(None);
 			}
 			ShellError::ExecFailed(msg, code, span) => {
 				writeln!(
@@ -209,23 +212,23 @@ impl fmt::Display for ShellErrorFull {
 					code,
 					msg
 				)?;
-				self.format_error_context(*span);
+				self.format_error_context(Some(*span));
 			}
 			ShellError::ParsingError(msg, span) => {
 				writeln!(f, "Parsing error: {}", msg)?;
-				self.format_error_context(*span);
+				self.format_error_context(Some(*span));
 			}
 			ShellError::InvalidSyntax(msg, span) => {
 				writeln!(f, "Syntax Error: {}", msg)?;
-				self.format_error_context(*span);
+				self.format_error_context(Some(*span));
 			}
 			ShellError::CommandNotFound(msg, span) => {
 				writeln!(f, "Command not found: {}", msg)?;
-				self.format_error_context(*span);
+				self.format_error_context(Some(*span));
 			}
-			ShellError::InternalError(msg, span) => {
+			ShellError::InternalError(msg) => {
 				writeln!(f, "Internal Error: {}", msg)?;
-				self.format_error_context(*span);
+				self.format_error_context(None);
 			}
 		}
 		writeln!(f)?;

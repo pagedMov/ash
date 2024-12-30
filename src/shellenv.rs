@@ -114,7 +114,7 @@ impl ShellEnv {
 			let runtime_commands_path = &expand_var(&shellenv, "${HOME}/.rshrc".into());
 			let runtime_commands_path = Path::new(runtime_commands_path);
 			if runtime_commands_path.exists() {
-				if let Err(e) = shellenv.source_file(runtime_commands_path.to_path_buf(), Span::new()) {
+				if let Err(e) = shellenv.source_file(runtime_commands_path.to_path_buf()) {
 					let err = ShellErrorFull::from(shellenv.get_last_input(),e);
 					eprintln!("Failed to source ~/.rshrc: {}",err);
 				}
@@ -193,13 +193,13 @@ impl ShellEnv {
 	pub fn source_profile(&mut self) -> Result<(),ShellError> {
 		let home = self.get_variable("HOME").unwrap();
 		let path = PathBuf::from(format!("{}/.rsh_profile",home));
-		self.source_file(path, Span::new())
+		self.source_file(path)
 	}
 
-	pub fn source_file(&mut self, path: PathBuf, span: Span) -> Result<(),ShellError> {
-		let mut file = File::open(&path).map_err(|e| ShellError::from_io(&e.to_string(), span))?;
+	pub fn source_file(&mut self, path: PathBuf) -> Result<(),ShellError> {
+		let mut file = File::open(&path).map_err(|_| ShellError::from_io())?;
 		let mut buffer = String::new();
-		file.read_to_string(&mut buffer).map_err(|e| ShellError::from_io(&e.to_string(), span))?;
+		file.read_to_string(&mut buffer).map_err(|_| ShellError::from_io())?;
 		self.last_input = Some(buffer.clone());
 
 
