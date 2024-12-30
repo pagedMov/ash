@@ -1,16 +1,15 @@
 use std::env;
-use std::collections::{HashSet,VecDeque,HashMap};
+use nix::unistd::{gethostname, User};
+use std::collections::{HashSet,HashMap};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::{AsFd,BorrowedFd, RawFd};
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use bitflags::bitflags;
-use libc::STDERR_FILENO;
 use log::{debug, info, trace};
-use nix::unistd::{close, dup, dup2, gethostname, write, User};
 
 use crate::event::{ShellError, ShellErrorFull};
 use crate::execute::{NodeWalker, RshWaitStatus};

@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::ffi::{CString, OsStr};
 use std::fs;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ use nix::sys::stat::Mode;
 use nix::unistd::{access, close, dup, dup2, isatty, write, AccessFlags};
 use nix::NixPath;
 
-use crate::execute::{ProcIO, RshWaitStatus};
+use crate::execute::{ProcIO, RshWaitStatus, SmartFd};
 use crate::interp::parse::{NdType, Node, Span};
 use crate::interp::{expand, helper, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType};
@@ -35,58 +35,47 @@ bitflags! {
 	}
 }
 
-fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<(i32, i32)>, ShellError> {
-	let mut fd_stack: Vec<(i32, i32)> = Vec::new();
-	let mut fd_dupes: Vec<(i32, i32)> = Vec::new();
+fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<SmartFd>, ShellError> {
+	let mut fd_stack: Vec<SmartFd> = Vec::new();
+	let mut fd_dupes: Vec<(i32,i32)> = Vec::new();
 	info!("Handling redirections for builtin: {:?}", redirs);
 
 	for redir_tk in redirs {
 		if let NdType::Redirection { ref redir } = redir_tk.nd_type {
 			let Redir { fd_source, op, fd_target, file_target } = redir;
 
-			let backup_fd = dup(*fd_source).map_err(|e| {
-				ShellError::from_execf(&format!("Failed to back up FD {}: {}", fd_source, e), 1, redir_tk.span())
-			})?;
-			fd_stack.push((*fd_source, backup_fd));
-
 			if let Some(target) = fd_target {
 				fd_dupes.push((*target,*fd_source));
 			} else if let Some(file_path) = file_target {
+				let source_fd = SmartFd::new(*fd_source)
+					.map_err(|_| ShellError::from_internal("Failed to create smartfd from source_fd", redir_tk.span()))?;
 				let flags = match op {
 					RedirType::Input => OFlag::O_RDONLY,
 					RedirType::Output => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
 					RedirType::Append => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_APPEND,
 					_ => unimplemented!("Heredocs and herestrings are not implemented yet."),
 				};
-				let file_fd = open(file_path.text(), flags, Mode::from_bits(0o644).unwrap()).map_err(|e| {
+				let mut file_fd = SmartFd::open(&Path::new(file_path.text()), flags, Mode::from_bits(0o644).unwrap()).map_err(|e| {
 					ShellError::from_execf(&format!("Failed to open file {}: {}", file_path.text(), e), 1, redir_tk.span())
 				})?;
-				dup2(file_fd, *fd_source).map_err(|e| {
-					ShellError::from_execf(&format!("Failed to redirect FD {} to file {}: {}", fd_source, file_path.text(), e), 1, redir_tk.span())
-				})?;
-				close(file_fd).unwrap_or_else(|e| {
-					debug!("Failed to close file FD {}: {}", file_fd, e);
-				});
+				file_fd.dup2(&source_fd)
+					.map_err(|e| ShellError::from_execf(&format!("Failed to redirect FD {} to file {}: {}", fd_source, file_path.text(), e), 1, redir_tk.span()))?;
+				fd_stack.push(source_fd);
 			}
 		}
 	}
 
 	while let Some((target,source)) = fd_dupes.pop() {
-		dup2(target,source).unwrap();
+		let source_fd = SmartFd::new(source)
+			.map_err(|_| ShellError::from_internal("Failed to create SmartFd from source_fd", Span::new()))?;
+		let target_fd = SmartFd::new(target)
+			.map_err(|_| ShellError::from_internal("Failed to create SmartFd from target_fd", Span::new()))?;
+		target_fd.dup2(&source_fd)
+			.map_err(|_| ShellError::from_internal("Failed to dup target to source", Span::new()))?;
+		fd_stack.push(source_fd);
 	}
 
 	Ok(fd_stack)
-}
-
-fn close_file_descriptors(fd_stack: Vec<(i32, i32)>) {
-	for (orig_fd, backup_fd) in fd_stack {
-		if let Err(e) = dup2(backup_fd, orig_fd) {
-			log::warn!("Failed to restore FD {} from backup FD {}: {}", orig_fd, backup_fd, e);
-		}
-		if let Err(e) = close(backup_fd) {
-			log::warn!("Failed to close backup FD {}: {}", backup_fd, e);
-		}
-	}
 }
 
 pub fn catstr(mut c_strings: VecDeque<CString>,newline: bool) -> CString {
@@ -649,27 +638,39 @@ pub fn echo(node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
 	fd_stack.extend(open_file_descriptors(redirs.into())?);
 
 	let output_fd = match flags.contains(EchoFlags::STDERR) {
-    true => 2,
-    false => 1,
+		true => io.stderr.as_ref()
+			.and_then(|arc_mutex_fd| arc_mutex_fd.lock().ok().map(|fd| fd.dup().unwrap()))
+			.unwrap_or_else(|| SmartFd::from_stderr().unwrap()),
+		false => io.stdout.as_ref()
+			.and_then(|arc_mutex_fd| arc_mutex_fd.lock().ok().map(|fd| fd.dup().unwrap()))
+			.unwrap_or_else(|| SmartFd::from_stdout().unwrap()),
 	};
-	let output = unsafe { BorrowedFd::borrow_raw(output_fd) };
 
-	if let Some(fd) = io.stderr {
-		dup2(output_fd,fd).unwrap();
-		close(fd).unwrap();
+	if let Some(ref fd) = io.stderr {
+		if !flags.contains(EchoFlags::STDERR) {
+			let fd = fd.lock().unwrap();
+			output_fd.dup2(&fd.as_raw_fd())
+				.map_err(|_| ShellError::from_internal("Failed to dup output to stderr in echo", node.span()))?;
+		}
 	}
 
-	let result = write(output.as_fd(), output_str.as_bytes()).map_err(|e| {
+	let result = output_fd.write(output_str.as_bytes()).map_err(|e| {
 		ShellError::from_execf(&format!("Failed to write output in echo: {}", e), 1, node.span())
 	});
 
-	if let Some(w_pipe) = io.stdout {
-		close(w_pipe).expect("failed to close stdout in echo");
+	dbg!("closing fds");
+	for mut fd in fd_stack {
+		fd.close().unwrap();
+	}
+	if let Some(ref mut w_pipe) = io.stdout {
+		w_pipe.lock().unwrap().close().unwrap();
+		dbg!("closed w pipe");
 	}
 
-	close_file_descriptors(fd_stack);
+	dbg!("closed fds, restoring fildescs...");
 
 	io.restore_fildescs()?;
+	dbg!("restored fildescs");
 
 	result.map(|_| RshWaitStatus::Success { span: node.span })
 }

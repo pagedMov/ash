@@ -1,7 +1,6 @@
 use std::fmt;
 use std::os::fd::BorrowedFd;
 
-use nix::unistd::{close, dup, dup2, write};
 use tokio::sync::mpsc;
 use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};

@@ -29,14 +29,12 @@ pub mod interp;
 pub mod builtin;
 pub mod comp;
 
-use std::{env, fs::File, io::Read, os::fd::{AsFd, BorrowedFd}};
+use std::{env, fs::File, io::Read};
 
 use event::{EventLoop, ShellError, ShellErrorFull};
 use execute::{NodeWalker, RshWaitStatus};
 use interp::parse::descend;
-use libc::STDERR_FILENO;
 use log::info;
-use nix::unistd::write;
 use shellenv::EnvFlags;
 
 //use crate::event::EventLoop;
