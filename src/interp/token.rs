@@ -133,6 +133,7 @@ pub enum TkType {
 	// Strings and Identifiers
 	String, // Generic string literal
 	Ident,  // Identifier for variables, functions, etc.
+	Expanded, // Token from an expansion
 
 	// Expansions
 	BraceExpansion,

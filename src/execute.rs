@@ -630,7 +630,11 @@ impl<'a> NodeWalker<'a> {
 			}
 			if self.shellenv.shopts.get("autocd").is_some_and(|opt| *opt > 0) && argv.len() == 1 {
 				let path_candidate = argv.front().unwrap();
-				if (path_candidate.text().starts_with('.') || path_candidate.text().contains('/')) && Path::new(path_candidate.text()).is_dir() {
+				let is_relative_path = path_candidate.text().starts_with('.');
+				let contains_slash = path_candidate.text().contains('/');
+				let path_exists = Path::new(path_candidate.text()).is_dir();
+
+				if (is_relative_path || contains_slash) && path_exists {
 					let cd_token = Tk::new("cd".into(),span,path_candidate.flags());
 					let mut autocd_argv = argv.clone();
 					autocd_argv.push_front(cd_token);
@@ -641,6 +645,7 @@ impl<'a> NodeWalker<'a> {
 						redirs: node.redirs
 					};
 					return self.walk(autocd, io)
+
 				}
 			}
 		}

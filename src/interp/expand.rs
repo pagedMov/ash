@@ -380,14 +380,13 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 			}
 
 		} else if is_brace_expansion && token.text().has_unescaped("{") && token.tk_type != TkType::String {
-			trace!("expand(): Beginning brace expansion on {}", token.text());
 			// Perform brace expansion
 			let expanded = expand_braces(token.text().to_string());
 			for mut expanded_token in expanded {
 				expanded_token = expand_var(shellenv, expanded_token);
 				working_buffer.push_back(
 					Tk {
-						tk_type: TkType::String,
+						tk_type: TkType::Expanded,
 						wd: WordDesc {
 							text: expanded_token,
 							span: token.span(),
@@ -401,7 +400,7 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 			for path in glob(token.text()).unwrap().flatten() {
 				working_buffer.push_back(
 					Tk {
-						tk_type: TkType::String,
+						tk_type: TkType::Expanded,
 						wd: WordDesc {
 							text: path.to_str().unwrap().to_string(),
 							span: token.span(),
@@ -415,7 +414,7 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 			for word in alias_content {
 				working_buffer.push_back(
 					Tk {
-						tk_type: TkType::String,
+						tk_type: TkType::Expanded,
 						wd: WordDesc {
 							text: word.into(),
 							span: token.span(),
@@ -450,10 +449,14 @@ pub fn expand_braces(word: String) -> VecDeque<String> {
 	let mut results = VecDeque::new();
 	let mut buffer = VecDeque::from(vec![word]);
 
-	while let Some(current) = buffer.pop_front() {
+	while let Some(current) = buffer.pop_back() {
+		dbg!("expanding");
+		dbg!(&current);
 		if let Some((prefix, amble, postfix)) = parse_first_brace(&current) {
 			let expanded = expand_amble(amble);
 			for part in expanded {
+				dbg!("pushing");
+				dbg!(&part);
 				buffer.push_back(format!("{}{}{}", prefix, part, postfix));
 			}
 		} else {
@@ -534,17 +537,55 @@ fn parse_first_brace(word: &str) -> Option<(String, String, String)> {
 }
 
 fn expand_amble(amble: String) -> VecDeque<String> {
+	let mut result = VecDeque::new();
+	let mut chars = amble.chars();
+	let mut brace_stack: Vec<char> = vec![];
 	if amble.contains("..") {
 		// Handle range expansion
 		if let Some(expanded) = expand_range(&amble) {
-			return expanded;
+			expanded
+		} else {
+			result.push_back(amble);
+			result
 		}
 	} else if amble.contains(',') {
 		// Handle comma-separated values
-		return amble.split(',').map(|s| s.to_string()).collect::<VecDeque<String>>();
+		let mut cur_string = String::new();
+		while let Some(ch) = chars.next() {
+			match ch {
+				'{' => {
+					brace_stack.push(ch);
+					cur_string.push(ch);
+				}
+				'}' => {
+					brace_stack.pop();
+					cur_string.push(ch);
+				}
+				',' => {
+					if brace_stack.is_empty() {
+						result.push_front(cur_string);
+						cur_string = String::new();
+					} else {
+						cur_string.push(ch);
+					}
+				}
+				'\\' => {
+					if let Some(next_ch) = chars.next() {
+						if !matches!(ch, '{' | '}') {
+							cur_string.push(ch);
+						}
+						cur_string.push(next_ch);
+					}
+				}
+				_ => cur_string.push(ch)
+			}
+		}
+		result.push_front(cur_string);
+		result
+	} else {
+		result.push_front(amble);
+		result
 	}
-
-	VecDeque::from(vec![amble]) // If no expansion is needed, return as-is
 }
 
 fn expand_range(range: &str) -> Option<VecDeque<String>> {

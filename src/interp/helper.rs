@@ -17,7 +17,7 @@ impl StrExtension for str {
 		let mut escaped = false;
 
 		while let Some(ch) = chars.pop_front() {
-			if !escaped && working_pat == pat {
+			if !escaped && working_pat.contains(pat) {
 				return true;
 			}
 			match ch {
@@ -37,7 +37,7 @@ impl StrExtension for str {
 		}
 
 		// Check for unescaped match at the end of the string
-		!escaped && working_pat == pat
+		!escaped && working_pat.contains(pat)
 	}
 }
 
