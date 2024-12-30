@@ -5,10 +5,31 @@ use nix::unistd::dup2;
 use std::{collections::VecDeque, fs, io, os::fd::{AsRawFd, BorrowedFd}};
 
 pub trait StrExtension {
+	fn split_last(&self, pat: &str) -> Option<(String,String)>;
 	fn has_unescaped(&self, pat: &str) -> bool;
 }
 
 impl StrExtension for str {
+	// This might make some CPUs very sad
+	// Keep an eye on it and use it sparingly
+	fn split_last(&self, pat: &str) -> Option<(String, String)> {
+		let mut last_index = None;
+		let pat_len = pat.len();
+
+		// Iterate through the string and find the last occurrence of `pat`
+		for i in 0..=self.len().saturating_sub(pat_len) {
+			if &self[i..i + pat_len] == pat {
+				last_index = Some(i);
+			}
+		}
+
+		// If no occurrence is found, return None
+		last_index.map(|index| (
+				self[..index].to_string(),        // Everything before `pat`
+				self[index + pat_len..].to_string(), // Everything after `pat`
+		))
+	}
+
 	/// Checks to see if a string slice contains a specified unescaped text pattern. This method assumes that '\' is the escape character.
 	///
 	fn has_unescaped(&self, pat: &str) -> bool {
@@ -71,8 +92,28 @@ pub fn get_delimiter(wd: &WordDesc) -> char {
 	}
 }
 pub fn is_brace_expansion(text: &str) -> bool {
-	REGEX["brace_expansion"].is_match(text) &&
-		REGEX["brace_expansion"].captures(text).unwrap()[1].is_empty()
+	if REGEX["brace_expansion"].is_match(text) &&
+	REGEX["brace_expansion"].captures(text).unwrap()[1].is_empty() {
+		let mut brace_count: i32 = 0;
+		let mut chars = text.chars();
+		while let Some(ch) = chars.next() {
+			match ch {
+				'{' => brace_count += 1,
+				'}' => {
+					brace_count -= 1;
+					if brace_count < 0 {
+						// found a closing brace before an open brace
+						return false
+					}
+				},
+				'\\' => { chars.next(); },
+				_ => { /* Do nothing */ }
+			}
+		}
+		brace_count == 0
+	} else {
+		false
+	}
 }
 pub fn delimited(wd: &WordDesc) -> bool {
 	wd.flags.contains(WdFlags::IN_PAREN)
@@ -188,4 +229,19 @@ pub fn finalize_word(word_desc: &WordDesc, tokens: &mut VecDeque<Tk>) -> Result<
 		span,
 		flags: WdFlags::empty(),
 	})
+}
+
+#[cfg(test)]
+mod test {
+    use super::StrExtension;
+
+	#[test]
+	fn split_last_test() {
+		let string = "hello there here is a pattern '&&&' and another occurence of it '&&&' and another! '&&&' a lot of patterns today";
+		if let Some((left,right)) = string.split_last("&&&") {
+			assert_eq!((left,right),("hello there here is a pattern '&&&' and another occurence of it '&&&' and another! '".into(),"' a lot of patterns today".into()))
+		} else {
+			panic!()
+		}
+	}
 }

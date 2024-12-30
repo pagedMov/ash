@@ -381,7 +381,7 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 
 		} else if is_brace_expansion && token.text().has_unescaped("{") && token.tk_type != TkType::String {
 			// Perform brace expansion
-			let expanded = expand_braces(token.text().to_string());
+			let expanded = expand_braces(token.text().to_string(), VecDeque::new());
 			for mut expanded_token in expanded {
 				expanded_token = expand_var(shellenv, expanded_token);
 				working_buffer.push_back(
@@ -445,168 +445,103 @@ pub fn clean_escape_chars(token_buffer: &mut VecDeque<Tk>) {
 	}
 }
 
-pub fn expand_braces(word: String) -> VecDeque<String> {
-	let mut results = VecDeque::new();
-	let mut buffer = VecDeque::from(vec![word]);
-
-	while let Some(current) = buffer.pop_back() {
-		dbg!("expanding");
-		dbg!(&current);
-		if let Some((prefix, amble, postfix)) = parse_first_brace(&current) {
-			let expanded = expand_amble(amble);
-			for part in expanded {
-				dbg!("pushing");
-				dbg!(&part);
-				buffer.push_back(format!("{}{}{}", prefix, part, postfix));
+pub fn expand_braces(word: String, mut results: VecDeque<String>) -> VecDeque<String> {
+	if let Some((preamble, rest)) = word.split_once("{") {
+		if let Some((amble, postamble)) = rest.split_last("}") {
+			// the current logic makes adjacent expansions look like this: `left}{right`
+			// let's take advantage of that, shall we
+			if let Some((left,right)) = amble.split_once("}{") {
+				// Reconstruct the left side into a new brace expansion: left -> {left}
+				let left = format!("{}{}{}","{",left,"}");
+				// Same with the right side: right -> {right}
+				let right = format!("{}{}{}","{",right,"}");
+				dbg!(&left,&right);
+				// Recurse
+				let left_expanded = expand_braces(left.to_string(), VecDeque::new());
+				let right_expanded = expand_braces(right.to_string(), VecDeque::new());
+				// Combine them
+				for left_part in left_expanded {
+					for right_part in &right_expanded {
+						results.push_back(format!("{}{}",left_part,right_part));
+					}
+				}
+			} else {
+				dbg!(&preamble,&amble,&postamble);
+				let mut expanded = expand_amble(amble);
+				while let Some(string) = expanded.pop_front() {
+					let expanded_word = format!("{}{}{}", preamble, string, postamble);
+					results = expand_braces(expanded_word, results); // Recurse for nested braces
+				}
 			}
 		} else {
-			// No braces left to expand
-			results.push_back(current);
-		}
+			// Malformed brace: No closing `}` found
+			results.push_back(word);
 	}
-
-	results
+} else {
+	// Base case: No more braces to expand
+	results.push_back(word);
+}
+results
 }
 
-fn parse_first_brace(word: &str) -> Option<(String, String, String)> {
-	let mut prefix = String::new();
-	let mut amble = String::new();
-	let mut postfix = String::new();
-	let mut char_iter = word.chars().peekable();
-	let mut brace_stack = VecDeque::new();
-
-	while let Some(&c) = char_iter.peek() {
-		debug!("found character for prefix {}",c);
-		if c == '{' {
-			brace_stack.push_back(c);
-			char_iter.next();
-			break;
-		} else if c == '\\'{
-			prefix.push(char_iter.next()?);
-			prefix.push(char_iter.next()?);
-		} else {
-			prefix.push(char_iter.next()?);
-		}
-	}
-
-	// Parse amble
-	while let Some(c) = char_iter.next() {
-		debug!("amble: found char {}", c);
-		debug!("Current brace stack: {:?}", brace_stack);
-
-		match c {
-			'{' => {
-				brace_stack.push_back(c);
-				amble.push(c);
-			}
-			'}' => {
-				if brace_stack.pop_back().is_none() {
-					debug!("Unmatched closing brace found");
-					break; // Or handle the error gracefully
-				}
-				if brace_stack.is_empty() {
-					break;
-				} else {
-					amble.push(c);
-				}
-			}
-			'\\' => {
-				amble.push(c);
-				if let Some(ch) = char_iter.next() {
-					amble.push(ch);
-				} else {
-					debug!("Dangling backslash found at end of input");
-				}
-			}
-			_ => amble.push(c),
-		}
-
-		debug!("Remaining input: {:?}", char_iter.clone().collect::<String>());
-	}
-
-	// Parse postfix
-	postfix.extend(char_iter);
-
-	if !brace_stack.is_empty() {
-		None // Unmatched braces
-	} else if !amble.is_empty() {
-		Some((prefix, amble, postfix))
-	} else {
-		None // No braces found
-	}
-}
-
-fn expand_amble(amble: String) -> VecDeque<String> {
+pub fn expand_amble(amble: String) -> VecDeque<String> {
 	let mut result = VecDeque::new();
-	let mut chars = amble.chars();
-	let mut brace_stack: Vec<char> = vec![];
-	if amble.contains("..") {
-		// Handle range expansion
-		if let Some(expanded) = expand_range(&amble) {
-			expanded
-		} else {
-			result.push_back(amble);
-			result
+	if amble.contains("..") && amble.len() == 4 {
+		let num_range = amble.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+				&& amble.chars().last().is_some_and(|ch| ch.is_ascii_digit());
+
+		let lower_alpha_range = amble.chars().next().is_some_and(|ch| ch.is_ascii_lowercase())
+				&& amble.chars().last().is_some_and(|ch| ch.is_ascii_lowercase())
+				&& amble.chars().next() <= amble.chars().last(); // Ensure valid range
+
+		let upper_alpha_range = amble.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+				&& amble.chars().last().is_some_and(|ch| ch.is_ascii_uppercase())
+				&& amble.chars().next() <= amble.chars().last(); // Ensure valid range
+
+		if num_range || lower_alpha_range || upper_alpha_range {
+			let left = amble.chars().next().unwrap();
+			let right = amble.chars().last().unwrap();
+			for i in left..=right {
+				result.push_back(i.to_string());
+			}
 		}
-	} else if amble.contains(',') {
-		// Handle comma-separated values
+	} else {
 		let mut cur_string = String::new();
+		let mut chars = amble.chars();
+		let mut brace_stack = vec![];
 		while let Some(ch) = chars.next() {
 			match ch {
 				'{' => {
-					brace_stack.push(ch);
 					cur_string.push(ch);
+					brace_stack.push(ch);
 				}
 				'}' => {
-					brace_stack.pop();
 					cur_string.push(ch);
+					brace_stack.pop();
 				}
 				',' => {
 					if brace_stack.is_empty() {
-						result.push_front(cur_string);
+						result.push_back(cur_string);
 						cur_string = String::new();
 					} else {
-						cur_string.push(ch);
+						cur_string.push(ch)
 					}
 				}
 				'\\' => {
-					if let Some(next_ch) = chars.next() {
-						if !matches!(ch, '{' | '}') {
-							cur_string.push(ch);
-						}
-						cur_string.push(next_ch);
+					let next = chars.next();
+					if !matches!(next, Some('}') | Some('{')) {
+						cur_string.push(ch)
+					}
+					if let Some(next) = next {
+						cur_string.push(next)
 					}
 				}
 				_ => cur_string.push(ch)
 			}
 		}
-		result.push_front(cur_string);
-		result
-	} else {
-		result.push_front(amble);
-		result
+		result.push_back(cur_string);
 	}
-}
-
-fn expand_range(range: &str) -> Option<VecDeque<String>> {
-	let parts: Vec<&str> = range.trim_matches('{').trim_matches('}').split("..").collect();
-	if let [start, end] = parts.as_slice() {
-		if let (Ok(start_num), Ok(end_num)) = (start.parse::<i32>(), end.parse::<i32>()) {
-			// Numeric range
-			return Some((start_num..=end_num).map(|n| n.to_string()).collect());
-		} else if start.len() == 1 && end.len() == 1 {
-			// Alphabetic range
-			let start_char = start.chars().next().unwrap();
-			let end_char = end.chars().next().unwrap();
-			return Some(
-				(start_char..=end_char)
-				.map(|c| c.to_string())
-				.collect(),
-			);
-		}
-	}
-
-	None // Invalid range
+	result
 }
 
 pub fn expand_var(shellenv: &ShellEnv, string: String) -> String {
