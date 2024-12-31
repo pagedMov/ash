@@ -79,7 +79,7 @@ impl fmt::Display for Node {
 					writeln!(f, "{}BraceGroup", prefix)?;
 					write_tree(body, f, indent + 1)?;
 				}
-				NdType::Subshell { body } => {
+				NdType::Subshell { body, argv: _ } => {
 					writeln!(f, "{}Subshell (body: {:?})", prefix, body)?;
 				}
 				NdType::FuncDef { name, body } => {

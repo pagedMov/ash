@@ -52,14 +52,14 @@ bitflags! {
 		const DUB_QUOTED = 0b000000000000100000;
 		const SNG_QUOTED = 0b000000000001000000;
 		const IN_BRACE =   0b000000000010000000;
-		const IN_PAREN =   0b000000001000000000;
-		const IS_SUB =     0b000000010000000000;
-		const IS_OP =      0b000000100000000000;
-		const EXPECT_IN =  0b000001000000000000;
-		const IS_PATH =    0b000010000000000000;
-		const FROM_ALIAS = 0b000100000000000000;
-		const FROM_FUNC  = 0b001000000000000000;
-		const FROM_VAR   = 0b010000000000000000;
+		const IN_PAREN =   0b000000000100000000;
+		const IS_SUB =     0b000000001000000000;
+		const IS_OP =      0b000000010000000000;
+		const EXPECT_IN =  0b000000100000000000;
+		const IS_PATH =    0b000001000000000000;
+		const FROM_ALIAS = 0b000010000000000000;
+		const FROM_FUNC  = 0b000100000000000000;
+		const FROM_VAR   = 0b001000000000000000;
 	}
 	}
 
@@ -226,8 +226,7 @@ impl Tk {
 				wd = wd.add_flag(WdFlags::IS_SUB);
 				TkType::CommandSub
 			},
-			_ if REGEX["subshell"].is_match(&text) => {
-				trace!("Matched subshell: {}", text);
+			_ if wd.text.starts_with('(') && wd.text.ends_with(')') => {
 				TkType::Subshell
 			},
 			_ if REGEX["sng_string"].is_match(&text) || REGEX["dub_string"].is_match(&text) => {
@@ -496,6 +495,64 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,ShellError> {
 		word_desc = word_desc.push_span(1);
 
 		word_desc = match c {
+			'(' if word_desc.text.is_empty() || word_desc.text == "$" => {
+				// It's a subshell (probably)
+				let mut paren_stack = VecDeque::new();
+				paren_stack.push_back(c);
+				word_desc = word_desc.add_char(c);
+				while let Some(ch) = chars.pop_front() {
+					if ch == ')' {
+						paren_stack.pop_back();
+					}
+					if ch == '(' {
+						paren_stack.push_back(ch);
+					}
+					word_desc = word_desc.add_char(ch);
+				}
+				if paren_stack.is_empty() {
+					word_desc
+				} else {
+					return Err(ShellError::from_parse("Unbalanced parenthesis in subshell", word_desc.span))
+				}
+			}
+			_ if helper::delimited(&word_desc) => {
+				let closer = helper::get_delimiter(&word_desc);
+				let opener = match closer {
+					'}' => '{',
+					')' => '(',
+					'[' => ']',
+					_ => unreachable!()
+				};
+				if c != closer {
+					word_desc.add_char(c)
+				} else if c == '\\' {
+					word_desc = word_desc.add_char(c);
+					if let Some(ch) = chars.pop_front() {
+						trace!("Adding escaped character: {:?}", ch);
+						word_desc.add_char(ch)
+					} else {
+						trace!("No character after escape, returning unchanged word_desc");
+						word_desc
+					}
+				} else {
+					trace!("Finalizing delimited word");
+					if is_arg {
+						trace!("Current word is a command; resetting IS_ARG flag");
+						word_desc = word_desc.add_flag(WdFlags::IS_ARG);
+					}
+					trace!("adding character: {}",c);
+					trace!("current text: {}",word_desc.text);
+					word_desc = word_desc.add_char(c);
+					trace!("text after adding: {}",word_desc.text);
+					if word_desc.contains_flag(WdFlags::IN_BRACE) {
+						word_desc.remove_flag(WdFlags::IN_BRACE)
+					} else if word_desc.contains_flag(WdFlags::IN_PAREN) {
+						word_desc.remove_flag(WdFlags::IN_PAREN)
+					} else {
+						word_desc
+					}
+				}
+			}
 			'\\' => {
 				trace!("Escape character found");
 				let mut word_desc = word_desc.add_char(c);
@@ -542,40 +599,8 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,ShellError> {
 				word_desc = helper::process_redirection(&mut word_desc, &mut chars)?;
 				helper::finalize_word(&word_desc, &mut tokens)?
 			}
-			_ if helper::delimited(&word_desc) => {
-				let closer = helper::get_delimiter(&word_desc);
-				if c != closer {
-					word_desc.add_char(c)
-				} else if c == '\\' {
-					word_desc = word_desc.add_char(c);
-					if let Some(ch) = chars.pop_front() {
-						trace!("Adding escaped character: {:?}", ch);
-						word_desc.add_char(ch)
-					} else {
-						trace!("No character after escape, returning unchanged word_desc");
-						word_desc
-					}
-				} else {
-					trace!("Finalizing delimited word");
-					if is_arg {
-						trace!("Current word is a command; resetting IS_ARG flag");
-						word_desc = word_desc.add_flag(WdFlags::IS_ARG);
-					}
-					trace!("adding character: {}",c);
-					trace!("current text: {}",word_desc.text);
-					word_desc = word_desc.add_char(c);
-					trace!("text after adding: {}",word_desc.text);
-					if word_desc.contains_flag(WdFlags::IN_BRACE) {
-						word_desc.remove_flag(WdFlags::IN_BRACE)
-					} else if word_desc.contains_flag(WdFlags::IN_PAREN) {
-						word_desc.remove_flag(WdFlags::IN_PAREN)
-					} else {
-						word_desc
-					}
-				}
-			}
 
-			'(' if !word_desc.text.is_empty() && !word_desc.contains_flag(WdFlags::IS_ARG) => {
+			'(' if !word_desc.text.is_empty() && !word_desc.flags.intersects(WdFlags::SNG_QUOTED | WdFlags::DUB_QUOTED) && !is_arg => {
 				// This might be a function definition?
 				word_desc = word_desc.add_char(c);
 
@@ -598,7 +623,7 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,ShellError> {
 				word_desc
 			}
 
-			'(' | '{' => {
+			'(' | '{' if !word_desc.flags.intersects(WdFlags::SNG_QUOTED | WdFlags::DUB_QUOTED) => {
 				word_desc.add_char(c).delimit(c)
 			}
 
@@ -701,7 +726,7 @@ pub fn tokenize(state: ParseState) -> Result<ParseState,ShellError> {
 				word_desc
 			}
 
-			')' => {
+			')' if !helper::delimited(&word_desc) => {
 				trace!("Case separator found: {:?}", c);
 				word_desc = word_desc.add_flag(WdFlags::IS_ARG); // Make sure this doesn't get interpreted as a keyword
 				word_desc = helper::finalize_word(&word_desc, &mut tokens)?;

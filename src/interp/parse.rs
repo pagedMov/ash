@@ -180,7 +180,7 @@ pub enum NdType {
 	Pipeline { left: Box<Node>, right: Box<Node>, both: bool },
 	Chain { left: Box<Node>, right: Box<Node>, op: Box<Node> },
 	BraceGroup { body: Box<Node> },
-	Subshell { body: String }, // It's a string because we're going to parse it in a subshell later
+	Subshell { body: String, argv: VecDeque<Tk> }, // It's a string because we're going to parse it in a subshell later
 	FuncDef { name: String, body: Box<Node> },
 	Assignment {name: String, value: Option<String> },
 	Command { argv: VecDeque<Tk> },
@@ -1448,8 +1448,60 @@ pub fn build_select(mut ctx: DescentContext) -> Result<DescentContext, ShellErro
 pub fn build_subshell(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
 	let token = ctx.next_tk().unwrap();
 	let span = token.span();
+	let mut held_redirs = VecDeque::new();
+	let mut argv = VecDeque::new();
+	while let Some(mut tk) = ctx.next_tk() {
+		info!("found potential arg: {}",tk.text());
+
+		match tk.class() {
+			TkType:: PipeBoth | TkType::Cmdsep | TkType::LogicAnd | TkType::LogicOr | TkType::Pipe => {
+				info!("build_command breaking on: {:?}", tk);
+				ctx.tokens.push_front(tk);
+				while let Some(redir) = held_redirs.pop_back() {
+					// Push redirections back onto the queue, at the front
+					// This has the effect of moving all redirections to the right of the command node
+					// Which will be useful in join_at_operators()
+					ctx.tokens.push_front(redir);
+				}
+				break;
+			}
+			TkType::Ident | TkType::String | TkType::VariableSub | TkType::Assignment => {
+				// Add to argv
+				argv.push_back(tk.clone());
+			}
+			TkType::Redirection { ref mut redir } => {
+				// Handle redirection
+				if redir.fd_target.is_none() {
+					if let Some(target_tk) = ctx.next_tk() {
+						if matches!(target_tk.class(), TkType::Ident | TkType::String) {
+							redir.file_target = Some(Box::new(target_tk));
+						}
+					}
+				}
+				tk.tk_type = TkType::Redirection { redir: redir.clone() };
+				held_redirs.push_back(tk)
+			}
+			TkType::SOI => continue,
+			TkType::EOI => {
+				while let Some(redir) = held_redirs.pop_back() {
+					// Push redirections back onto the queue, at the front
+					// This has the effect of moving all redirections to the right of the command node
+					// Which will be useful in join_at_operators()
+					ctx.tokens.push_front(redir);
+				}
+				break
+			}
+			_ => {
+				error!("ran into EOI while building command, with these tokens: {:?}",ctx.get_tk_texts());
+				return Err(ShellError::from_parse(
+						format!("Unexpected token: {:?}", tk).as_str(),
+						tk.span(),
+				));
+			}
+		}
+	}
 	let node = Node {
-		nd_type: NdType::Subshell { body: token.text().into() },
+		nd_type: NdType::Subshell { body: token.text().into(), argv },
 		span,
 		flags: NdFlags::VALID_OPERAND,
 		redirs: VecDeque::new()

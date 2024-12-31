@@ -7,7 +7,7 @@ use std::mem::take;
 use std::path::{Component, PathBuf};
 use crate::event::ShellError;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
-use crate::interp::helper::{self,StrExtension};
+use crate::interp::helper::{self,StrExtension, VecDequeExtension};
 use crate::shellenv::{EnvFlags, ShellEnv};
 
 use super::parse::{self, NdType, Node, ParseState};
@@ -80,7 +80,7 @@ pub fn expand_prompt(shellenv: &ShellEnv) -> String {
 	} else {
 		format!("\\e[1;{}m\\w\\e[1;36m/\\e[0m",default_color)
 	};
-	let ps1: String = shellenv.env_vars.get("PS1").map_or(format!("\\n{}\\n\\e[{}m\\$\\e[36m>\\e[0m ",default_path,default_color), |ps1| ps1.clone());
+	let ps1: String = shellenv.env_vars.get("PS1").map_or(format!("\\n{}\\n\\e[{}m\\u \\$\\e[36m>\\e[0m ",default_path,default_color), |ps1| ps1.clone());
 	let mut result = String::new();
 	let mut chars = ps1.chars().collect::<VecDeque<char>>();
 	while let Some(c) = chars.pop_front() {
@@ -428,6 +428,12 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 		}
 	}
 
+	let mut temp_buffer = VecDeque::new();
+	product_buffer.map_rotate(|mut elem| {
+		elem.wd.text = elem.wd.text.consume_escapes();
+		temp_buffer.push_back(elem);
+	});
+	product_buffer.extend(temp_buffer.drain(..));
 	product_buffer
 }
 
@@ -448,8 +454,9 @@ pub fn expand_braces(word: String, mut results: VecDeque<String>) -> VecDeque<St
 				// Reconstruct the left side into a new brace expansion: left -> {left}
 				let left = format!("{}{}{}","{",left,"}");
 				// Same with the right side: right -> {right}
+				// This also has the side effect of rebuilding any subsequent adjacent expansions
+				// e.g. "right1}{right2}{right3" -> {right1}{right2}{right3}
 				let right = format!("{}{}{}","{",right,"}");
-				dbg!(&left,&right);
 				// Recurse
 				let left_expanded = expand_braces(left.to_string(), VecDeque::new());
 				let right_expanded = expand_braces(right.to_string(), VecDeque::new());
@@ -460,7 +467,6 @@ pub fn expand_braces(word: String, mut results: VecDeque<String>) -> VecDeque<St
 					}
 				}
 			} else {
-				dbg!(&preamble,&amble,&postamble);
 				let mut expanded = expand_amble(amble);
 				while let Some(string) = expanded.pop_front() {
 					let expanded_word = format!("{}{}{}", preamble, string, postamble);
@@ -480,7 +486,7 @@ results
 
 pub fn expand_amble(amble: String) -> VecDeque<String> {
 	let mut result = VecDeque::new();
-	if amble.contains("..") && amble.len() == 4 {
+	if amble.contains("..") && amble.len() >= 4 {
 		let num_range = amble.chars().next().is_some_and(|ch| ch.is_ascii_digit())
 				&& amble.chars().last().is_some_and(|ch| ch.is_ascii_digit());
 
@@ -492,10 +498,16 @@ pub fn expand_amble(amble: String) -> VecDeque<String> {
 				&& amble.chars().last().is_some_and(|ch| ch.is_ascii_uppercase())
 				&& amble.chars().next() <= amble.chars().last(); // Ensure valid range
 
-		if num_range || lower_alpha_range || upper_alpha_range {
+		if lower_alpha_range || upper_alpha_range {
 			let left = amble.chars().next().unwrap();
 			let right = amble.chars().last().unwrap();
 			for i in left..=right {
+				result.push_back(i.to_string());
+			}
+		}
+		if num_range {
+			let (left,right) = amble.split_once("..").unwrap();
+			for i in left.parse::<i32>().unwrap()..=right.parse::<i32>().unwrap() {
 				result.push_back(i.to_string());
 			}
 		}

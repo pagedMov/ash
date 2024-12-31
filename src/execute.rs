@@ -1,8 +1,10 @@
 use lazy_static::lazy_static;
+use libc::{memfd_create, MFD_CLOEXEC};
+use nix::sys::memfd::MemFdCreateFlag;
 use nix::sys::signal;
-use nix::unistd::{close, dup, dup2, execvpe, fork, pipe, ForkResult};
+use nix::unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult};
 use nix::fcntl::{open,OFlag};
-use nix::sys::stat::Mode;
+use nix::sys::stat::{fchmod, Mode};
 use nix::sys::wait::{waitpid, WaitStatus};
 use std::fmt::Display;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd};
@@ -12,13 +14,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use log::{info,debug,trace};
 use glob::MatchOptions;
-use std::io;
+use std::{io, thread};
 
 use crate::builtin::{alias, cd, echo, export, pwd, set_or_unset, source, test};
-use crate::event::ShellError;
+use crate::event::{ShellError, ShellErrorFull};
+use crate::interp::helper::VecDequeExtension;
 use crate::interp::{expand, parse};
 use crate::interp::token::{Redir, RedirType, Tk, WdFlags};
-use crate::interp::parse::{NdType,Node, Span};
+use crate::interp::parse::{descend, NdType, Node, Span};
 use crate::shellenv::{EnvFlags, ShellEnv};
 
 pub const GLOB_OPTS: MatchOptions = MatchOptions {
@@ -74,6 +77,17 @@ impl SmartFd {
 			return Err(ShellError::from_internal("Attempted to convert to SmartFd from a negative FD"));
 		}
 		Ok(SmartFd { fd: raw_fd })
+	}
+
+	pub fn new_memfd(name: &str, executable: bool) -> Result<Self, ShellError> {
+		let c_name = CString::new(name).map_err(|_| ShellError::from_internal("Invalid name for memfd"))?;
+		let flags = if executable {
+			0
+		} else {
+			MFD_CLOEXEC
+		};
+		let fd = unsafe { memfd_create(c_name.as_ptr(), flags) };
+		Ok(SmartFd { fd })
 	}
 
 	pub fn write(&self, buffer: &[u8]) -> Result<(),ShellError> {
@@ -449,6 +463,15 @@ impl<'a> NodeWalker<'a> {
 			let mut var_index = 0;
 			let mut iteration_count = 0;
 
+			let mut arr_buffer = VecDeque::new();
+			loop_arr.map_rotate(|elem| {
+				for token in expand::expand_token(self.shellenv, elem) {
+					arr_buffer.push_back(token);
+				}
+			});
+			loop_arr.extend(arr_buffer.drain(..));
+
+
 			while !loop_arr.is_empty() {
 
 				// Get the current value from the array
@@ -663,8 +686,39 @@ impl<'a> NodeWalker<'a> {
 		Ok(fd_queue)
 	}
 
-	fn handle_subshell(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
-		todo!()
+	fn handle_subshell(&mut self, node: Node, mut io: ProcIO) -> Result<RshWaitStatus,ShellError> {
+		let mut shellenv = self.shellenv.clone();
+		shellenv.clear_pos_parameters();
+		if let NdType::Subshell { mut body, argv } = node.nd_type {
+			body = body[1..body.len() - 1].to_string();
+			if !body.starts_with("#!") {
+				let interpreter = std::env::current_exe().unwrap();
+				let mut shebang = "#!".to_string();
+				shebang.push_str(interpreter.to_str().unwrap());
+				shebang.push('\n');
+				shebang.push_str(&body);
+				body = shebang;
+			}
+			// Step 1: Create a pipe
+			let memfd = SmartFd::new_memfd("subshell", true)?;
+			memfd.write(body.as_bytes())?;
+
+			match unsafe { fork() } {
+				Ok(ForkResult::Child) => {
+					let fd_path = format!("/proc/self/fd/{}", memfd);
+					let fd_path = CString::new(fd_path).unwrap();
+					let env = shellenv.get_cvars();
+					execve(&fd_path, &[fd_path.clone()], &env).unwrap();
+					unreachable!();
+				}
+				Ok(ForkResult::Parent { child }) => {
+					nix::sys::wait::waitpid(child, None).unwrap();
+				}
+				Err(_) => {}
+			}
+
+		} else { unreachable!() }
+		Ok(RshWaitStatus::new())
 	}
 
 	fn handle_pipeline(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus, ShellError> {
@@ -925,7 +979,6 @@ mod tests {
 		assert!(fork_test(|| {
 			let input = "for i in 1 2 3; do echo hello; done";
 			let output = cap_output(input);
-			dbg!(&output);
 			output.trim() == "hello\nhello\nhello"
 		}));
 	}

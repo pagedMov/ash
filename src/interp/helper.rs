@@ -4,14 +4,105 @@ use log::{debug,trace};
 use nix::unistd::dup2;
 use std::{collections::VecDeque, fs, io, os::fd::{AsRawFd, BorrowedFd}};
 
+pub trait VecDequeExtension<T> {
+	fn map_rotate<F>(&mut self, transform: F) where F: FnMut(T);
+}
+
+impl<T> VecDequeExtension<T> for VecDeque<T> {
+	/// Applies a transformation function to each element of the `VecDeque`
+	/// while preserving the original order of elements.
+	///
+	/// This method "rotates" the `VecDeque` by repeatedly removing the element
+	/// at the front, applying the given transformation function to it, and
+	/// appending it to the back. The process ensures that all elements are
+	/// visited exactly once, and the final order remains unchanged.
+	///
+	/// # Type Parameters
+	/// - `T`: The type of elements in the `VecDeque`.
+	/// - `F`: A closure or function that takes a mutable reference to an element
+	///   and applies the desired transformation.
+	///
+	/// # Parameters
+	/// - `transform`: A closure or function of type `FnMut(&mut T)` that modifies
+	///   each element in place.
+	///
+	/// # Examples
+	///
+	/// ```rust
+	/// use std::collections::VecDeque;
+	///
+	/// trait VecDequeExtension<T> {
+	///     fn map_rotate<F>(&mut self, transform: F)
+	///     where
+	///         F: FnMut(&mut T);
+	/// }
+	///
+	/// impl<T> VecDequeExtension<T> for VecDeque<T> {
+	///     fn map_rotate<F>(&mut self, mut transform: F)
+	///     where
+	///         F: FnMut(&mut T),
+	///     {
+	///         let len = self.len();
+	///         for _ in 0..len {
+	///             if let Some(mut element) = self.pop_front() {
+	///                 transform(&mut element);
+	///                 self.push_back(element);
+	///             }
+	///         }
+	///     }
+	/// }
+	///
+	/// let mut deque: VecDeque<String> = VecDeque::from(vec![
+	///     String::from("hello"),
+	///     String::from("world"),
+	///     String::from("rust"),
+	/// ]);
+	///
+	/// // Capitalize all elements
+	/// deque.map_rotate(|text| *text = text.to_uppercase());
+	///
+	/// assert_eq!(deque, VecDeque::from(vec![
+	///     String::from("HELLO"),
+	///     String::from("WORLD"),
+	///     String::from("RUST"),
+	/// ]));
+	/// ```
+	fn map_rotate<F>(&mut self, mut transform: F)
+	where F: FnMut(T) {
+		let len = self.len();
+		for _ in 0..len {
+			if let Some(element) = self.pop_front() {
+				transform(element);
+			}
+		}
+	}
+}
+
 pub trait StrExtension {
 	fn split_last(&self, pat: &str) -> Option<(String,String)>;
 	fn has_unescaped(&self, pat: &str) -> bool;
+	fn consume_escapes(&self) -> String;
 }
 
 impl StrExtension for str {
-	// This might make some CPUs very sad
-	// Keep an eye on it and use it sparingly
+	fn consume_escapes(&self) -> String {
+		let mut result = String::new();
+		let mut chars = self.chars().peekable();
+
+		while let Some(ch) = chars.next() {
+			if ch == '\\' {
+				if let Some(&next_ch) = chars.peek() {
+					chars.next(); // Consume the escaped character
+					result.push(next_ch); // Add the unescaped pattern character
+				}
+			} else {
+				result.push(ch); // Add non-escaped characters as-is
+			}
+		}
+
+		result
+	}
+
 	fn split_last(&self, pat: &str) -> Option<(String, String)> {
 		let mut last_index = None;
 		let pat_len = pat.len();
@@ -60,6 +151,7 @@ impl StrExtension for str {
 		// Check for unescaped match at the end of the string
 		!escaped && working_pat.contains(pat)
 	}
+
 }
 
 // This is used when pesky system calls want to emit their own errors
