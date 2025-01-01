@@ -1,17 +1,16 @@
 use chrono::Local;
 use glob::glob;
 use log::{debug, info, trace};
-use nix::NixPath;
 use std::collections::VecDeque;
 use std::mem::take;
-use std::path::{Component, PathBuf};
+use std::path::PathBuf;
 use crate::event::ShellError;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
 use crate::interp::helper::{self,StrExtension, VecDequeExtension};
 use crate::shellenv::{EnvFlags, ShellEnv};
 
 use super::parse::{self, NdType, Node, ParseState};
-use super::token;
+use super::token::RshTokenizer;
 
 pub fn check_globs(string: String) -> bool {
 	string.has_unescaped("?") ||
@@ -288,14 +287,16 @@ pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellEr
 					let new_argv = take(argv);
 					let mut child_shellenv = shellenv.clone();
 					child_shellenv.mod_flags(|f| *f |= EnvFlags::NO_ALIAS);
-					let state = ParseState {
+					let mut state = ParseState {
 						input: alias_content,
 						shellenv: &child_shellenv,
 						tokens: VecDeque::new(),
 						ast: Node::new(),
 					};
 
-					let mut state = token::tokenize(state)?;
+					let mut tokenizer = RshTokenizer::new(alias_content);
+					tokenizer.tokenize();
+					state.tokens = tokenizer.tokens.into();
 					let mut alias_tokens = state.tokens;
 					// Trim `SOI` and `EOI` tokens
 					alias_tokens.pop_back();
@@ -306,7 +307,7 @@ pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellEr
 					// i.e. "alias grep="grep --color-auto"
 					if alias_tokens.front().is_some_and(|tk| tk.text() == cmd_tk.text()) {
 						for token in &mut alias_tokens {
-							token.wd = token.wd.add_flag(WdFlags::FROM_ALIAS);
+							token.wd.flags |= WdFlags::FROM_ALIAS
 						}
 					}
 

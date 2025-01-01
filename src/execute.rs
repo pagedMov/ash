@@ -1,28 +1,24 @@
-use lazy_static::lazy_static;
 use libc::{memfd_create, MFD_CLOEXEC};
-use nix::sys::memfd::MemFdCreateFlag;
-use nix::sys::signal;
 use nix::unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult};
 use nix::fcntl::{open,OFlag};
-use nix::sys::stat::{fchmod, Mode};
+use nix::sys::stat::Mode;
 use nix::sys::wait::{waitpid, WaitStatus};
 use std::fmt::Display;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::ffi::CString;
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
-use log::{info,debug,trace};
+use log::{info,trace};
 use glob::MatchOptions;
-use std::{io, thread};
 
 use crate::builtin::{alias, cd, echo, export, pwd, set_or_unset, source, test};
-use crate::event::{ShellError, ShellErrorFull};
+use crate::event::ShellError;
 use crate::interp::helper::VecDequeExtension;
 use crate::interp::{expand, parse};
 use crate::interp::token::{Redir, RedirType, Tk, WdFlags};
-use crate::interp::parse::{descend, NdType, Node, Span};
-use crate::shellenv::{EnvFlags, ShellEnv};
+use crate::interp::parse::{NdType, Node, Span};
+use crate::shellenv::ShellEnv;
 
 pub const GLOB_OPTS: MatchOptions = MatchOptions {
 	case_sensitive: false,
@@ -392,7 +388,7 @@ impl<'a> NodeWalker<'a> {
 				last_status = self.handle_loop(node,io)?;
 			}
 			NdType::Case {..} => {
-				todo!("handle case")
+				last_status = self.handle_case(node,io)?;
 			}
 			NdType::Select {..} => {
 				todo!("handle select")
@@ -420,8 +416,8 @@ impl<'a> NodeWalker<'a> {
 			node = parse::propagate_redirections(node)?;
 		}
 		if let NdType::Root { deck } = node.nd_type {
-			for node in deck {
-				last_status = self.walk(node, io.try_clone())?;
+			for node in &deck {
+				last_status = self.walk(node.clone(), io.try_clone())?;
 				if let Some(condition) = break_condition {
 					match condition {
 						true => {
@@ -446,6 +442,19 @@ impl<'a> NodeWalker<'a> {
 		if let NdType::FuncDef { name, body } = node.nd_type {
 			self.shellenv.set_function(name, body)?;
 			Ok(last_status)
+		} else { unreachable!() }
+	}
+
+	fn handle_case(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus, ShellError> {
+		let span = node.span();
+		if let NdType::Case { input_var, cases } = node.nd_type {
+			for case in cases {
+				let (pat,body) = case;
+				if pat == input_var.text() {
+					return self.walk_root(body, None, io)
+				}
+			}
+			Ok(RshWaitStatus::Fail { code: 1, cmd: None, span })
 		} else { unreachable!() }
 	}
 
@@ -690,7 +699,6 @@ impl<'a> NodeWalker<'a> {
 		let mut shellenv = self.shellenv.clone();
 		shellenv.clear_pos_parameters();
 		if let NdType::Subshell { mut body, argv } = node.nd_type {
-			body = body[1..body.len() - 1].to_string();
 			if !body.starts_with("#!") {
 				let interpreter = std::env::current_exe().unwrap();
 				let mut shebang = "#!".to_string();
@@ -872,7 +880,9 @@ impl<'a> NodeWalker<'a> {
 
 #[cfg(test)]
 mod tests {
-	// Probably need to re-write this later
+	use crate::shellenv::EnvFlags;
+
+// Probably need to re-write this later
 	// These handle basic uses but cap_output isn't a strong enough implementation to handle complex stuff it seems
 	use super::*;
 	use std::process;

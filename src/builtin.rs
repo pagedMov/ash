@@ -1,21 +1,20 @@
 use std::collections::VecDeque;
 use std::ffi::{CString, OsStr};
 use std::fs;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use bitflags::{bitflags, Flags};
+use bitflags::bitflags;
 use libc::{getegid, geteuid};
-use log::{debug, info};
-use nix::fcntl::{open,OFlag};
+use log::info;
+use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
-use nix::unistd::{access, close, dup, dup2, isatty, write, AccessFlags};
-use nix::NixPath;
+use nix::unistd::{access, isatty, AccessFlags};
 
 use crate::execute::{ProcIO, RshWaitStatus, SmartFd};
 use crate::interp::parse::{NdType, Node, Span};
-use crate::interp::{expand, helper, token};
+use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType};
 use crate::shellenv::{EnvFlags, ShellEnv};
 use crate::event::ShellError;
@@ -54,9 +53,9 @@ fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<SmartFd>, ShellEr
 					RedirType::Append => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_APPEND,
 					_ => unimplemented!("Heredocs and herestrings are not implemented yet."),
 				};
-				let mut file_fd = SmartFd::open(&Path::new(file_path.text()), flags, Mode::from_bits(0o644).unwrap())?;
+				let mut file_fd = SmartFd::open(Path::new(file_path.text()), flags, Mode::from_bits(0o644).unwrap())?;
 				file_fd.dup2(&source_fd)?;
-				file_fd.close();
+				file_fd.close()?;
 				fd_stack.push(source_fd);
 			}
 		}
@@ -66,7 +65,7 @@ fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<SmartFd>, ShellEr
 		let mut target_fd = SmartFd::new(target)?;
 		let source_fd = SmartFd::new(source)?;
 		target_fd.dup2(&source_fd)?;
-		target_fd.close();
+		target_fd.close()?;
 
 		fd_stack.push(source_fd);
 	}

@@ -6,9 +6,9 @@ use std::mem::take;
 
 use crate::event::ShellError;
 use crate::shellenv::{EnvFlags, ShellEnv};
-use crate::interp::token::{tokenize, RedirType, Tk, TkType};
+use crate::interp::token::{RedirType, RshTokenizer, Tk, TkType};
 
-use super::token::{self, Redir, WdFlags};
+use super::token::{Redir, WdFlags};
 
 bitflags! {
 	#[derive(Debug,Clone,PartialEq)]
@@ -32,18 +32,16 @@ pub static EXPECT: Lazy<HashMap<TkType, Vec<TkType>>> = Lazy::new(|| {
 	m.insert(TkType::While,  vec![TkType::Do]); // `While` expects `Do`
 	m.insert(TkType::Until,  vec![TkType::Do]); // `Until` expects `Do`
 	m.insert(TkType::For,    vec![TkType::Do]); // `Until` expects `Do`
-	m.insert(TkType::CaseSep,vec![TkType::CaseDelim]); // `Until` expects `Do`
 	m
 });
 
-pub const OPENERS: [TkType;7] = [
+pub const OPENERS: [TkType;6] = [
 	TkType::If,
 	TkType::For,
 	TkType::Until,
 	TkType::While,
 	TkType::Case,
 	TkType::Select,
-	TkType::CaseSep
 ];
 
 #[derive(PartialEq,Debug,Clone)]
@@ -280,6 +278,7 @@ impl DescentContext {
 
 pub fn descend<'a>(input: &'a str, shellenv: &'a ShellEnv) -> Result<ParseState<'a>,ShellError> {
 	info!("Starting descent into parsing with input: {:?}", input);
+	let mut tokenizer = RshTokenizer::new(input);
 	let mut state = ParseState {
 		input,
 		shellenv,
@@ -292,7 +291,8 @@ pub fn descend<'a>(input: &'a str, shellenv: &'a ShellEnv) -> Result<ParseState<
 		}
 	};
 
-	state = tokenize(state)?;
+	tokenizer.tokenize();
+	state.tokens = tokenizer.tokens.into();
 
 	state = parse(state)?;
 
@@ -430,12 +430,6 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> Result<DescentContex
 			}
 			Esac => {
 				return Err(ShellError::from_parse("Found `esac` outside of `case` context", tk.span()))
-			}
-			CaseDelim => {
-				return Err(ShellError::from_parse("Double semicolons (`;;`) are reserved for delimiting case statement conditions", tk.span()))
-			}
-			CaseSep => {
-				return Err(ShellError::from_parse("Found this unmatched close parenthesis", tk.span()))
 			}
 			Redirection { .. } => {
 				ctx.tokens.push_front(tk);
@@ -1195,9 +1189,11 @@ pub fn build_case(mut ctx: DescentContext) -> Result<DescentContext, ShellError>
 	let mut block_tokens = VecDeque::new();
 	let mut block_root = VecDeque::new();
 	let mut input_var: Option<Tk> = None;
-	let mut outer_phase = Phase::Vars;
-	let mut inner_phase = Phase::Condition;
+	let mut phase = Phase::Vars;
 	let mut closed = false;
+	if ctx.front_tk().is_some_and(|tk| tk.tk_type == TkType::Ident) {
+		input_var = Some(ctx.next_tk().unwrap());
+	}
 
 	let span_start = ctx.mark_start();
 
@@ -1209,7 +1205,7 @@ pub fn build_case(mut ctx: DescentContext) -> Result<DescentContext, ShellError>
 					if ctx.front_tk().is_some_and(|tk| tk.class() == TkType::Cmdsep) {
 						ctx.next_tk();
 					}
-					outer_phase = Phase::Body;
+					phase = Phase::Condition;
 				} else {
 					return Err(ShellError::from_parse(
 							"Did not find a variable for this case statement",
@@ -1234,88 +1230,47 @@ pub fn build_case(mut ctx: DescentContext) -> Result<DescentContext, ShellError>
 				closed = true;
 				break;
 			}
-			TkType::CaseSep => {
-				if inner_phase == Phase::Condition {
-					inner_phase = Phase::Body;
+			TkType::CasePat if phase == Phase::Condition => {
+				phase = Phase::Body;
+				if block_string.is_empty() {
+					block_string = tk.text().trim().to_string();
 				} else {
 					return Err(ShellError::from_parse(
-							"Unexpected case separator",
+							"Expected only one variable in case statement",
 							tk.span(),
 					));
 				}
 			}
-			TkType::CaseDelim => {
-				if inner_phase == Phase::Body {
-					let block_span = compute_span(&block_tokens);
-					block_root = parse_and_attach(take(&mut block_tokens), block_root)?;
-					let block_node = Node::from(take(&mut block_root), block_span);
-					cases.insert(take(&mut block_string), block_node);
-
-					if ctx.front_tk().is_some_and(|tk| tk.class() == TkType::Cmdsep) {
-						while let Some(tk) = ctx.next_tk() {
-							if tk.class() != TkType::Cmdsep {
-								ctx.tokens.push_front(tk); // Handle pesky newlines
-								break
-							}
-						}
-					}
-
-					inner_phase = Phase::Condition;
-				} else {
+			_ if phase == Phase::Body && ctx.front_tk().is_some_and(|f_tk| f_tk.tk_type == TkType::CasePat) => {
+				let block_span = compute_span(&block_tokens);
+				block_root = parse_and_attach(take(&mut block_tokens), block_root)?;
+				let block_node = Node::from(take(&mut block_root), block_span);
+				cases.insert(take(&mut block_string), block_node);
+				phase = Phase::Condition;
+			}
+			_ if phase == Phase::Body => {
+				if block_string.is_empty() {
 					return Err(ShellError::from_parse(
-							"Unexpected case delimiter",
+							format!("Did not find a pattern for this case block: {}",tk.text()).as_str(),
 							tk.span(),
 					));
+				}
+				match tk.class() {
+					_ if OPENERS.contains(&tk.class()) => {
+						ctx.tokens.push_front(tk);
+						if !block_tokens.is_empty() {
+							block_root = parse_and_attach(take(&mut block_tokens), block_root)?;
+						}
+						ctx = parse_linear(ctx, true)?;
+						if let Some(node) = ctx.root.pop_back() {
+							block_root.push_back(node);
+						}
+					},
+					_ => block_tokens.push_back(tk),
 				}
 			}
 			_ => {
-				match outer_phase {
-					Phase::Vars => {
-						if input_var.is_none() && matches!(tk.class(), TkType::Ident) {
-							input_var = Some(tk);
-						} else {
-							return Err(ShellError::from_parse(
-									"Expected only one variable in case statement",
-									tk.span(),
-							));
-						}
-					}
-					Phase::Body => match inner_phase {
-						Phase::Condition => {
-							if block_string.is_empty() {
-								block_string = tk.text().into();
-							} else {
-								return Err(ShellError::from_parse(
-										format!("Found a second token for this case pattern: {}",tk.text()).as_str(),
-										tk.span(),
-								));
-							}
-						}
-						Phase::Body => {
-							if block_string.is_empty() {
-								return Err(ShellError::from_parse(
-										format!("Did not find a pattern for this case block: {}",tk.text()).as_str(),
-										tk.span(),
-								));
-							}
-							match tk.class() {
-								_ if OPENERS.contains(&tk.class()) => {
-									ctx.tokens.push_front(tk);
-									if !block_tokens.is_empty() {
-										block_root = parse_and_attach(take(&mut block_tokens), block_root)?;
-									}
-									ctx = parse_linear(ctx, true)?;
-									if let Some(node) = ctx.root.pop_back() {
-										block_root.push_back(node);
-									}
-								},
-								_ => block_tokens.push_back(tk),
-							}
-						}
-						_ => unreachable!("Unexpected phase in case statement parsing"),
-					},
-					_ => unreachable!("Unexpected outer phase in case statement parsing"),
-				}
+				return Err(ShellError::from_parse("Something weird happened in this case statement", tk.span()))
 			}
 		}
 	}
@@ -1512,17 +1467,22 @@ pub fn build_subshell(mut ctx: DescentContext) -> Result<DescentContext, ShellEr
 
 pub fn build_func_def(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
 	let def = ctx.next_tk().unwrap();
-	if let TkType::FuncDef { ref name, ref body } = def.tk_type {
+	if let TkType::FuncDef = def.tk_type {
 		//TODO: initializing a new shellenv instead of cloning the current one here
 		//could cause issues later, keep an eye on this
 		//Might be fine to just build the AST since nothing is being executed or expanded
-		let state = ParseState {
-			input: body.as_str(),
+		let name = def.text();
+		let body_tk = ctx.next_tk().unwrap(); // We can be reasonably sure that this exists
+		let body = body_tk.text();
+		let mut tokenizer = RshTokenizer::new(body);
+		let mut state = ParseState {
+			input: body,
 			shellenv: &ShellEnv::new(EnvFlags::NO_RC),
 			tokens: VecDeque::new(),
 			ast: Node::new()
 		};
-		let state = tokenize(state)?;
+		tokenizer.tokenize();
+		state.tokens = tokenizer.tokens.into();
 		let state = parse(state)?;
 		let func_tree = state.ast.boxed();
 		let node = Node {

@@ -1,20 +1,99 @@
 use bitflags::bitflags;
-use nix::NixPath;
 use once_cell::sync::Lazy;
-use log::{info,trace,debug};
+use log::trace;
 use regex::Regex;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use crate::event::ShellError;
-use crate::interp::parse::ParseState;
-use crate::interp::helper;
+use std::io;
+use std::mem::take;
 
-use super::parse::Span;
+use crate::interp::parse::Span;
+
+use super::helper::StrExtension;
+
+pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
+	let mut regex = HashMap::new();
+	regex.insert("redirection",Regex::new(r"^(?P<fd_out>[0-9]+)?(?P<operator>>{1,2}|<{1,3})(?:[&]?(?P<fd_target>[0-9]+))?$").unwrap());
+	regex.insert("rsh_shebang",Regex::new(r"^#!((?:/[^\s]+)+)((?:\s+arg:[a-zA-Z][a-zA-Z0-9_\-]*)*)$").unwrap());
+	regex.insert("brace_expansion",Regex::new(r"(\$?)\{(?:[\x20-\x7e,]+|[0-9]+(?:\.\.[0-9+]){1,2}|[a-z]\.\.[a-z]|[A-Z]\.\.[A-Z])\}").unwrap());
+	regex.insert("process_sub",Regex::new(r"^>\(.*\)$").unwrap());
+	regex.insert("command_sub",Regex::new(r"^\$\([^\)]+\)$").unwrap());
+	regex.insert("arithmetic",Regex::new(r"^\$\(\([^\)]+\)\)$").unwrap());
+	regex.insert("subshell",Regex::new(r"^\([^\)]+\)$").unwrap());
+	regex.insert("test",Regex::new(r"^\[\s*(.*?)\s*\]$").unwrap());
+	regex.insert("sng_string",Regex::new(r#"^\'([^\']*)\'$"#).unwrap());
+	regex.insert("dub_string",Regex::new(r#"^\"([^\"]*)\"$"#).unwrap());
+	regex.insert("var_sub",Regex::new(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})").unwrap());
+	regex.insert("assignment",Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*=.*$").unwrap());
+	regex.insert("funcdef",Regex::new(r"^[\x20-\x7E]*\(\)\s+\{[\s\S]*?\}").unwrap());
+	regex.insert("operator",Regex::new(r"(?:&&|\|\||[><]=?|[|&])").unwrap());
+	regex.insert("cmdsep",Regex::new(r"^(?:\n|;)$").unwrap());
+	regex.insert("ident",Regex::new(r"^[\x20-\x7E]*$").unwrap());
+	regex
+});
+
+#[derive(Debug, PartialEq)]
+pub enum ShellError {
+	CommandNotFound(String, Span),
+	InvalidSyntax(String, Span),
+	ParsingError(String, Span),
+	ExecFailed(String, i32, Span),
+	IoError(String),
+	InternalError(String),
+}
+
+impl ShellError {
+	pub fn from_io() -> Self {
+		let err = io::Error::last_os_error();
+		ShellError::IoError(err.to_string())
+	}
+	pub fn from_execf(msg: &str, code: i32, span: Span) -> Self {
+		ShellError::ExecFailed(msg.to_string(), code, span)
+	}
+	pub fn from_parse(msg: &str, span: Span) -> Self {
+		ShellError::ParsingError(msg.to_string(), span)
+	}
+	pub fn from_syntax(msg: &str, span: Span) -> Self {
+		ShellError::InvalidSyntax(msg.to_string(), span)
+	}
+	pub fn from_no_cmd(msg: &str, span: Span) -> Self {
+		ShellError::CommandNotFound(msg.to_string(), span)
+	}
+	pub fn from_internal(msg: &str) -> Self {
+		ShellError::InternalError(msg.to_string())
+	}
+	// This is used in the context of functions
+	// To prevent the error from trying to use the span
+	// Of the offending command that is inside of the function
+	pub fn overwrite_span(&self, new_span: Span) -> Self {
+		match self {
+			ShellError::IoError(err) => ShellError::IoError(err.to_string()),
+			ShellError::CommandNotFound(msg,_) => ShellError::CommandNotFound(msg.to_string(),new_span),
+			ShellError::InvalidSyntax(msg,_) => ShellError::InvalidSyntax(msg.to_string(),new_span),
+			ShellError::ParsingError(msg,_) => ShellError::ParsingError(msg.to_string(),new_span),
+			ShellError::ExecFailed(msg,code,_) => ShellError::ExecFailed(msg.to_string(),*code,new_span),
+			ShellError::InternalError(msg) => ShellError::InternalError(msg.to_string()),
+		}
+	}
+	pub fn is_fatal(&self) -> bool {
+		match self {
+			ShellError::IoError(..) => true,
+			ShellError::CommandNotFound(..) => false,
+			ShellError::ExecFailed(..) => false,
+			ShellError::ParsingError(..) => false,
+			ShellError::InvalidSyntax(..) => false,
+			ShellError::InternalError(..) => false,
+		}
+	}
+}
 
 pub const KEYWORDS: [&str;14] = [
 	"if", "while", "until", "for", "case", "select",
 	"then", "elif", "else", "in",
 	"do", "done", "fi", "esac"
+];
+pub const OPENERS: [&str;6] = [
+	"if", "while", "until", "for", "case", "select",
 ];
 pub const BUILTINS: [&str; 19] = [
 	"echo", "unset", "set", "builtin", "test", "[", "shift", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node",
@@ -63,34 +142,128 @@ bitflags! {
 	}
 	}
 
-macro_rules! define_patterns {
+macro_rules! define_expectations {
 	($($name:expr => $pattern:expr),* $(,)?) => {{
+		use crate::interp::token::TkState::*;
 		let mut m = HashMap::new();
-		$(m.insert($name, Regex::new($pattern).unwrap());)*
+		$(m.insert($name, $pattern);)*
 			m
 	}};
+}
+
+#[derive(Debug,Hash,Clone,PartialEq,Eq)]
+pub struct WordDesc {
+	pub text: String,
+	pub span: Span,
+	pub flags: WdFlags
+}
+
+impl WordDesc {
+	pub fn empty() -> Self {
+		Self {
+			text: String::new(),
+			span: Span::new(),
+			flags: WdFlags::empty()
+		}
+	}
+	pub fn set_span(self, span: Span) -> Self {
+		Self {
+			text: self.text,
+			span,
+			flags: self.flags
+		}
+	}
+	pub fn add_char(&mut self, ch: char) -> Self {
+		trace!("cloning text: {}",self.text);
+		let mut text = std::mem::take(&mut self.text);
+		trace!("cloned text: {}",text);
+		trace!("pushing char: {}",ch);
+		text.push(ch);
+		trace!("after pushing: {}",text);
+
+		Self {
+			text,
+			span: Span::from(self.span.start, self.span.end),
+			flags: self.flags,
+		}
+	}
+	pub fn cat_string(mut self, s: &str) -> Self {
+		self.text.push_str(s);
+		Self {
+			text: self.text,
+			span: Span::from(self.span.start, self.span.end + 1),
+			flags: self.flags
+		}
+	}
+	pub fn contains_flag(&self, flag: WdFlags) -> bool {
+		self.flags.contains(flag)
 	}
 
-pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
-	define_patterns! {
-		"redirection" => r"^([0-9]+)?(>{1,2}|<{1,3})(?:[&]?([0-9]+))?$",
-		"rsh_shebang" => r"^#!((?:/[^\s]+)+)((?:\s+arg:[a-zA-Z][a-zA-Z0-9_\-]*)*)$",
-		"brace_expansion" => r"(\$?)\{(?:[\x20-\x7e,]+|[0-9]+(?:\.\.[0-9+]){1,2}|[a-z]\.\.[a-z]|[A-Z]\.\.[A-Z])\}",
-		"process_sub" => r"^>\(.*\)$",
-		"command_sub" => r"^\$\([^\)]+\)$",
-		"arithmetic" => r"^\$\(\([^\)]+\)\)$",
-		"subshell" => r"^\([^\)]+\)$",
-		"test" => r"^\[\s*(.*?)\s*\]$",
-		"sng_string" => r#"^\'([^\']*)\'$"#,
-		"dub_string" => r#"^\"([^\"]*)\"$"#,
-		"var_sub" => r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})",
-		"assignment" => r"^[A-Za-z_][A-Za-z0-9_]*=.*$",
-		"funcdef" => r"^[\x20-\x7E]*\(\)\s+\{[\s\S]*?\}",
-		"operator" => r"(?:&&|\|\||[><]=?|[|&])",
-		"cmdsep" => r"^(?:\n|;)$",
-		"ident" => r"^[\x20-\x7E]*$",
+	pub fn add_flag(self, flag: WdFlags) -> Self {
+		let mut flags = self.flags;
+		flags |= flag;
+		let new = Self {
+			text: self.text,
+			span: self.span,
+			flags
+		};
+		trace!("added flag: {:?}, new flags {:?}",flag,new.flags);
+		new
 	}
-});
+
+	pub fn remove_flag(self, flag: WdFlags) -> Self {
+		let mut flags = self.flags;
+		flags &= !flag;
+		Self {
+			text: self.text,
+			span: self.span,
+			flags
+		}
+	}
+
+	pub fn toggle_flag(self, flag: WdFlags) -> Self {
+		let mut flags = self.flags;
+		flags ^= flag;
+		Self {
+			text: self.text,
+			span: self.span,
+			flags
+		}
+	}
+	pub fn reset_flags(self) -> Self {
+		Self {
+			text: self.text,
+			span: self.span,
+			flags: WdFlags::empty()
+		}
+	}
+	pub fn push_span(&mut self, count: usize) {
+		self.span = Span::from(self.span.start,self.span.end + count);
+	}
+	pub fn push_span_start(&mut self, count: usize) {
+		let mut span_start = self.span.start;
+		let mut span_end = self.span.end;
+		span_start += count;
+		if span_end < span_start {
+			span_end = span_start
+		}
+		self.span = Span::from(span_start,span_end);
+	}
+	pub fn delimit(self, delim: char) -> Self {
+		let flag = match delim {
+			'{' => WdFlags::IN_BRACE,
+			'(' => WdFlags::IN_PAREN,
+			_ => unreachable!()
+		};
+		self.add_flag(flag)
+	}
+}
+
+impl Default for WordDesc {
+	fn default() -> Self {
+	    Self::empty()
+	}
+}
 
 #[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub struct Tk {
@@ -115,10 +288,10 @@ pub enum TkType {
 	Esac,
 	Select,
 	In,
-	Function,
+	FuncBody,
 
 	Redirection { redir: Redir },
-	FuncDef { name: String, body: String },
+	FuncDef,
 	Assignment, // `=`
 	LogicAnd, // `&&`
 	LogicOr, // `||`
@@ -129,6 +302,8 @@ pub enum TkType {
 	// Grouping and Subshells
 	ProcessSub,
 	Subshell, // `(`
+	Array { elements: Vec<Tk> },
+	Vars { vars: Vec<Tk> },
 
 	// Strings and Identifiers
 	String, // Generic string literal
@@ -145,8 +320,7 @@ pub enum TkType {
 
 	// Special Characters
 	Cmdsep, // ';' or '\n'
-	CaseSep, // ')'
-	CaseDelim, // ';;'
+	CasePat,
 	Whitespace, // Space or tab
 	SOI,
 	EOI,
@@ -164,6 +338,44 @@ impl Tk {
 			}
 		}
 	}
+	pub fn from(mut wd: WordDesc, context: TkState) -> Result<Self,ShellError> {
+		use crate::interp::token::TkState::*;
+		use crate::interp::token::TkType as TkT;
+		match context {
+			Root => panic!("not supposed to be here"),
+			Ident => Ok(Tk { tk_type: TkT::Ident, wd }),
+			Arg => Ok(Tk { tk_type: TkT::Ident, wd: wd.add_flag(WdFlags::IS_ARG) }),
+			Command => Ok(Tk { tk_type: TkT::Ident, wd }),
+			Array => Ok(Tk { tk_type: TkT::Array { elements: vec![] }, wd }),
+			If => Ok(Tk { tk_type: TkT::If, wd: wd.add_flag(WdFlags::KEYWORD) }),
+			For => Ok(Tk { tk_type: TkT::For, wd: wd.add_flag(WdFlags::KEYWORD) }),
+			Loop => Ok({
+				if wd.text == "while" {
+					Tk { tk_type: TkT::While, wd: wd.add_flag(WdFlags::KEYWORD) }
+				} else if wd.text == "until" {
+					Tk { tk_type: TkT::Until, wd: wd.add_flag(WdFlags::KEYWORD) }
+				} else { unreachable!("reached loop context with this: {}",wd.text) }
+			}),
+			Case => Ok(Tk { tk_type: TkT::Case, wd: wd.add_flag(WdFlags::KEYWORD) }),
+			Select => Ok(Tk { tk_type: TkT::Select, wd: wd.add_flag(WdFlags::KEYWORD) }),
+			In | CaseIn => Ok(Tk { tk_type: TkT::In, wd: wd.add_flag(WdFlags::KEYWORD) }),
+			CasePat => Ok(Tk { tk_type: TkT::Ident, wd }),
+			Elif => Ok(Tk { tk_type: TkT::Elif, wd: wd.add_flag(WdFlags::KEYWORD) }),
+			Else => Ok(Tk { tk_type: TkT::Else, wd: wd.add_flag(WdFlags::KEYWORD) }),
+			Do => Ok(Tk { tk_type: TkT::Do, wd: wd.add_flag(WdFlags::KEYWORD) }),
+			Then => Ok(Tk { tk_type: TkT::Then, wd: wd.add_flag(WdFlags::KEYWORD) }),
+			Done => Ok(Tk { tk_type: TkT::Done, wd: wd.add_flag(WdFlags::KEYWORD) }),
+			Fi => Ok(Tk { tk_type: TkT::Fi, wd: wd.add_flag(WdFlags::KEYWORD) }),
+			Esac => Ok(Tk { tk_type: TkT::Esac, wd: wd.add_flag(WdFlags::KEYWORD) }),
+			Subshell => Ok(Tk { tk_type: TkT::Subshell, wd }),
+			SQuote => Ok(Tk { tk_type: TkT::String, wd }),
+			DQuote => Ok(Tk { tk_type: TkT::String, wd }),
+			Redirect => todo!(),
+			CommandSub => Ok(Tk { tk_type: TkT::CommandSub, wd }),
+			Separator => Ok(Tk { tk_type: TkT::Cmdsep, wd }),
+			_ => return Err(ShellError::from_parse(format!("Parse error: {}", wd.text).as_str(), wd.span))
+		}
+	}
 	pub fn start_of_input() -> Self {
 		Tk {
 			tk_type: TkType::SOI,
@@ -173,90 +385,14 @@ impl Tk {
 	pub fn end_of_input(end: usize) -> Self {
 		Tk {
 			tk_type: TkType::EOI,
-			wd: WordDesc { text: "".into(), span: Span::from(0,end), flags: WdFlags::empty() }
+			wd: WordDesc { text: "".into(), span: Span::from(end,end), flags: WdFlags::empty() }
 		}
 	}
-	pub fn cmdsep(pos: usize) -> Self {
+	pub fn cmdsep(wd: &WordDesc, pos: usize) -> Self {
 		Tk {
 			tk_type: TkType::Cmdsep,
-			wd: WordDesc { text: ";".into(), span: Span::from(pos + 1,pos + 1), flags: WdFlags::empty() }
+			wd: WordDesc { text: wd.text.clone(), span: Span::from(pos + 1,pos + 1), flags: WdFlags::empty() }
 		}
-	}
-	pub fn casesep(pos: usize) -> Self {
-		Tk {
-			tk_type: TkType::CaseSep,
-			wd: WordDesc { text: ")".into(), span: Span::from(pos + 1,pos + 1), flags: WdFlags::empty() }
-		}
-	}
-	pub fn case_delim(pos: usize) -> Self {
-		Tk {
-			tk_type: TkType::CaseDelim,
-			wd: WordDesc { text: ";;".into(), span: Span::from(pos,pos+1), flags: WdFlags::empty() }
-		}
-	}
-	pub fn from(mut wd: WordDesc) -> Result<Self,ShellError> {
-		debug!("Tk::from(): Evaluating node type for: {}", wd.text);
-
-		// TODO: Implement sub-shell substitutions
-		// These must be evaluated here, and resolved into a string node containing their output
-		let text = wd.text.clone();
-		let tk_type = match text {
-			_ if wd.flags.contains(WdFlags::KEYWORD) => {
-				Self::get_keyword_token(&wd)?
-			}
-			_ if REGEX["assignment"].is_match(&text) => {
-				trace!("Matched assignment: {}", text);
-				TkType::Assignment
-			},
-			_ if REGEX["redirection"].is_match(&text) => {
-				trace!("Matched redirection: {}", text);
-				Self::build_redir(&wd)?
-			},
-			_ if REGEX["process_sub"].is_match(&text) => {
-				trace!("Matched process substitution: {}", text);
-				wd = wd.add_flag(WdFlags::IS_SUB);
-				TkType::ProcessSub
-			},
-			_ if REGEX["funcdef"].is_match(&text) => {
-				trace!("Matched function definition: {}",text);
-				Self::split_func(&wd)?
-			}
-			_ if REGEX["command_sub"].is_match(&text) => {
-				trace!("Matched command substitution: {}", text);
-				wd = wd.add_flag(WdFlags::IS_SUB);
-				TkType::CommandSub
-			},
-			_ if wd.text.starts_with('(') && wd.text.ends_with(')') => {
-				TkType::Subshell
-			},
-			_ if REGEX["sng_string"].is_match(&text) || REGEX["dub_string"].is_match(&text) => {
-				trace!("Matched string: {}", text);
-				wd = if REGEX["sng_string"].is_match(&text) {
-					wd.add_flag(WdFlags::SNG_QUOTED)
-				} else if REGEX["dub_string"].is_match(&text) {
-					wd.add_flag(WdFlags::DUB_QUOTED)
-				} else { wd.clone() };
-				wd.text = text[1..text.len()-1].into();
-				TkType::String
-			},
-			_ if REGEX["operator"].is_match(&text) => {
-				trace!("Matched operator: {}", text);
-				Self::get_operator_type(&wd)
-			},
-			_ if REGEX["ident"].is_match(&text) => {
-				trace!("Matched identifier: {}", text);
-				if text.starts_with("./") || text.starts_with('/') {
-					wd = wd.add_flag(WdFlags::IS_PATH);
-				}
-				TkType::Ident
-			},
-			_ => {
-				return Err(ShellError::from_parse(format!("Parsing error on: {}",wd.text).as_str(), wd.span))
-			}
-		};
-		let token = Tk { tk_type, wd };
-		info!("returning token: {:?}",token);
-		Ok(token)
 	}
 	fn get_keyword_token(wd: &WordDesc) -> Result<TkType,ShellError> {
 		let text = wd.text.clone();
@@ -294,37 +430,8 @@ impl Tk {
 		} else {
 			return Err(ShellError::from_internal(format!("This body made it to split_func with no surrounding braces: {}",body).as_str()));
 		}
-		let name = name.to_string();
-		let body = body.to_string();
 
-		Ok(TkType::FuncDef { name, body })
-	}
-	fn build_redir(wd: &WordDesc) -> Result<TkType,ShellError> {
-		let text = wd.text.clone();
-		if let Some(caps) = REGEX["redirection"].captures(text.as_str()) {
-			let mut fd_source = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()).unwrap_or(1);
-			let operator = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
-			let fd_target = caps.get(3).and_then(|m| m.as_str().parse::<i32>().ok());
-
-			let redir_type = match operator {
-				">" => RedirType::Output,
-				">>" => RedirType::Append,
-				"<" => RedirType::Input,
-				"<<" => RedirType::Heredoc,
-				"<<<" => RedirType::Herestring,
-				_ => return Err(ShellError::from_parse(format!("Invalid redirect operator: {}",wd.text).as_str(), wd.span))
-			};
-			if matches!(redir_type, RedirType::Input | RedirType::Heredoc | RedirType::Herestring) {
-				fd_source = 0
-			}
-			let redir = Redir {
-				fd_source,
-				op: redir_type,
-				fd_target,
-				file_target: None // We will do this part in the parsing phase
-			};
-			Ok(TkType::Redirection { redir })
-		} else { unreachable!() }
+		Ok(TkType::FuncDef)
 	}
 	fn get_operator_type(word_desc: &WordDesc) -> TkType {
 		match word_desc.text.as_str() {
@@ -368,432 +475,560 @@ pub enum RedirType {
 	Herestring
 }
 
-#[derive(Debug,Hash,Clone,PartialEq,Eq)]
-pub struct WordDesc {
-	pub text: String,
+
+#[derive(Eq,Hash,PartialEq)]
+pub enum TkState {
+	Root, // Outer contex, allows for anything and everything. Closed by the EOI token
+	ArrDec, // Used in arrays like for i in ArrDec1 ArrDec2
+	VarDec, // Used in for loop vars like for VarDec1 VarDec2 in array
+	SingleVarDec, // Used in case and select
+	Ident, // Generic words used for var and arr declarations
+	Arg, // Command arguments; only appear after commands
+	Command, // Starting point for the tokenizer
+	FuncDef, // defining a function like() { this }
+	FuncBody, // The stuff { inside braces }
+	Array, // Used in for loops and select statements
+	If, // If statement opener
+	For, // For loop opener
+	Loop, // While/Until opener
+	Case, // Case opener
+	Select, // Select opener
+	In, // Used in for, case, and select statements
+	CaseBlock, // this)kind of thing;;
+	CaseIn, // 'In' context used for case statements, signaling the tokenizer to look for stuff 'like)this;;esac'
+	CasePat, // the left side of this)kind of thing
+	CaseBody, // the right side of this)kind of thing
+	Elif, // Secondary if/then blocks
+	Else, // Else statements
+	Do, // Select, for, and while/until condition/body separator
+	Then, // If statement condition/body separator
+	Done, // Select, for, and while/until closer
+	Fi, // If statement closer
+	Esac, // Case statement closer
+	Subshell, // Subshells, look (like this)
+	SQuote, // 'Single quoted strings'
+	DQuote, // "Double quoted strings"
+	Escaped, // Used to denote an escaped character like \a
+	Redirect, // >, <, <<, <<<, 1>&2, 2>, etc.
+	Comment, // #Comments like this
+	Whitespace, // Space or tabs
+	CommandSub, // $(Command substitution)
+	Operator, // operators
+	Separator, // Semicolon or newline to end an invocation
+	DeadEnd, // Used for closing keywords like 'fi' and 'done' that demand a separator immediately after
+	Invalid // Used when an unexpected state is discovered
+}
+
+impl TkState {
+	pub fn check_str(slice: &str, context: TkState) -> Self {
+		use crate::interp::token::TkState::*;
+		match slice {
+			// Loop and conditional openers
+			"for" if matches!(context, Command) => For,
+			"if" if matches!(context, Command) => If,
+			"while" if matches!(context, Command) => Loop,
+			"until" if matches!(context, Command) => Loop,
+
+			// Conditional separators and terminators
+			"then" if matches!(context, If | Elif) => Then,
+			"elif" if matches!(context, Then | Elif) => Elif,
+			"else" if matches!(context, If | Then | Elif) => Else,
+			"fi" if matches!(context, If | Then | Elif | Else) => Fi,
+
+			// Loop terminators
+			"do" if matches!(context, For | Loop) => Do,
+			"done" if matches!(context, Do) => Done,
+
+			// Case-specific keywords
+			"case" if matches!(context, Command) => Case,
+			"in" if matches!(context, Case | For | Select) => In,
+			"esac" if matches!(context, CaseIn | CaseBlock | CaseBody) => Esac,
+
+			// Select-specific keywords
+			"select" if matches!(context, Command) => Select,
+
+			// General flow control
+			"in" if matches!(context, For | Case | Select) => In,
+			"|" if Self::executable().contains(&context) => Operator,
+			"&" if Self::executable().contains(&context) => Operator,
+
+			// Defaults to Ident for non-keyword or unmatched cases
+			_ => Ident,
+		}
+	}
+	pub fn executable() -> Vec<Self> {
+		use crate::interp::token::TkState::*;
+		let mut execs = vec![
+			Command,
+			Subshell
+		];
+		execs.extend(Self::openers());
+		execs
+	}
+	pub fn body() -> Vec<Self> {
+		use crate::interp::token::TkState::*;
+		vec![
+			Command,
+			Arg,
+			Separator,
+			Redirect,
+			SQuote,
+			DQuote,
+			CommandSub,
+			Subshell
+		]
+	}
+	pub fn openers() -> Vec<Self> {
+		use crate::interp::token::TkState::*;
+		vec![
+			For,
+			Loop,
+			If,
+			Case,
+			Select
+		]
+	}
+}
+
+pub struct RshTokenizer {
+	input: String,
+	char_stream: VecDeque<char>,
+	context: TkState,
+	pub tokens: Vec<Tk>,
 	pub span: Span,
-	pub flags: WdFlags
 }
 
-impl WordDesc {
-	pub fn add_char(&mut self, c: char) -> Self {
-		trace!("cloning text: {}",self.text);
-		let mut text = std::mem::take(&mut self.text);
-		trace!("cloned text: {}",text);
-		trace!("pushing char: {}",c);
-		text.push(c);
-		trace!("after pushing: {}",text);
-
-		Self {
-			text,
-			span: Span::from(self.span.start, self.span.end),
-			flags: self.flags,
-		}
+impl RshTokenizer {
+	pub fn new(input: &str) -> Self {
+		let input = input.trim().to_string();
+		let char_stream = input.chars().collect::<VecDeque<char>>();
+		let tokens = vec![Tk { tk_type: TkType::SOI, wd: WordDesc::empty() }];
+		Self { input, char_stream, context: TkState::Command, tokens, span: Span::new() }
 	}
-	pub fn cat_string(&mut self, s: &str) -> Self {
-		let mut text = std::mem::take(&mut self.text);
-		text.push_str(s);
-		Self {
-			text,
-			span: Span::from(self.span.start, self.span.end + 1),
-			flags: self.flags
-		}
-	}
-	pub fn contains_flag(&self, flag: WdFlags) -> bool {
-		self.flags.contains(flag)
-	}
-
-	pub fn add_flag(&mut self, flag: WdFlags) -> Self {
-		let mut flags = self.flags;
-		flags |= flag;
-		let new = Self {
-			text: std::mem::take(&mut self.text),
-			span: self.span,
-			flags
-		};
-		trace!("added flag: {:?}, new flags {:?}",flag,new.flags);
-		new
-	}
-
-	pub fn remove_flag(&mut self, flag: WdFlags) -> Self {
-		let mut flags = self.flags;
-		flags &= !flag;
-		Self {
-			text: std::mem::take(&mut self.text),
-			span: self.span,
-			flags
-		}
-	}
-
-	pub fn toggle_flag(&mut self, flag: WdFlags) -> Self {
-		let mut flags = self.flags;
-		flags ^= flag;
-		Self {
-			text: std::mem::take(&mut self.text),
-			span: self.span,
-			flags
-		}
-	}
-	pub fn reset_flags(&mut self) -> Self {
-		Self {
-			text: std::mem::take(&mut self.text),
-			span: self.span,
-			flags: WdFlags::empty()
-		}
-	}
-	pub fn push_span(&mut self, count: usize) -> Self {
-		let text = std::mem::take(&mut self.text);
-		let span = Span::from(self.span.start,self.span.end + count);
-		let flags = self.flags;
-		Self { text, span, flags }
-	}
-	pub fn push_span_start(&mut self, count: usize) -> Self {
-		let mut span_start = self.span.start;
-		let mut span_end = self.span.end;
-		span_start += count;
-		if span_end < span_start {
-			span_end = span_start
-		}
-		let span = Span::from(span_start,span_end);
-		let flags = self.flags;
-		Self { text: std::mem::take(&mut self.text), span, flags }
-	}
-	pub fn delimit(&mut self, delim: char) -> Self {
-		let flag = match delim {
-			'{' => WdFlags::IN_BRACE,
-			'(' => WdFlags::IN_PAREN,
-			_ => unreachable!()
-		};
-		self.add_flag(flag)
-	}
-	}
-
-fn skip_whitespace(chars: &mut VecDeque<char>) {
-	while chars.front().is_some_and(|ch| ch == &' ' || ch == &'\t') {
-		chars.pop_front();
-	}
-}
-
-pub fn tokenize(state: ParseState) -> Result<ParseState,ShellError> {
-	debug!("Starting tokenization with input: {:?}", state.input);
-
-	let mut word_desc = WordDesc {
-		text: String::new(),
-		span: Span::from(0, 0),
-		flags: WdFlags::empty(),
-	};
-	let shellenv = state.shellenv;
-	let mut chars = state.input.chars().collect::<VecDeque<char>>();
-	let mut tokens: VecDeque<Tk> = VecDeque::from(vec![Tk::start_of_input()]);
-	let mut is_arg = false; // Start in "command mode" since SOI implies a command
-	let mut expect_in = false;
-
-	trace!("Initialized state: word_desc: {:?}, tokens: {:?}", word_desc, tokens);
-
-	while let Some(c) = chars.pop_front() {
-		trace!("Processing character: {:?}", c);
-		word_desc = word_desc.push_span(1);
-
-		word_desc = match c {
-			'(' if word_desc.text.is_empty() || word_desc.text == "$" => {
-				// It's a subshell (probably)
-				let mut paren_stack = VecDeque::new();
-				paren_stack.push_back(c);
-				word_desc = word_desc.add_char(c);
-				while let Some(ch) = chars.pop_front() {
-					if ch == ')' {
-						paren_stack.pop_back();
-					}
-					if ch == '(' {
-						paren_stack.push_back(ch);
-					}
-					word_desc = word_desc.add_char(ch);
-				}
-				if paren_stack.is_empty() {
-					word_desc
-				} else {
-					return Err(ShellError::from_parse("Unbalanced parenthesis in subshell", word_desc.span))
-				}
+	pub fn tokenize(&mut self) -> Result<(),ShellError> {
+		use crate::interp::token::TkState::*;
+		let mut wd = WordDesc::empty();
+		while !self.char_stream.is_empty() {
+			self.span.start = self.span.end;
+			wd = wd.set_span(self.span);
+			if self.context == DeadEnd && !matches!(self.char_stream.front().unwrap(),';' | '\n') {
+				return Err(ShellError::from_parse("Expected a semicolon or newline here", self.span))
 			}
-			_ if helper::delimited(&word_desc) => {
-				let closer = helper::get_delimiter(&word_desc);
-				let opener = match closer {
-					'}' => '{',
-					')' => '(',
-					'[' => ']',
-					_ => unreachable!()
-				};
-				if c != closer {
-					word_desc.add_char(c)
-				} else if c == '\\' {
-					word_desc = word_desc.add_char(c);
-					if let Some(ch) = chars.pop_front() {
-						trace!("Adding escaped character: {:?}", ch);
-						word_desc.add_char(ch)
+			match self.char_stream.front().unwrap() {
+				'\\' => {
+					let escape = self.char_stream.pop_front().unwrap();
+					wd = wd.add_char(escape);
+					let escaped_char = self.char_stream.pop_front();
+					if let Some(ch) = escaped_char {
+						wd = wd.add_char(ch)
+					}
+				}
+				';' | '\n' => {
+					self.char_stream.pop_front();
+					self.tokens.push(Tk::cmdsep(&wd,self.span.end));
+					self.context = Command;
+					continue
+				}
+				'#' => self.context = Comment,
+				'(' if self.context == Command => self.context = Subshell,
+				'{' if self.context == FuncDef => self.context = FuncBody,
+				'\'' if matches!(self.context, Command | Arg) => self.context = SQuote,
+				'"' if matches!(self.context, Command | Arg) => self.context = DQuote,
+				'$' if matches!(self.context, Command | Arg) => {
+					let dollar = self.char_stream.pop_front().unwrap();
+					if self.char_stream.front().is_some_and(|ch| *ch == '(') {
+						self.context = CommandSub
+					}
+					self.char_stream.push_front(dollar);
+				}
+				' ' | '\t' => {
+					self.char_stream.pop_front();
+					continue
+				}
+				_ => { /* Do nothing */ }
+			}
+			match self.context {
+				Command => self.command_context(take(&mut wd)),
+				Arg => self.arg_context(take(&mut wd)),
+				DQuote | SQuote => self.string_context(take(&mut wd)),
+				VarDec => self.vardec_context(take(&mut wd))?,
+				SingleVarDec => self.vardec_context(take(&mut wd))?,
+				ArrDec => self.arrdec_context(take(&mut wd))?,
+				Subshell | CommandSub => self.subshell_context(take(&mut wd)),
+				FuncBody => self.func_context(take(&mut wd)),
+				Case => self.case_context(take(&mut wd))?,
+				Comment => {
+					while self.char_stream.front().is_some_and(|ch| *ch != '\n') {
+						self.char_stream.pop_front();
+					}
+					self.char_stream.pop_front(); // Consume the newline too
+					self.context = Command
+				}
+				_ => unreachable!()
+			}
+		}
+		self.tokens.push(Tk::end_of_input(self.input.len()));
+		self.clean_tokens();
+		Ok(())
+	}
+	fn command_context(&mut self, mut wd: WordDesc) {
+		use crate::interp::token::TkState::*;
+		wd = self.complete_word(wd);
+		if wd.text.ends_with("()") {
+			wd.text = wd.text.strip_suffix("()").unwrap().to_string();
+			self.tokens.push(Tk { tk_type: TkType::FuncDef, wd });
+			self.context = FuncDef;
+		} else if KEYWORDS.contains(&wd.text.as_str()) {
+			match wd.text.as_str() {
+				"then" | "if" | "elif" | "else" | "do" | "while" | "until" => self.context = Command,
+				"for" => self.context = VarDec,
+				"case" => self.context = Case,
+				"select" => self.context = Select,
+				_ => self.context = DeadEnd
+			}
+			match wd.text.as_str() {
+				"if" => self.tokens.push(Tk { tk_type: TkType::If, wd }),
+				"then" => self.tokens.push(Tk { tk_type: TkType::Then, wd }),
+				"elif" => self.tokens.push(Tk { tk_type: TkType::Elif, wd }),
+				"else" => self.tokens.push(Tk { tk_type: TkType::Else, wd }),
+				"fi" => self.tokens.push(Tk { tk_type: TkType::Fi, wd }),
+				"for" => self.tokens.push(Tk { tk_type: TkType::For, wd }),
+				"do" => self.tokens.push(Tk { tk_type: TkType::Do, wd }),
+				"done" => self.tokens.push(Tk { tk_type: TkType::Done, wd }),
+				"while" => self.tokens.push(Tk { tk_type: TkType::While, wd }),
+				"until" => self.tokens.push(Tk { tk_type: TkType::Until, wd }),
+				"case" => self.tokens.push(Tk { tk_type: TkType::Case, wd }),
+				"select" => self.tokens.push(Tk { tk_type: TkType::Select, wd }),
+				_ => unreachable!("text: {}", wd.text)
+			}
+		} else if matches!(wd.text.as_str(), ";" | "\n") || self.char_stream.is_empty() {
+			let flags = match self.context {
+				Arg => WdFlags::IS_ARG,
+				Command => {
+					if BUILTINS.contains(&wd.text.as_str()) {
+						WdFlags::BUILTIN
 					} else {
-						trace!("No character after escape, returning unchanged word_desc");
-						word_desc
+						WdFlags::empty()
 					}
-				} else {
-					trace!("Finalizing delimited word");
-					if is_arg {
-						trace!("Current word is a command; resetting IS_ARG flag");
-						word_desc = word_desc.add_flag(WdFlags::IS_ARG);
-					}
-					trace!("adding character: {}",c);
-					trace!("current text: {}",word_desc.text);
-					word_desc = word_desc.add_char(c);
-					trace!("text after adding: {}",word_desc.text);
-					if word_desc.contains_flag(WdFlags::IN_BRACE) {
-						word_desc.remove_flag(WdFlags::IN_BRACE)
-					} else if word_desc.contains_flag(WdFlags::IN_PAREN) {
-						word_desc.remove_flag(WdFlags::IN_PAREN)
+				}
+				_ => unreachable!()
+			};
+			self.tokens.push(Tk { tk_type: TkType::Ident, wd: wd.reset_flags().add_flag(flags) });
+			self.context = Command;
+		} else {
+			let flags = match self.context {
+				Arg => WdFlags::IS_ARG,
+				Command => {
+					if BUILTINS.contains(&wd.text.as_str()) {
+						WdFlags::BUILTIN
 					} else {
-						word_desc
+						WdFlags::empty()
 					}
 				}
+				_ => unreachable!()
+			};
+			if wd.text.has_unescaped("=") {
+				self.tokens.push(Tk { tk_type: TkType::Assignment, wd });
+				self.context = Arg
+			} else {
+				self.tokens.push(Tk { tk_type: TkType::Ident, wd: wd.reset_flags().add_flag(flags) });
+				self.context = Arg
 			}
-			'\\' => {
-				trace!("Escape character found");
-				let mut word_desc = word_desc.add_char(c);
-				if let Some(next_c) = chars.pop_front() {
-					word_desc.add_char(next_c)
-				} else {
-					word_desc
-				}
+		}
+	}
+	fn arg_context(&mut self, mut wd: WordDesc) {
+		wd = self.complete_word(wd);
+		match wd.text.as_str() {
+			"||" => {
+				self.tokens.push(Tk { tk_type: TkType::LogicOr, wd: wd.add_flag(WdFlags::IS_OP) });
 			}
-			'#' => {
-				while let Some(ch) = chars.pop_front() {
-					if matches!(ch, '\n') { break }
-				}
-				word_desc
+			"&&" => {
+				self.tokens.push(Tk { tk_type: TkType::LogicAnd, wd: wd.add_flag(WdFlags::IS_OP) });
 			}
-			// Redirection Operators
-			'>' | '<' | '&' | '0'..='9' if !word_desc.flags.intersects(WdFlags::DUB_QUOTED | WdFlags::SNG_QUOTED) && helper::check_redirection(&c,&mut chars) => {
-				trace!("Detected redirection operator");
-				word_desc = if !word_desc.text.is_empty() {
-					debug!("WORD_DESC NOT EMPTY");
-					let keywd = helper::keywd(&word_desc);
-					if is_arg {
-						trace!("Setting IS_ARG flag after whitespace");
-						word_desc = word_desc.add_flag(WdFlags::IS_ARG);
-						trace!("new flags: {:?}",word_desc.flags);
-					}
-					if expect_in {
-						word_desc = word_desc.add_flag(WdFlags::EXPECT_IN);
-					}
-					if matches!(word_desc.text.as_str(), "for" | "select" | "case") {
-						expect_in = true;
-					}
-					if matches!(word_desc.text.as_str(), "in") && expect_in {
-						expect_in = false;
-					}
-					let word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
-					if !keywd {
-						is_arg = true;
-					}
-					word_desc
-				} else {
-					word_desc.clone()
+			"|" => {
+				self.tokens.push(Tk { tk_type: TkType::Pipe, wd: wd.add_flag(WdFlags::IS_OP) });
+			}
+			"|&" => {
+				self.tokens.push(Tk { tk_type: TkType::PipeBoth, wd: wd.add_flag(WdFlags::IS_OP) });
+			}
+			"&" => {
+				self.tokens.push(Tk { tk_type: TkType::Background, wd: wd.add_flag(WdFlags::IS_OP) });
+			}
+			";" | "\n" => {
+				self.tokens.push(Tk::cmdsep(&wd,wd.span.start));
+			}
+			_ if REGEX["redirection"].is_match(&wd.text) => {
+				let fd_out;
+				let operator;
+				let fd_target;
+				if let Some(caps) = REGEX["redirection"].captures(&wd.text) {
+					fd_out = caps.name("fd_out").and_then(|fd| fd.as_str().parse::<i32>().ok()).unwrap_or(1);
+					operator = caps.name("operator").unwrap().as_str();
+					fd_target = caps.name("fd_target").and_then(|fd| fd.as_str().parse::<i32>().ok())
+				} else { unreachable!() }
+				let op = match operator {
+					">" => RedirType::Output,
+					">>" => RedirType::Append,
+					"<" => RedirType::Input,
+					"<<<" => RedirType::Herestring,
+					_ => unimplemented!()
 				};
-				word_desc = helper::process_redirection(&mut word_desc, &mut chars)?;
-				helper::finalize_word(&word_desc, &mut tokens)?
-			}
-
-			'(' if !word_desc.text.is_empty() && !word_desc.flags.intersects(WdFlags::SNG_QUOTED | WdFlags::DUB_QUOTED) && !is_arg => {
-				// This might be a function definition?
-				word_desc = word_desc.add_char(c);
-
-				if chars.front().is_none_or(|ch| ch != &')') {
-					return Err(ShellError::from_parse("This open parenthesis is misplaced", Span::from(word_desc.span.end,word_desc.span.end)))
-				}
-
-				word_desc = word_desc.add_char(chars.pop_front().unwrap());
-				// TODO: find a better way to handle whitespace here
-				word_desc = word_desc.add_char(' ');
-				skip_whitespace(&mut chars);
-
-				if chars.front().is_none_or(|ch| ch != &'{') {
-					return Err(ShellError::from_parse("Expected a body for this function definition", word_desc.span))
-				}
-				while let Some(ch) = chars.pop_front() {
-					word_desc = word_desc.add_char(ch);
-					if ch == '}' { break }
-				}
-				word_desc
-			}
-
-			'(' | '{' if !word_desc.flags.intersects(WdFlags::SNG_QUOTED | WdFlags::DUB_QUOTED) => {
-				word_desc.add_char(c).delimit(c)
-			}
-
-			_ if helper::quoted(&word_desc) => {
-				trace!("Inside quoted context: {:?}", word_desc.flags);
-				match c {
-					'"' if !word_desc.contains_flag(WdFlags::SNG_QUOTED) => {
-						trace!("Closing double quote found");
-						word_desc = word_desc.add_char(c);
-						word_desc = word_desc.remove_flag(WdFlags::DUB_QUOTED);
-						let word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
-						is_arg = true; // After a quote, it's part of a command argument
-						word_desc
-					}
-					'\'' if !word_desc.contains_flag(WdFlags::DUB_QUOTED) => {
-						trace!("Closing single quote found");
-						word_desc = word_desc.add_char(c);
-						word_desc = word_desc.remove_flag(WdFlags::SNG_QUOTED);
-						let word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
-						is_arg = true;
-						word_desc
-					}
-					'$' if !word_desc.contains_flag(WdFlags::SNG_QUOTED) => {
-						trace!("Substitution found inside double quotes");
-						word_desc.add_flag(WdFlags::IS_SUB).add_char(c)
-					}
-					_ => {
-						trace!("Adding character {:?} to quoted word", c);
-						word_desc.add_char(c)
-					}
-				}
-			}
-
-			'"' => {
-				if is_arg {
-					word_desc = word_desc.add_flag(WdFlags::IS_ARG);
-				}
-				word_desc = word_desc.add_char(c);
-				trace!("Double quote found, toggling DUB_QUOTED flag");
-				word_desc.toggle_flag(WdFlags::DUB_QUOTED)
-			}
-
-			'\'' => {
-				if is_arg {
-					word_desc = word_desc.add_flag(WdFlags::IS_ARG);
-				}
-				word_desc = word_desc.add_char(c);
-				trace!("Single quote found, toggling SNG_QUOTED flag");
-				word_desc.toggle_flag(WdFlags::SNG_QUOTED)
-			}
-
-			'&' | '|' => {
-				word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
-				word_desc = word_desc.add_char(c);
-				if let Some(ch) = chars.pop_front() {
-					trace!("checking operator");
-					trace!("found this: {}, checked against this: {}, found {}", c, ch, c == ch);
-					trace!("found this: {}, and the character is this: {}",ch,c);
-					match ch {
-						'|' | '&' if ch == c => { word_desc = word_desc.add_char(ch); }
-						'&' if c == '|' => { word_desc = word_desc.add_char(ch); }
-						_ => {
-							chars.push_front(ch);
-						}
-					}
-					trace!("returning word_desc with this word: {}", word_desc.text);
-					trace!("word_desc: {:?}", word_desc);
-				} else {
-					match c {
-						'&' => { word_desc = word_desc.add_char(c); }, // Background operator
-						_ => return Err(ShellError::from_parse(format!("Expected an expression after this operator '{}'", c).as_str(), word_desc.span))
-					}
+				let redir = Redir {
+					fd_source: fd_out,
+					op,
+					fd_target,
+					file_target: None
 				};
-				is_arg = false;
-				word_desc = word_desc.add_flag(WdFlags::IS_OP);
-				helper::finalize_word(&word_desc, &mut tokens)?
+				self.tokens.push(Tk { tk_type: TkType::Redirection { redir }, wd })
 			}
-
-			_ if helper::cmdsep(&c) => {
-				trace!("Command separator found: {:?}", c);
-				if is_arg {
-					word_desc = word_desc.add_flag(WdFlags::IS_ARG);
-				}
-				if expect_in && word_desc.text == "in" {
-					word_desc = word_desc.remove_flag(WdFlags::IS_ARG);
-					word_desc = word_desc.add_flag(WdFlags::KEYWORD);
-				}
-				word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
-				if let Some(ch) = chars.front() {
-					if *ch == ';' {
-						tokens.push_back(Tk::case_delim(word_desc.span.end + 1));
-						chars.pop_front();
-					} else {
-						tokens.push_back(Tk::cmdsep(word_desc.span.end + 1));
-					}
-				} else {
-					tokens.push_back(Tk::cmdsep(word_desc.span.end + 1));
-				}
-				is_arg = false; // Next word is part of a new command
-				word_desc
-			}
-
-			')' if !helper::delimited(&word_desc) => {
-				trace!("Case separator found: {:?}", c);
-				word_desc = word_desc.add_flag(WdFlags::IS_ARG); // Make sure this doesn't get interpreted as a keyword
-				word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
-				tokens.push_back(Tk::casesep(word_desc.span.end + 1));
-				is_arg = false; // Next word is part of a new command
-				word_desc
-			}
-
-			_ if helper::wspace(&c) => {
-				trace!("Whitespace found: {:?}", c);
-				trace!("is_arg: {}", is_arg);
-				if !word_desc.text.is_empty() {
-					let keywd = helper::keywd(&word_desc);
-					if is_arg {
-						trace!("Setting IS_ARG flag after whitespace");
-						word_desc = word_desc.add_flag(WdFlags::IS_ARG);
-						trace!("new flags: {:?}",word_desc.flags);
-					}
-					if expect_in {
-						word_desc = word_desc.add_flag(WdFlags::EXPECT_IN);
-					}
-					if matches!(word_desc.text.as_str(), "for" | "select" | "case") {
-						expect_in = true;
-					}
-					if matches!(word_desc.text.as_str(), "in") && expect_in {
-						expect_in = false;
-					}
-					let word_desc = helper::finalize_word(&word_desc, &mut tokens)?;
-					if !keywd {
-						is_arg = true;
-					}
-					word_desc
-				} else {
-					word_desc.push_span_start(1)
-				}
+			_ if wd.text.has_unescaped("=") => {
+				self.tokens.push(Tk { tk_type: TkType::Assignment, wd });
 			}
 			_ => {
-				trace!("Default case: adding character {:?}", c);
-				let word_desc = word_desc.add_char(c);
-				trace!("Word state: {}", word_desc.text);
-				word_desc
+				self.tokens.push(Tk { tk_type: TkType::Ident, wd: wd.add_flag(WdFlags::IS_ARG) });
 			}
+		}
+	}
+	fn string_context(&mut self, mut wd: WordDesc) {
+		// Pop the opening quote
+		self.char_stream.pop_front();
+		while let Some(ch) = self.char_stream.pop_front() {
+			wd.push_span(1);
+			match ch {
+				'\\' => {
+					wd = wd.add_char(ch);
+					let next_char = self.char_stream.pop_front();
+					if let Some(ch) = next_char {
+						wd = wd.add_char(ch)
+					}
+				}
+				'"' if self.context == TkState::DQuote => {
+					self.context = TkState::Arg;
+					break
+				}
+				'\'' if self.context == TkState::SQuote => {
+					self.context = TkState::Arg;
+					break
+				}
+				_ => {
+					wd = wd.add_char(ch)
+				}
+			}
+		}
+		self.span = wd.span;
+		self.tokens.push(Tk { tk_type: TkType::String, wd })
+	}
+	fn vardec_context(&mut self, mut wd: WordDesc) -> Result<(),ShellError> {
+		let mut found = false;
+		loop {
+			let span = wd.span;
+			if self.char_stream.is_empty() {
+				return Err(ShellError::from_parse("Did not find an `in` keyword for this statement", span))
+			}
+			wd = self.complete_word(wd);
+			match wd.text.as_str() {
+				"in" => {
+					if !found {
+						return Err(ShellError::from_parse("Did not find a variable for this statement", wd.span))
+					}
+					self.tokens.push(Tk { tk_type: TkType::In, wd });
+					break
+				}
+				_ => {
+					if self.context == TkState::SingleVarDec && found {
+						return Err(ShellError::from_parse(format!("Only expected one variable in this statement, found: {}",wd.text).as_str(), wd.span))
+					}
+					found = true;
+					self.tokens.push(Tk { tk_type: TkType::Ident, wd: take(&mut wd) });
+					wd = wd.set_span(span);
+				}
+			}
+		}
+		self.context = TkState::ArrDec;
+		Ok(())
+	}
+	fn arrdec_context(&mut self, mut wd: WordDesc) -> Result<(),ShellError> {
+		let mut found = false;
+		while self.char_stream.front().is_some_and(|ch| !matches!(ch, ';' | '\n')) {
+			found = true;
+			wd = self.complete_word(wd);
+			self.span = wd.span;
+			self.tokens.push(Tk { tk_type: TkType::Ident, wd: take(&mut wd) });
+			wd = wd.set_span(self.span)
+		}
+		if self.char_stream.front().is_some_and(|ch| matches!(ch, ';' | '\n')) {
+			if !found {
+				return Err(ShellError::from_parse("Did not find any array elements for this statement", wd.span))
+			}
+			self.char_stream.pop_front();
+			self.tokens.push(Tk::cmdsep(&wd,self.span.end + 1))
+		}
+		self.context = TkState::Command;
+		Ok(())
+	}
+	fn subshell_context(&mut self, mut wd: WordDesc) {
+		self.char_stream.pop_front();
+		if self.context == TkState::CommandSub { self.char_stream.pop_front(); }
+		let mut paren_stack = vec!['('];
+		while let Some(ch) = self.char_stream.pop_front() {
+			wd.push_span(1);
+			match ch {
+				'(' => {
+					paren_stack.push(ch);
+					wd = wd.add_char(ch)
+				}
+				')' => {
+					paren_stack.pop();
+					if paren_stack.is_empty() {
+						break
+					}
+					wd = wd.add_char(ch);
+				}
+				_ => {
+					wd = wd.add_char(ch)
+				}
+			}
+		}
+		self.span = wd.span;
+		let tk = match self.context {
+			TkState::Subshell => {
+				Tk {
+					tk_type: TkType::Subshell,
+					wd
+				}
+			}
+			TkState::CommandSub => {
+				Tk {
+					tk_type: TkType::CommandSub,
+					wd
+				}
+			}
+			_ => unreachable!()
 		};
+		self.tokens.push(tk);
+		self.context = TkState::Arg;
 	}
-
-	// Finalize any remaining word
-	if !word_desc.text.is_empty() {
-		trace!("finalizing word: {:?}", word_desc);
-		if helper::delimited(&word_desc) {
-			return Err(ShellError::from_parse("unclosed delimiter".into(), word_desc.span))
+	fn func_context(&mut self, mut wd: WordDesc) {
+		self.char_stream.pop_front();
+		if self.context == TkState::CommandSub { self.char_stream.pop_front(); }
+		let mut brace_stack = vec!['{'];
+		while let Some(ch) = self.char_stream.pop_front() {
+			wd.push_span(1);
+			match ch {
+				'{' => {
+					brace_stack.push(ch);
+					wd = wd.add_char(ch)
+				}
+				'}' => {
+					brace_stack.pop();
+					if brace_stack.is_empty() {
+						break
+					}
+					wd = wd.add_char(ch);
+				}
+				_ => {
+					wd = wd.add_char(ch)
+				}
+			}
 		}
-		if helper::quoted(&word_desc) {
-			return Err(ShellError::from_parse("unclosed quotation".into(), word_desc.span))
-		}
-		if is_arg {
-			word_desc = word_desc.add_flag(WdFlags::IS_ARG);
-		}
-		helper::finalize_word(&word_desc, &mut tokens)?;
+		self.span = wd.span;
+		wd.text = wd.text.trim().to_string();
+		self.tokens.push(Tk { tk_type: TkType::FuncBody, wd })
 	}
+	fn case_context(&mut self, mut wd: WordDesc) -> Result<(), ShellError> {
+		use crate::interp::token::TkState::*;
+		let span = wd.span;
+		self.context = SingleVarDec;
+		self.vardec_context(take(&mut wd))?;
+		if self.char_stream.front().is_some_and(|ch| matches!(*ch, ';' | '\n')) {
+			self.char_stream.pop_front();
+			self.tokens.push(Tk::cmdsep(&wd,span.end + 1));
+		}
+		while !self.char_stream.is_empty() {
+			// Get pattern
+			let mut pat = String::new();
+			while let Some(ch) = self.char_stream.pop_front() {
+				wd.push_span(1);
+				if ch == ')' { break }
+				pat.push(ch);
+			}
+			wd.text = pat;
+			if wd.text == "esac" {
+				self.tokens.push(Tk { tk_type: TkType::Esac, wd: take(&mut wd) });
+				break
+			}
+			let span = wd.span;
+			self.tokens.push(Tk { tk_type: TkType::CasePat, wd: take(&mut wd) });
 
-	tokens.push_back(Tk::end_of_input(state.input.len()));
-	trace!("Tokenization complete. Tks: {:?}", tokens);
-
-	Ok(ParseState {
-		input: state.input,
-		shellenv: state.shellenv,
-		tokens,
-		ast: state.ast,
-	})
+			// Get body
+			let mut body = String::new();
+			let mut prev_char = None;
+			while let Some(ch) = self.char_stream.pop_front() {
+				if ch == ';' && prev_char == Some(';') {
+					break
+				}
+				prev_char = Some(ch);
+				body.push(ch);
+			}
+			let mut body_tokenizer = RshTokenizer::new(&body);
+			body_tokenizer.tokenize()?;
+			let len = body_tokenizer.tokens.len();
+			let body_tokens = Vec::from(&body_tokenizer.tokens[1..len-1]); // Strip SOI/EOI tokens
+			self.tokens.extend(body_tokens);
+			wd = wd.set_span(span);
+		}
+		self.context = DeadEnd;
+		Ok(())
+	}
+	fn complete_word(&mut self, mut wd: WordDesc) -> WordDesc {
+			let mut dub_quote = false;
+			let mut sng_quote = false;
+			while let Some(ch) = self.char_stream.pop_front() {
+					if matches!(ch, '\'') && !dub_quote {
+							// Single quote handling
+							sng_quote = !sng_quote;
+							wd.push_span(1);
+							wd = wd.add_char(ch);
+					} else if matches!(ch, '"') && !sng_quote {
+							// Double quote handling
+							dub_quote = !dub_quote;
+							wd.push_span(1);
+							wd = wd.add_char(ch);
+					} else if dub_quote || sng_quote {
+							// Inside a quoted string
+							wd.push_span(1);
+							wd = wd.add_char(ch);
+					} else if !matches!(ch, ' ' | '\t' | '\n' | ';') {
+							// Regular character
+							wd.push_span(1);
+							wd = wd.add_char(ch);
+					} else if matches!(ch, '\n' | ';') {
+							// Preserve cmdsep for tokenizing
+							self.char_stream.push_front(ch);
+							self.span = wd.span;
+							break;
+					} else {
+							// Whitespace handling
+							self.char_stream.push_front(ch);
+							let mut next_span_start = wd.span.end;
+							while self.char_stream.front().is_some_and(|c| matches!(c, ' ' | '\t')) {
+									next_span_start += 1;
+									self.char_stream.pop_front();
+							}
+							self.span = Span::from(next_span_start, next_span_start);
+							break;
+					}
+			}
+			wd
+	}
+	fn clean_tokens(&mut self) {
+		let mut buffer = VecDeque::new();
+		let mut tokens = VecDeque::from(take(&mut self.tokens));
+		while let Some(token) = tokens.pop_front() {
+			if matches!(token.tk_type, TkType::SOI | TkType::EOI | TkType::Cmdsep) || !token.text().is_empty() {
+				buffer.push_back(token);
+			}
+		}
+		self.tokens.extend(buffer.drain(..));
+	}
 }

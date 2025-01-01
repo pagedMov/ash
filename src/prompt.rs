@@ -1,16 +1,10 @@
-use crate::comp::{self, RshHelper};
+use crate::comp::RshHelper;
 use crate::event::Signals;
-use crate::prompt::rustyline::Context;
-use im::HashSet;
-use rustyline::completion::Candidate;
-use rustyline::history::FileHistory;
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::env;
 
 use tokio::sync::mpsc;
 use log::info;
-use rustyline::{self, completion::{Completer, FilenameCompleter}, config::Configurer, error::ReadlineError, history::{DefaultHistory, History}, ColorMode, Config, EditMode, Editor, Helper, Highlighter, Hinter, Validator};
+use rustyline::{self, config::Configurer, error::ReadlineError, history::{DefaultHistory, History}, ColorMode, Config, EditMode, Editor};
 
 use crate::{event::ShellEvent, shellenv::ShellEnv};
 use crate::interp::parse::{descend, NdType};

@@ -1,11 +1,10 @@
 use crossterm::{
-	cursor::{MoveTo, RestorePosition, SavePosition, Show}, execute, style::Print, terminal::{disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen}
+	cursor::{MoveTo, RestorePosition, Show}, execute, style::Print, terminal::{disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen}
 };
-use lazy_static::lazy_static;
 use log::info;
 use rustyline::{completion::{Candidate, Completer, FilenameCompleter}, error::ReadlineError, history::{FileHistory, History}, Context, Helper, Highlighter, Hinter, Validator};
 use skim::{prelude::{SkimItemReader, SkimOptionsBuilder}, Skim};
-use std::{collections::HashSet, env, io::{self,stdout, Write}, path::PathBuf, sync::{Arc, Mutex}};
+use std::{collections::HashSet, env, io::stdout, path::PathBuf};
 
 use crate::{interp::expand, shellenv::ShellEnv};
 
