@@ -13,11 +13,11 @@ use std::sync::{Arc, Mutex};
 use log::{info,trace};
 use glob::MatchOptions;
 
-use crate::builtin::{alias, cd, echo, export, pwd, set_or_unset, source, test};
+use crate::builtin::{alias, cd, echo, export, jobs, pwd, set_or_unset, source, test};
 use crate::event::ShellError;
 use crate::interp::helper::{self, VecDequeExtension};
 use crate::interp::{expand, parse};
-use crate::interp::token::{Redir, RedirType, Tk, WdFlags};
+use crate::interp::token::{Redir, RedirType, Tk, TkType, WdFlags};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::shellenv::ShellEnv;
 
@@ -668,6 +668,7 @@ impl<'a> NodeWalker<'a> {
 		match argv.first().unwrap().text() {
 			"echo" => echo(self.shellenv, node, io,in_pipe),
 			"set" => set_or_unset(self.shellenv, node, true),
+			"jobs" => jobs(self.shellenv, node, io, in_pipe),
 			"unset" => set_or_unset(self.shellenv, node, false),
 			"source" => source(self.shellenv, node),
 			"cd" => cd(self.shellenv, node),
@@ -846,12 +847,18 @@ impl<'a> NodeWalker<'a> {
 			unreachable!(); // Only call handle_pipeline with pipeline nodes
 		}
 
+		// Here we are checking to see if the final token of the final command is a background '&' operator
+		let background = flattened_pipeline.back()
+			.is_some_and(|node| node.flags.contains(NdFlags::BACKGROUND));
+
 		let span = node.span();
 
 		// Step 2: Iterate through the flattened pipeline
 		let mut prev_read_pipe: Option<RustFd> = None; // Previous read pipe
 		let mut last_status = Ok(RshWaitStatus::new());
 		let mut pgid: Option<Pid> = None;
+		let mut cmds = vec![];
+		let mut pids = vec![];
 
 		while let Some(command) = flattened_pipeline.pop_front() {
 			// Create a new pipe for this command, except for the last one
@@ -861,6 +868,11 @@ impl<'a> NodeWalker<'a> {
 			} else {
 				(None, None) // Last command doesn't need a pipe
 			};
+			// Used as the list of commands in the job control
+			// e.g. "echo, cat, sed, awk, grep"
+			let cmd_name = command.get_argv()?.first().unwrap().text().to_string();
+			cmds.push(cmd_name);
+
 
 			// Set up IO for the current command
 			let current_io = ProcIO::from(
@@ -885,6 +897,7 @@ impl<'a> NodeWalker<'a> {
 				Ok(ForkResult::Parent { child }) => {
 					// In the parent process
 
+					pids.push(child);
 					if let Some(mut read_pipe) = prev_read_pipe {
 						read_pipe.close()?; // Close the previous read pipe in the parent
 					}
@@ -902,6 +915,10 @@ impl<'a> NodeWalker<'a> {
 
 					// Wait for the child process if it's the last command
 					if flattened_pipeline.is_empty() {
+						if background {
+							self.shellenv.new_job(pids,cmds,pgid.unwrap());
+							return last_status;
+						}
 						last_status = match waitpid(child, None) {
 							Ok(WaitStatus::Exited(_, code)) => match code {
 								0 => Ok(RshWaitStatus::Success { span }),
@@ -1024,7 +1041,7 @@ impl<'a> NodeWalker<'a> {
 						// Wait for the child process to finish
 						setpgid(child, child).map_err(|_| ShellError::from_io())?;
 						if node.flags.contains(NdFlags::BACKGROUND) {
-							self.shellenv.new_job(child, &cmd);
+							self.shellenv.new_job(vec![child], vec![cmd], child);
 							Ok(RshWaitStatus::Success { span })
 						} else {
 							match waitpid(child, None) {

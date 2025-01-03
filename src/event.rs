@@ -378,7 +378,7 @@ impl<'a> EventLoop<'a> {
 		}
 		Ok(code)
 	}
-	async fn handle_signal(&self, signal: Signals) -> Result<(), ShellError> {
+	async fn handle_signal(&mut self, signal: Signals) -> Result<(), ShellError> {
 		match signal {
 			Signals::SIGQUIT => {
 				std::process::exit(0);
@@ -406,9 +406,10 @@ impl<'a> EventLoop<'a> {
 					Err(_) => { /* No child processes found, so */ return Ok(()) },
 					_ => unimplemented!()
 				};
-				let jobs = self.shellenv.jobs.clone();
-				for (_job_id,mut job) in jobs {
-					if job.pid() == job_pid {
+				let jobs = self.shellenv.borrow_jobs();
+				for job in jobs {
+					let job = job.1;
+					if *job.pgid() == job_pid {
 						println!();
 						job.status(status);
 						println!("{}",job);

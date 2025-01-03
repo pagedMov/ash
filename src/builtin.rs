@@ -17,7 +17,7 @@ use crate::execute::{ProcIO, RshWaitStatus, RustFd};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType};
-use crate::shellenv::{EnvFlags, ShellEnv};
+use crate::shellenv::{EnvFlags, JobFlags, ShellEnv};
 use crate::event::ShellError;
 
 pub const BUILTINS: [&str; 14] = [
@@ -583,6 +583,33 @@ pub fn export(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus, Shel
 	} else { unreachable!() }
 }
 
+pub fn jobs(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus,ShellError> {
+	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
+	argv.pop_front();
+	let mut flags = JobFlags::empty();
+	while let Some(arg) = argv.pop_front() {
+		let mut chars = arg.text().chars().collect::<VecDeque<char>>();
+		if chars.front().is_none_or(|ch| *ch != '-') {
+			return Err(ShellError::from_execf("Invalid flag in `jobs` invocation", 1, node.span()))
+		}
+		chars.pop_front(); // Ignore the leading hyphen
+		while let Some(ch) = chars.pop_front() {
+			let flag = match ch {
+				'l' => JobFlags::LONG,
+				'p' => JobFlags::PIDS_ONLY,
+				'n' => JobFlags::NEW_ONLY,
+				'r' => JobFlags::RUNNING,
+				's' => JobFlags::STOPPED,
+				_ => return Err(ShellError::from_execf("Invalid flag in `jobs` invocation", 1, node.span()))
+			};
+			flags |= flag;
+		}
+	}
+	shellenv.job_table.print_jobs(&flags);
+
+	Ok(RshWaitStatus::Success { span: node.span() })
+}
+
 pub fn echo(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus, ShellError> {
 	let mut flags = EchoFlags::empty();
 	let span = node.span();
@@ -668,7 +695,7 @@ pub fn echo(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) 
 			io.restore_fildescs()?;
 			if node.flags.contains(NdFlags::BACKGROUND) {
 				setpgid(child, child).map_err(|_| ShellError::from_io())?;
-				shellenv.new_job(child, "echo");
+				shellenv.new_job(vec![child], vec!["echo".into()], child);
 				Ok(RshWaitStatus::Success { span })
 			} else {
 				match waitpid(child, None) {

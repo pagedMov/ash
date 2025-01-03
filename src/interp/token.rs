@@ -8,6 +8,7 @@ use std::io;
 use std::mem::take;
 
 use crate::interp::parse::Span;
+use crate::event::ShellError;
 
 use super::helper::StrExtension;
 
@@ -31,61 +32,6 @@ pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
 	regex.insert("ident",Regex::new(r"^[\x20-\x7E]*$").unwrap());
 	regex
 });
-
-#[derive(Debug, PartialEq)]
-pub enum ShellError {
-	CommandNotFound(String, Span),
-	InvalidSyntax(String, Span),
-	ParsingError(String, Span),
-	ExecFailed(String, i32, Span),
-	IoError(String),
-	InternalError(String),
-}
-
-impl ShellError {
-	pub fn from_io() -> Self {
-		let err = io::Error::last_os_error();
-		ShellError::IoError(err.to_string())
-	}
-	pub fn from_execf(msg: &str, code: i32, span: Span) -> Self {
-		ShellError::ExecFailed(msg.to_string(), code, span)
-	}
-	pub fn from_parse(msg: &str, span: Span) -> Self {
-		ShellError::ParsingError(msg.to_string(), span)
-	}
-	pub fn from_syntax(msg: &str, span: Span) -> Self {
-		ShellError::InvalidSyntax(msg.to_string(), span)
-	}
-	pub fn from_no_cmd(msg: &str, span: Span) -> Self {
-		ShellError::CommandNotFound(msg.to_string(), span)
-	}
-	pub fn from_internal(msg: &str) -> Self {
-		ShellError::InternalError(msg.to_string())
-	}
-	// This is used in the context of functions
-	// To prevent the error from trying to use the span
-	// Of the offending command that is inside of the function
-	pub fn overwrite_span(&self, new_span: Span) -> Self {
-		match self {
-			ShellError::IoError(err) => ShellError::IoError(err.to_string()),
-			ShellError::CommandNotFound(msg,_) => ShellError::CommandNotFound(msg.to_string(),new_span),
-			ShellError::InvalidSyntax(msg,_) => ShellError::InvalidSyntax(msg.to_string(),new_span),
-			ShellError::ParsingError(msg,_) => ShellError::ParsingError(msg.to_string(),new_span),
-			ShellError::ExecFailed(msg,code,_) => ShellError::ExecFailed(msg.to_string(),*code,new_span),
-			ShellError::InternalError(msg) => ShellError::InternalError(msg.to_string()),
-		}
-	}
-	pub fn is_fatal(&self) -> bool {
-		match self {
-			ShellError::IoError(..) => true,
-			ShellError::CommandNotFound(..) => false,
-			ShellError::ExecFailed(..) => false,
-			ShellError::ParsingError(..) => false,
-			ShellError::InvalidSyntax(..) => false,
-			ShellError::InternalError(..) => false,
-		}
-	}
-}
 
 pub const KEYWORDS: [&str;14] = [
 	"if", "while", "until", "for", "case", "select",
