@@ -984,81 +984,88 @@ impl<'a> NodeWalker<'a> {
 			.iter()
 			.map(|arg| CString::new(arg.text()).unwrap())
 			.collect::<Vec<CString>>();
-			let redirs = node.get_redirs()?;
-			let span = node.span();
-			// Let's expand aliases here
-			if let NdType::Command { ref argv } = node.nd_type {
-				// Check for autocd
-				if self.shellenv.shopts.get("autocd").is_some_and(|opt| *opt > 0) && argv.len() == 1 {
-					let path_candidate = argv.front().unwrap();
-					let is_relative_path = path_candidate.text().starts_with('.');
-					let contains_slash = path_candidate.text().contains('/');
-					let path_exists = Path::new(path_candidate.text()).is_dir();
+		let redirs = node.get_redirs()?;
+		let span = node.span();
+		// Let's expand aliases here
+		if let NdType::Command { ref argv } = node.nd_type {
+			// If the shellenv is allowing aliases, and the token is not from an expanded alias
+			if !argv.front().unwrap().flags().contains(WdFlags::FROM_ALIAS) {
+				let node = expand::expand_alias(self.shellenv, node.clone())?;
 
-					if (is_relative_path || contains_slash) && path_exists {
-						let cd_token = Tk::new("cd".into(),span,path_candidate.flags());
-						let mut autocd_argv = argv.clone();
-						autocd_argv.push_front(cd_token);
-						let autocd = Node {
-							nd_type: NdType::Builtin { argv: autocd_argv },
-							span,
-							flags: node.flags,
-							redirs: node.redirs
-						};
-						return self.walk(autocd, io, false)
-
-					}
+				if !matches!(node.nd_type, NdType::Command {..}) {
+					// If the resulting alias expansion does not return this node
+					// then walk the resulting sub-tree
+					return self.walk_root(node, None, io,in_pipe)
 				}
 			}
-			io.backup_fildescs()?; // Save original stin, stdout, and stderr
-			io.do_plumbing()?; // Route pipe logic using fildescs
+			if self.shellenv.shopts.get("autocd").is_some_and(|opt| *opt > 0) && argv.len() == 1 {
+				let path_candidate = argv.front().unwrap();
+				let is_relative_path = path_candidate.text().starts_with('.');
+				let contains_slash = path_candidate.text().contains('/');
+				let path_exists = Path::new(path_candidate.text()).is_dir();
+
+				if (is_relative_path || contains_slash) && path_exists {
+					let cd_token = Tk::new("cd".into(),span,path_candidate.flags());
+					let mut autocd_argv = argv.clone();
+					autocd_argv.push_front(cd_token);
+					let autocd = Node {
+						nd_type: NdType::Builtin { argv: autocd_argv },
+						span,
+						flags: node.flags,
+						redirs: node.redirs
+					};
+					return self.walk(autocd, io,in_pipe)
+
+				}
+			}
+		}
+		io.backup_fildescs()?; // Save original stin, stdout, and stderr
+		io.do_plumbing()?; // Route pipe logic using fildescs
 
 
-			let cmd = argv[0].clone().into_string().unwrap();
-			let command = &argv[0];
-			let envp = self.shellenv.get_cvars();
+		let cmd = Some(argv[0].clone().into_string().unwrap());
+		let command = &argv[0];
+		let envp = self.shellenv.get_cvars();
+
+		let child_instruction = || -> Result<(),ShellError> {
+			// Handle redirections
 			let mut open_fds: VecDeque<RustFd> = VecDeque::new();
 			if !redirs.is_empty() {
-				open_fds.extend(self.handle_redirs(redirs.into())?);
+				open_fds.extend(self.handle_redirs(redirs.clone().into())?);
 			}
 
-			// Call execvpe in this process if we are in a child spawned by handle_pipeline
-			if in_pipe {
-				let Err(_) = execvpe(command, &argv, &envp);
-				std::process::exit(127);
-			} else {
-				match unsafe { fork() } {
-					Ok(ForkResult::Child) => {
-						// Handle redirections
-
-						// Execute the command
-						let Err(_) = execvpe(command, &argv, &envp);
-						std::process::exit(127);
-					}
-					Ok(ForkResult::Parent { child }) => {
-						io.restore_fildescs()?;
-
-						// Wait for the child process to finish
-						setpgid(child, child).map_err(|_| ShellError::from_io())?;
-						if node.flags.contains(NdFlags::BACKGROUND) {
-							self.shellenv.new_job(vec![child], vec![cmd], child);
-							Ok(RshWaitStatus::Success { span })
-						} else {
-							match waitpid(child, None) {
-								Ok(WaitStatus::Exited(_, code)) => match code {
-									0 => Ok(RshWaitStatus::Success { span }),
-									_ => Ok(RshWaitStatus::Fail { code, cmd: Some(cmd), span }),
-								},
-								Ok(WaitStatus::Signaled(_,signal,_)) => {
-									Ok(RshWaitStatus::Fail { code: 128 + signal as i32, cmd: Some(cmd), span })
-								}
-								Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
-								Err(err) => Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),
-							}
-						}
-					}
-					Err(_) => Err(ShellError::from_execf("Fork failed", 1, span)),
+			// Execute the command
+			let Err(_) = execvpe(command, &argv, &envp);
+			std::process::exit(127);
+		};
+		if in_pipe {
+			child_instruction()?; // Call the child instruction closure in this process
+														// Because we are already in a forked process
+			unreachable!()
+		} else {
+			match unsafe { fork() } {
+				Ok(ForkResult::Child) => {
+					child_instruction()?;
+					unreachable!()
 				}
+				Ok(ForkResult::Parent { child }) => {
+					io.restore_fildescs()?;
+
+					// Wait for the child process to finish
+					match waitpid(child, None) {
+						Ok(WaitStatus::Exited(_, code)) => match code {
+							0 => Ok(RshWaitStatus::Success { span }),
+							_ => Ok(RshWaitStatus::Fail { code, cmd, span }),
+						},
+						Ok(WaitStatus::Signaled(_,signal,_)) => {
+							Ok(RshWaitStatus::Fail { code: 128 + signal as i32, cmd, span })
+						}
+						Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
+						Err(err) => Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),
+					}
+				}
+				Err(_) => Err(ShellError::from_execf("Fork failed", 1, span)),
 			}
+		}
 	}
 }
