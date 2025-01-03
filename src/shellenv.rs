@@ -1,5 +1,7 @@
 use std::env;
-use nix::unistd::{gethostname, User};
+use std::fmt::Display;
+use nix::sys::signal::{self, Signal};
+use nix::unistd::{gethostname, Pid, User};
 use std::collections::{HashSet,HashMap};
 use std::ffi::CString;
 use std::fs::File;
@@ -16,6 +18,41 @@ use crate::execute::{NodeWalker, RshWaitStatus};
 use crate::interp::expand::expand_var;
 use crate::interp::helper;
 use crate::interp::parse::{descend, Node, Span};
+
+#[derive(Debug,Clone)]
+pub struct Job {
+	job_id: i32,
+	pid: Pid,
+	command: String,
+	status: RshWaitStatus
+}
+
+impl Job {
+	pub fn new(job_id: i32, pid: Pid, command: String) -> Self {
+		Self { job_id, pid, command, status: RshWaitStatus::Running }
+	}
+	pub fn status(&mut self, new_stat: RshWaitStatus) {
+		self.status = new_stat;
+	}
+	pub fn pid(&self) -> Pid {
+		self.pid
+	}
+	pub fn command(&self) -> String {
+		self.command.clone()
+	}
+	pub fn get_status(&self) -> RshWaitStatus {
+		self.status.clone()
+	}
+	pub fn signal_proc(&self, sig: Signal) -> Result<(),ShellError> {
+		signal::kill(self.pid, sig).map_err(|_| ShellError::from_io())
+	}
+}
+
+impl Display for Job {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+	    write!(f,"[{}] {}\t{}", self.job_id,self.status,self.command)
+	}
+}
 
 bitflags! {
 	#[derive(Debug,Copy,Clone,PartialEq)]
@@ -84,7 +121,8 @@ pub struct ShellEnv {
 	pub functions: HashMap<String, Box<Node>>,
 	pub parameters: HashMap<String, String>,
 	pub open_fds: HashSet<i32>,
-	pub last_input: Option<String>
+	pub last_input: Option<String>,
+	pub jobs: HashMap<i32,Job>
 }
 
 impl ShellEnv {
@@ -108,7 +146,8 @@ impl ShellEnv {
 			functions: HashMap::new(),
 			parameters: HashMap::new(),
 			open_fds,
-			last_input: None
+			last_input: None,
+			jobs: HashMap::new()
 		};
 		if !flags.contains(EnvFlags::NO_RC) {
 			let runtime_commands_path = &expand_var(&shellenv, "${HOME}/.rshrc".into());
@@ -123,6 +162,17 @@ impl ShellEnv {
 			}
 		}
 		shellenv
+	}
+
+	pub fn new_job(&mut self, pid: Pid, command: &str) {
+		let job_id = self.jobs.len() + 1;
+		let job = Job::new(job_id as i32,pid,command.to_string());
+		println!("{}",job);
+		self.jobs.insert(job_id as i32, job);
+	}
+
+	pub fn get_jobs(&self) -> &HashMap<i32,Job> {
+		&self.jobs
 	}
 
 	fn init_env_vars(clean: bool) -> HashMap<String,String> {

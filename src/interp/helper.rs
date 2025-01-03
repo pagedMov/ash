@@ -1,6 +1,8 @@
-use crate::interp::token::REGEX;
+use crate::{interp::token::REGEX, shellenv::ShellEnv};
 use nix::unistd::dup2;
-use std::{collections::VecDeque, fs, io, os::fd::AsRawFd};
+use std::{collections::VecDeque, env, fs::{self, metadata}, io, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::Path};
+
+use super::parse::{NdType, Node};
 
 pub trait VecExtension<T> {
 	fn extended(self, vec: Vec<T>) -> Vec<T>;
@@ -8,9 +10,9 @@ pub trait VecExtension<T> {
 
 impl<T> VecExtension<T> for Vec<T> {
 	fn extended(self, vec: Vec<T>) -> Vec<T> {
-	    let mut new_vec = self;
-			new_vec.extend(vec);
-			new_vec
+		let mut new_vec = self;
+		new_vec.extend(vec);
+		new_vec
 	}
 }
 
@@ -78,14 +80,14 @@ impl<T> VecDequeExtension<T> for VecDeque<T> {
 	/// ]));
 	/// ```
 	fn map_rotate<F>(&mut self, mut transform: F)
-	where F: FnMut(T) {
-		let len = self.len();
-		for _ in 0..len {
-			if let Some(element) = self.pop_front() {
-				transform(element);
+		where F: FnMut(T) {
+			let len = self.len();
+			for _ in 0..len {
+				if let Some(element) = self.pop_front() {
+					transform(element);
+				}
 			}
 		}
-	}
 }
 
 pub trait StrExtension {
@@ -181,34 +183,62 @@ pub fn suppress_err<F: FnOnce() -> T, T>(f: F) -> T {
 	result
 }
 
-pub fn is_brace_expansion(text: &str) -> bool {
-	if REGEX["brace_expansion"].is_match(text) &&
-	REGEX["brace_expansion"].captures(text).unwrap()[1].is_empty() {
-		let mut brace_count: i32 = 0;
-		let mut chars = text.chars();
-		while let Some(ch) = chars.next() {
-			match ch {
-				'{' => brace_count += 1,
-				'}' => {
-					brace_count -= 1;
-					if brace_count < 0 {
-						// found a closing brace before an open brace
-						return false
-					}
-				},
-				'\\' => { chars.next(); },
-				_ => { /* Do nothing */ }
+pub fn which(shellenv: &ShellEnv, command: &str) -> Option<String> {
+	if let Some(env_path) = shellenv.get_variable("PATH") {
+		for path in env::split_paths(&env_path) {
+			let full_path = path.join(command);
+			if full_path.is_file() && is_exec(&full_path) {
+				return Some(full_path.to_string_lossy().to_string())
 			}
 		}
-		brace_count == 0
-	} else {
-		false
 	}
+	None
+}
+
+pub fn is_exec(path: &Path) -> bool {
+	fs::metadata(path)
+		.map(|meta| meta.is_file() && (meta.permissions().mode() & 0o111) != 0)
+		.unwrap_or(false)
+}
+
+pub fn flatten_pipeline(left: Node, right: Node, mut flattened: VecDeque<Node>) -> VecDeque<Node> {
+	flattened.push_front(right);
+	if let NdType::Pipeline { left, right, both: _ } = left.nd_type {
+		flattened = flatten_pipeline(*left, *right, flattened);
+	} else {
+		flattened.push_front(left);
+	}
+	flattened
+}
+
+pub fn is_brace_expansion(text: &str) -> bool {
+	if REGEX["brace_expansion"].is_match(text) &&
+		REGEX["brace_expansion"].captures(text).unwrap()[1].is_empty() {
+			let mut brace_count: i32 = 0;
+			let mut chars = text.chars();
+			while let Some(ch) = chars.next() {
+				match ch {
+					'{' => brace_count += 1,
+					'}' => {
+						brace_count -= 1;
+						if brace_count < 0 {
+							// found a closing brace before an open brace
+							return false
+						}
+					},
+					'\\' => { chars.next(); },
+					_ => { /* Do nothing */ }
+				}
+			}
+			brace_count == 0
+		} else {
+			false
+		}
 }
 
 #[cfg(test)]
 mod test {
-    use super::StrExtension;
+	use super::StrExtension;
 
 	#[test]
 	fn split_last_test() {

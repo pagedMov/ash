@@ -95,19 +95,8 @@ pub const KEYWORDS: [&str;14] = [
 pub const OPENERS: [&str;6] = [
 	"if", "while", "until", "for", "case", "select",
 ];
-pub const BUILTINS: [&str; 19] = [
-	"echo", "unset", "set", "builtin", "test", "[", "shift", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node",
-	"exec", "source", "wait",
-];
-pub const FUNCTIONS: [&str; 1] = [
-	// Will replace this with an actual functions implementation later
-	// Used for now for word flags
-	"PLACEHOLDER_TEXT",
-];
-pub const ALIASES: [&str; 1] = [
-	// Will replace this with an actual aliases implementation later
-	// Used for now for word flags
-	"PLACEHOLDER_TEXT",
+pub const BUILTINS: [&str; 22] = [
+	"echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "wait",
 ];
 pub const CMDSEP: [char;2] = [
 	';', '\n'
@@ -605,6 +594,10 @@ impl RshTokenizer {
 		let tokens = vec![Tk { tk_type: TkType::SOI, wd: WordDesc::empty() }];
 		Self { input, char_stream, context: TkState::Command, tokens, span: Span::new() }
 	}
+	fn advance(&mut self) -> Option<char> {
+		self.span.end += 1;
+		self.char_stream.pop_front()
+	}
 	pub fn tokenize(&mut self) -> Result<(),ShellError> {
 		use crate::interp::token::TkState::*;
 		let mut wd = WordDesc::empty();
@@ -616,15 +609,15 @@ impl RshTokenizer {
 			}
 			match self.char_stream.front().unwrap() {
 				'\\' => {
-					let escape = self.char_stream.pop_front().unwrap();
+					let escape = self.advance().unwrap();
 					wd = wd.add_char(escape);
-					let escaped_char = self.char_stream.pop_front();
+					let escaped_char = self.advance();
 					if let Some(ch) = escaped_char {
 						wd = wd.add_char(ch)
 					}
 				}
 				';' | '\n' => {
-					self.char_stream.pop_front();
+					self.advance();
 					self.tokens.push(Tk::cmdsep(&wd,self.span.end));
 					self.context = Command;
 					continue
@@ -635,14 +628,15 @@ impl RshTokenizer {
 				'\'' if matches!(self.context, Command | Arg) => self.context = SQuote,
 				'"' if matches!(self.context, Command | Arg) => self.context = DQuote,
 				'$' if matches!(self.context, Command | Arg) => {
-					let dollar = self.char_stream.pop_front().unwrap();
+					let dollar = self.advance().unwrap();
 					if self.char_stream.front().is_some_and(|ch| *ch == '(') {
 						self.context = CommandSub
 					}
 					self.char_stream.push_front(dollar);
+					self.span.end -= 1;
 				}
 				' ' | '\t' => {
-					self.char_stream.pop_front();
+					self.advance();
 					continue
 				}
 				_ => { /* Do nothing */ }
@@ -659,9 +653,9 @@ impl RshTokenizer {
 				Case => self.case_context(take(&mut wd))?,
 				Comment => {
 					while self.char_stream.front().is_some_and(|ch| *ch != '\n') {
-						self.char_stream.pop_front();
+						self.advance();
 					}
-					self.char_stream.pop_front(); // Consume the newline too
+					self.advance(); // Consume the newline too
 					self.context = Command
 				}
 				_ => unreachable!()
@@ -713,7 +707,13 @@ impl RshTokenizer {
 				}
 				_ => unreachable!()
 			};
-			self.tokens.push(Tk { tk_type: TkType::Ident, wd: wd.reset_flags().add_flag(flags) });
+			if wd.text.has_unescaped("=") {
+				self.tokens.push(Tk { tk_type: TkType::Assignment, wd });
+				self.context = Arg
+			} else {
+				self.tokens.push(Tk { tk_type: TkType::Ident, wd: wd.reset_flags().add_flag(flags) });
+				self.context = Arg
+			}
 			self.context = Command;
 		} else {
 			let flags = match self.context {
@@ -739,26 +739,41 @@ impl RshTokenizer {
 	fn arg_context(&mut self, mut wd: WordDesc) {
 		wd = self.complete_word(wd);
 		match wd.text.as_str() {
+			"||" | "&&" | "|" | "|&" => {
+				while self.char_stream.front().is_some_and(|ch| *ch == '\n') {
+					self.advance(); // Allow line continuation
+				}
+				// Push the token
+			}
+			_ => { /* Do nothing */ }
+		}
+		match wd.text.as_str() {
 			"||" => {
 				self.tokens.push(Tk { tk_type: TkType::LogicOr, wd: wd.add_flag(WdFlags::IS_OP) });
+				self.context = TkState::Command
 			}
 			"&&" => {
 				self.tokens.push(Tk { tk_type: TkType::LogicAnd, wd: wd.add_flag(WdFlags::IS_OP) });
+				self.context = TkState::Command
 			}
 			"|" => {
 				self.tokens.push(Tk { tk_type: TkType::Pipe, wd: wd.add_flag(WdFlags::IS_OP) });
+				self.context = TkState::Command
 			}
 			"|&" => {
 				self.tokens.push(Tk { tk_type: TkType::PipeBoth, wd: wd.add_flag(WdFlags::IS_OP) });
+				self.context = TkState::Command
 			}
 			"&" => {
 				self.tokens.push(Tk { tk_type: TkType::Background, wd: wd.add_flag(WdFlags::IS_OP) });
+				self.context = TkState::Command
 			}
 			";" | "\n" => {
 				self.tokens.push(Tk::cmdsep(&wd,wd.span.start));
+				self.context = TkState::Command
 			}
 			_ if REGEX["redirection"].is_match(&wd.text) => {
-				let fd_out;
+				let mut fd_out;
 				let operator;
 				let fd_target;
 				if let Some(caps) = REGEX["redirection"].captures(&wd.text) {
@@ -773,6 +788,9 @@ impl RshTokenizer {
 					"<<<" => RedirType::Herestring,
 					_ => unimplemented!()
 				};
+				if matches!(op, RedirType::Input | RedirType::Herestring) {
+					fd_out = 0
+				}
 				let redir = Redir {
 					fd_source: fd_out,
 					op,
@@ -781,9 +799,6 @@ impl RshTokenizer {
 				};
 				self.tokens.push(Tk { tk_type: TkType::Redirection { redir }, wd })
 			}
-			_ if wd.text.has_unescaped("=") => {
-				self.tokens.push(Tk { tk_type: TkType::Assignment, wd });
-			}
 			_ => {
 				self.tokens.push(Tk { tk_type: TkType::Ident, wd: wd.add_flag(WdFlags::IS_ARG) });
 			}
@@ -791,13 +806,12 @@ impl RshTokenizer {
 	}
 	fn string_context(&mut self, mut wd: WordDesc) {
 		// Pop the opening quote
-		self.char_stream.pop_front();
-		while let Some(ch) = self.char_stream.pop_front() {
-			wd.push_span(1);
+		self.advance();
+		while let Some(ch) = self.advance() {
 			match ch {
 				'\\' => {
 					wd = wd.add_char(ch);
-					let next_char = self.char_stream.pop_front();
+					let next_char = self.advance();
 					if let Some(ch) = next_char {
 						wd = wd.add_char(ch)
 					}
@@ -815,7 +829,7 @@ impl RshTokenizer {
 				}
 			}
 		}
-		self.span = wd.span;
+		wd.span = self.span;
 		self.tokens.push(Tk { tk_type: TkType::String, wd })
 	}
 	fn vardec_context(&mut self, mut wd: WordDesc) -> Result<(),ShellError> {
@@ -852,7 +866,7 @@ impl RshTokenizer {
 		while self.char_stream.front().is_some_and(|ch| !matches!(ch, ';' | '\n')) {
 			found = true;
 			wd = self.complete_word(wd);
-			self.span = wd.span;
+			wd.span = self.span;
 			self.tokens.push(Tk { tk_type: TkType::Ident, wd: take(&mut wd) });
 			wd = wd.set_span(self.span)
 		}
@@ -860,18 +874,17 @@ impl RshTokenizer {
 			if !found {
 				return Err(ShellError::from_parse("Did not find any array elements for this statement", wd.span))
 			}
-			self.char_stream.pop_front();
+			self.advance();
 			self.tokens.push(Tk::cmdsep(&wd,self.span.end + 1))
 		}
 		self.context = TkState::Command;
 		Ok(())
 	}
 	fn subshell_context(&mut self, mut wd: WordDesc) {
-		self.char_stream.pop_front();
-		if self.context == TkState::CommandSub { self.char_stream.pop_front(); }
+		self.advance();
+		if self.context == TkState::CommandSub { self.advance(); }
 		let mut paren_stack = vec!['('];
-		while let Some(ch) = self.char_stream.pop_front() {
-			wd.push_span(1);
+		while let Some(ch) = self.advance() {
 			match ch {
 				'(' => {
 					paren_stack.push(ch);
@@ -889,7 +902,7 @@ impl RshTokenizer {
 				}
 			}
 		}
-		self.span = wd.span;
+		wd.span = self.span;
 		let tk = match self.context {
 			TkState::Subshell => {
 				Tk {
@@ -909,11 +922,10 @@ impl RshTokenizer {
 		self.context = TkState::Arg;
 	}
 	fn func_context(&mut self, mut wd: WordDesc) {
-		self.char_stream.pop_front();
-		if self.context == TkState::CommandSub { self.char_stream.pop_front(); }
+		self.advance();
+		if self.context == TkState::CommandSub { self.advance(); }
 		let mut brace_stack = vec!['{'];
-		while let Some(ch) = self.char_stream.pop_front() {
-			wd.push_span(1);
+		while let Some(ch) = self.advance() {
 			match ch {
 				'{' => {
 					brace_stack.push(ch);
@@ -931,7 +943,7 @@ impl RshTokenizer {
 				}
 			}
 		}
-		self.span = wd.span;
+		wd.span = self.span;
 		wd.text = wd.text.trim().to_string();
 		self.tokens.push(Tk { tk_type: TkType::FuncBody, wd })
 	}
@@ -941,14 +953,13 @@ impl RshTokenizer {
 		self.context = SingleVarDec;
 		self.vardec_context(take(&mut wd))?;
 		if self.char_stream.front().is_some_and(|ch| matches!(*ch, ';' | '\n')) {
-			self.char_stream.pop_front();
+			self.advance();
 			self.tokens.push(Tk::cmdsep(&wd,span.end + 1));
 		}
 		while !self.char_stream.is_empty() {
 			// Get pattern
 			let mut pat = String::new();
-			while let Some(ch) = self.char_stream.pop_front() {
-				wd.push_span(1);
+			while let Some(ch) = self.advance() {
 				if ch == ')' { break }
 				pat.push(ch);
 			}
@@ -963,7 +974,7 @@ impl RshTokenizer {
 			// Get body
 			let mut body = String::new();
 			let mut prev_char = None;
-			while let Some(ch) = self.char_stream.pop_front() {
+			while let Some(ch) = self.advance() {
 				if ch == ';' && prev_char == Some(';') {
 					break
 				}
@@ -983,39 +994,33 @@ impl RshTokenizer {
 	fn complete_word(&mut self, mut wd: WordDesc) -> WordDesc {
 			let mut dub_quote = false;
 			let mut sng_quote = false;
-			while let Some(ch) = self.char_stream.pop_front() {
+			while let Some(ch) = self.advance() {
 					if matches!(ch, '\'') && !dub_quote {
 							// Single quote handling
 							sng_quote = !sng_quote;
-							wd.push_span(1);
 							wd = wd.add_char(ch);
 					} else if matches!(ch, '"') && !sng_quote {
 							// Double quote handling
 							dub_quote = !dub_quote;
-							wd.push_span(1);
 							wd = wd.add_char(ch);
 					} else if dub_quote || sng_quote {
 							// Inside a quoted string
-							wd.push_span(1);
 							wd = wd.add_char(ch);
 					} else if !matches!(ch, ' ' | '\t' | '\n' | ';') {
 							// Regular character
-							wd.push_span(1);
 							wd = wd.add_char(ch);
 					} else if matches!(ch, '\n' | ';') {
 							// Preserve cmdsep for tokenizing
 							self.char_stream.push_front(ch);
-							self.span = wd.span;
+							self.span.end -= 1;
+							wd.span = self.span;
 							break;
 					} else {
 							// Whitespace handling
 							self.char_stream.push_front(ch);
-							let mut next_span_start = wd.span.end;
 							while self.char_stream.front().is_some_and(|c| matches!(c, ' ' | '\t')) {
-									next_span_start += 1;
-									self.char_stream.pop_front();
+									self.advance();
 							}
-							self.span = Span::from(next_span_start, next_span_start);
 							break;
 					}
 			}

@@ -38,6 +38,10 @@ pub fn expand_arguments(shellenv: &ShellEnv, node: &mut Node) -> Result<Vec<Tk>,
 			node.nd_type = NdType::Command { argv: expand_buffer.clone().into() };
 			Ok(expand_buffer)
 		}
+		NdType::Subshell { body, argv: _ } => {
+			node.nd_type = NdType::Subshell { body: body.to_string(), argv: expand_buffer.clone().into() };
+			Ok(expand_buffer)
+		}
 		_ => Err(ShellError::from_internal("Called expand arguments on a non-command node"))
 	}
 }
@@ -79,7 +83,7 @@ pub fn expand_prompt(shellenv: &ShellEnv) -> String {
 	} else {
 		format!("\\e[1;{}m\\w\\e[1;36m/\\e[0m",default_color)
 	};
-	let ps1: String = shellenv.env_vars.get("PS1").map_or(format!("\\n{}\\n\\e[{}m\\u \\$\\e[36m>\\e[0m ",default_path,default_color), |ps1| ps1.clone());
+	let ps1: String = shellenv.env_vars.get("PS1").map_or(format!("\\n{}\\n\\e[{}mdebug \\$\\e[36m>\\e[0m ",default_path,default_color), |ps1| ps1.clone());
 	let mut result = String::new();
 	let mut chars = ps1.chars().collect::<VecDeque<char>>();
 	while let Some(c) = chars.pop_front() {
@@ -307,7 +311,9 @@ pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellEr
 					// i.e. "alias grep="grep --color-auto"
 					if alias_tokens.front().is_some_and(|tk| tk.text() == cmd_tk.text()) {
 						for token in &mut alias_tokens {
-							token.wd.flags |= WdFlags::FROM_ALIAS
+							if token.text() == cmd_tk.text() {
+								token.wd.flags |= WdFlags::FROM_ALIAS
+							}
 						}
 					}
 

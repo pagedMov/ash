@@ -17,6 +17,7 @@ bitflags! {
 		const VALID_OPERAND      = 0b00000000000000000000000000000001; // Can be a target for redirection
 		const IS_OP              = 0b00000000000000000000000000000010; // Is an operator
 		const COMBINE_OUT        = 0b00000000000000000000000000000100; // Combine stderr and stdout
+		const BACKGROUND         = 0b00000000000000000000000000001000; // Combine stderr and stdout
 	}
 }
 
@@ -54,6 +55,7 @@ enum Phase {
 
 enum CmdType {
 	Builtin,
+	Subshell,
 	Command
 }
 
@@ -141,7 +143,7 @@ impl Node {
 	pub fn get_argv(&self) -> Result<Vec<Tk>,ShellError> {
 		let mut arg_vec = vec![];
 		match &self.nd_type {
-			NdType::Command { argv } | NdType::Builtin { argv } => {
+			NdType::Command { argv } | NdType::Builtin { argv } | NdType::Subshell { body: _, argv } => {
 				for arg in argv {
 					arg_vec.push(arg.clone());
 				}
@@ -404,7 +406,7 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> Result<DescentContex
 			Subshell => {
 				info!("Found subshell");
 				ctx.tokens.push_front(tk);
-				ctx = build_subshell(ctx)?;
+				ctx = build_command(ctx)?;
 			}
 			FuncDef {..} => {
 				ctx.tokens.push_front(tk);
@@ -491,7 +493,7 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> Result<DescentContex
 
 pub fn check_valid_operand(node: &Node) -> bool {
 	use crate::interp::parse::NdType::*;
-	matches!(node.nd_type, Pipeline {..} | Chain {..} | If {..} | For {..} | Loop {..} | Case {..} | Select {..} | Command {..} | Builtin {..})
+	matches!(node.nd_type, Pipeline {..} | Subshell {..} | Chain {..} | If {..} | For {..} | Loop {..} | Case {..} | Select {..} | Command {..} | Builtin {..})
 }
 
 pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
@@ -1400,71 +1402,6 @@ pub fn build_select(mut ctx: DescentContext) -> Result<DescentContext, ShellErro
 	Ok(ctx)
 }
 
-pub fn build_subshell(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
-	let token = ctx.next_tk().unwrap();
-	let span = token.span();
-	let mut held_redirs = VecDeque::new();
-	let mut argv = VecDeque::new();
-	while let Some(mut tk) = ctx.next_tk() {
-		info!("found potential arg: {}",tk.text());
-
-		match tk.class() {
-			TkType:: PipeBoth | TkType::Cmdsep | TkType::LogicAnd | TkType::LogicOr | TkType::Pipe => {
-				info!("build_command breaking on: {:?}", tk);
-				ctx.tokens.push_front(tk);
-				while let Some(redir) = held_redirs.pop_back() {
-					// Push redirections back onto the queue, at the front
-					// This has the effect of moving all redirections to the right of the command node
-					// Which will be useful in join_at_operators()
-					ctx.tokens.push_front(redir);
-				}
-				break;
-			}
-			TkType::Ident | TkType::String | TkType::VariableSub | TkType::Assignment => {
-				// Add to argv
-				argv.push_back(tk.clone());
-			}
-			TkType::Redirection { ref mut redir } => {
-				// Handle redirection
-				if redir.fd_target.is_none() {
-					if let Some(target_tk) = ctx.next_tk() {
-						if matches!(target_tk.class(), TkType::Ident | TkType::String) {
-							redir.file_target = Some(Box::new(target_tk));
-						}
-					}
-				}
-				tk.tk_type = TkType::Redirection { redir: redir.clone() };
-				held_redirs.push_back(tk)
-			}
-			TkType::SOI => continue,
-			TkType::EOI => {
-				while let Some(redir) = held_redirs.pop_back() {
-					// Push redirections back onto the queue, at the front
-					// This has the effect of moving all redirections to the right of the command node
-					// Which will be useful in join_at_operators()
-					ctx.tokens.push_front(redir);
-				}
-				break
-			}
-			_ => {
-				error!("ran into EOI while building command, with these tokens: {:?}",ctx.get_tk_texts());
-				return Err(ShellError::from_parse(
-						format!("Unexpected token: {:?}", tk).as_str(),
-						tk.span(),
-				));
-			}
-		}
-	}
-	let node = Node {
-		nd_type: NdType::Subshell { body: token.text().into(), argv },
-		span,
-		flags: NdFlags::VALID_OPERAND,
-		redirs: VecDeque::new()
-	};
-	ctx.attach_node(node);
-	Ok(ctx)
-}
-
 pub fn build_func_def(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
 	let def = ctx.next_tk().unwrap();
 	if let TkType::FuncDef = def.tk_type {
@@ -1524,9 +1461,13 @@ pub fn build_command(mut ctx: DescentContext) -> Result<DescentContext, ShellErr
 	let mut argv = VecDeque::new();
 	// We handle redirections in join_at_operators(), so hold them here and push them back onto the queue afterward
 	let mut held_redirs = VecDeque::new();
+	let mut background = false;
 
-	let cmd_type = if ctx.front_tk().unwrap().flags().contains(WdFlags::BUILTIN) {
+	let cmd = ctx.front_tk().unwrap().clone();
+	let cmd_type = if cmd.flags().contains(WdFlags::BUILTIN) {
 		CmdType::Builtin
+	} else if cmd.tk_type == TkType::Subshell {
+		CmdType::Subshell
 	} else {
 		CmdType::Command
 	};
@@ -1546,9 +1487,14 @@ pub fn build_command(mut ctx: DescentContext) -> Result<DescentContext, ShellErr
 				}
 				break;
 			}
+			TkType::Background => {
+				background = true;
+				break // Background operator '&' is always the last argument
+			}
+			TkType::Subshell => continue, // Don't include the subshell token in the args
 			TkType::Ident | TkType::String | TkType::VariableSub | TkType::Assignment => {
 				// Add to argv
-				argv.push_back(tk.clone());
+				argv.push_back(tk);
 			}
 			TkType::Redirection { ref mut redir } => {
 				// Handle redirection
@@ -1585,7 +1531,7 @@ pub fn build_command(mut ctx: DescentContext) -> Result<DescentContext, ShellErr
 	debug!("returning from build_command with tokens: {:?}", ctx.tokens);
 
 	let span = compute_span(&argv);
-	let node = match cmd_type {
+	let mut node = match cmd_type {
 		CmdType::Command => {
 			Node {
 				nd_type: NdType::Command { argv },
@@ -1602,7 +1548,18 @@ pub fn build_command(mut ctx: DescentContext) -> Result<DescentContext, ShellErr
 				redirs: VecDeque::new()
 			}
 		}
+		CmdType::Subshell => {
+			Node {
+				nd_type: NdType::Subshell { body: cmd.text().into(), argv },
+				span,
+				flags: NdFlags::VALID_OPERAND,
+				redirs: VecDeque::new()
+			}
+		}
 	};
+	if background {
+		node.flags |= NdFlags::BACKGROUND
+	}
 	debug!("attaching node: {:?}",node);
 	ctx.attach_node(node);
 	debug!("ast state: {:?}",ctx.root);

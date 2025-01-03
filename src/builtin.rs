@@ -10,10 +10,11 @@ use libc::{getegid, geteuid};
 use log::info;
 use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
-use nix::unistd::{access, isatty, AccessFlags};
+use nix::sys::wait::{waitpid, WaitStatus};
+use nix::unistd::{access, fork, isatty, setpgid, AccessFlags, ForkResult};
 
-use crate::execute::{ProcIO, RshWaitStatus, SmartFd};
-use crate::interp::parse::{NdType, Node, Span};
+use crate::execute::{ProcIO, RshWaitStatus, RustFd};
+use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType};
 use crate::shellenv::{EnvFlags, ShellEnv};
@@ -34,8 +35,8 @@ bitflags! {
 	}
 }
 
-fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<SmartFd>, ShellError> {
-	let mut fd_stack: Vec<SmartFd> = Vec::new();
+fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<RustFd>, ShellError> {
+	let mut fd_stack: Vec<RustFd> = Vec::new();
 	let mut fd_dupes: Vec<(i32,i32)> = Vec::new();
 	info!("Handling redirections for builtin: {:?}", redirs);
 
@@ -46,14 +47,14 @@ fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<SmartFd>, ShellEr
 			if let Some(target) = fd_target {
 				fd_dupes.push((*target,*fd_source));
 			} else if let Some(file_path) = file_target {
-				let source_fd = SmartFd::new(*fd_source)?;
+				let source_fd = RustFd::new(*fd_source)?;
 				let flags = match op {
 					RedirType::Input => OFlag::O_RDONLY,
 					RedirType::Output => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
 					RedirType::Append => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_APPEND,
 					_ => unimplemented!("Heredocs and herestrings are not implemented yet."),
 				};
-				let mut file_fd = SmartFd::open(Path::new(file_path.text()), flags, Mode::from_bits(0o644).unwrap())?;
+				let mut file_fd = RustFd::open(Path::new(file_path.text()), flags, Mode::from_bits(0o644).unwrap())?;
 				file_fd.dup2(&source_fd)?;
 				file_fd.close()?;
 				fd_stack.push(source_fd);
@@ -62,8 +63,8 @@ fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<SmartFd>, ShellEr
 	}
 
 	while let Some((target,source)) = fd_dupes.pop() {
-		let mut target_fd = SmartFd::new(target)?;
-		let source_fd = SmartFd::new(source)?;
+		let mut target_fd = RustFd::new(target)?;
+		let source_fd = RustFd::new(source)?;
 		target_fd.dup2(&source_fd)?;
 		target_fd.close()?;
 
@@ -559,7 +560,7 @@ pub fn set_or_unset(shellenv: &mut ShellEnv, node: Node, set: bool) -> Result<Rs
 
 pub fn pwd(shellenv: &ShellEnv, span: Span) -> Result<RshWaitStatus, ShellError> {
 	if let Some(pwd) = shellenv.get_variable("PWD") {
-		let stdout = SmartFd::from_stdout()?;
+		let stdout = RustFd::from_stdout()?;
 		stdout.write(pwd.as_bytes())?;
 		Ok(RshWaitStatus::Success { span })
 	} else {
@@ -572,8 +573,7 @@ pub fn export(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus, Shel
 	if let NdType::Builtin { mut argv } = node.nd_type {
 		argv.pop_front(); // Ignore "export"
 		while let Some(ass) = argv.pop_front() {
-			if let TkType::Assignment = ass.tk_type {
-				let (key,value) = ass.text().split_once('=').unwrap();
+			if let Some((key,value)) = ass.text().split_once('=') {
 				shellenv.export_variable(key.to_string(), value.to_string());
 			} else {
 				return Err(ShellError::from_execf(format!("Expected a variable assignment in export, got this: {}", ass.text()).as_str(), 1, ass.span()))
@@ -583,8 +583,9 @@ pub fn export(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus, Shel
 	} else { unreachable!() }
 }
 
-pub fn echo(node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
+pub fn echo(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus, ShellError> {
 	let mut flags = EchoFlags::empty();
+	let span = node.span();
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
 	argv.pop_front(); // Remove 'echo' from argv
 										// Get flags
@@ -634,14 +635,14 @@ pub fn echo(node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
 
 	let output_fd = if flags.contains(EchoFlags::STDERR) {
 		if let Some(ref err_fd) = io.stderr {
-			err_fd.lock().unwrap().dup().unwrap_or_else(|_| SmartFd::from_stderr().unwrap())
+			err_fd.lock().unwrap().dup().unwrap_or_else(|_| RustFd::from_stderr().unwrap())
 		} else {
-			SmartFd::from_stderr()?
+			RustFd::from_stderr()?
 		}
 	} else if let Some(ref out_fd) = io.stdout {
-			out_fd.lock().unwrap().dup().unwrap_or_else(|_| SmartFd::from_stdout().unwrap())
+			out_fd.lock().unwrap().dup().unwrap_or_else(|_| RustFd::from_stdout().unwrap())
 		} else {
-			SmartFd::from_stdout()?
+			RustFd::from_stdout()?
 	};
 
 	if let Some(ref fd) = io.stderr {
@@ -651,13 +652,38 @@ pub fn echo(node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
 		}
 	}
 
-	output_fd.write(output_str.as_bytes())?;
-
-	for mut fd in fd_stack {
-		fd.close().unwrap();
+	if in_pipe {
+		output_fd.write(output_str.as_bytes())?;
+		std::process::exit(0);
 	}
-
-	io.restore_fildescs()?;
-
-	Ok(RshWaitStatus::Success { span: node.span })
+	match unsafe { fork() } {
+		Ok(ForkResult::Child) => {
+			output_fd.write(output_str.as_bytes())?;
+			std::process::exit(0);
+		}
+		Ok(ForkResult::Parent { child }) => {
+			for mut fd in fd_stack {
+				fd.close().unwrap();
+			}
+			io.restore_fildescs()?;
+			if node.flags.contains(NdFlags::BACKGROUND) {
+				setpgid(child, child).map_err(|_| ShellError::from_io())?;
+				shellenv.new_job(child, "echo");
+				Ok(RshWaitStatus::Success { span })
+			} else {
+				match waitpid(child, None) {
+					Ok(WaitStatus::Exited(_, code)) => match code {
+						0 => Ok(RshWaitStatus::Success { span }),
+						_ => Ok(RshWaitStatus::Fail { code, cmd: Some("echo".into()), span }),
+					},
+					Ok(WaitStatus::Signaled(_,signal,_)) => {
+						Ok(RshWaitStatus::Fail { code: 128 + signal as i32, cmd: Some("echo".into()), span })
+					}
+					Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
+					Err(err) => Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),
+				}
+			}
+		}
+		Err(_) => Err(ShellError::from_execf("Fork failed", 1, span)),
+	}
 }

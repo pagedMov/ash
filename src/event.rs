@@ -1,6 +1,8 @@
 use std::{fmt, io};
 use std::os::fd::BorrowedFd;
 
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+use nix::unistd::Pid;
 use tokio::sync::mpsc;
 use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};
@@ -240,7 +242,6 @@ impl fmt::Display for ShellErrorFull {
 pub enum ShellEvent {
 	Prompt,
 	Signal(Signals),
-	SubprocessExited(u32,i32),
 	NewAST(Node),
 	CatchError(ShellError),
 	Exit(i32)
@@ -320,8 +321,12 @@ impl<'a> EventLoop<'a> {
 		while let Some(event) = self.receiver.recv().await {
 			match event {
 				ShellEvent::Prompt => {
+					let inbox = self.inbox();
+					let mut shellenv = self.shellenv.clone();
 					// Trigger the prompt logic.
-					prompt::prompt(self.inbox(),self.shellenv).await;
+					tokio::spawn(async move {
+						prompt::prompt(inbox,&mut shellenv).await;
+					});
 				}
 				ShellEvent::Exit(exit_code) => {
 					// Handle exit events and set the exit code.
@@ -352,20 +357,18 @@ impl<'a> EventLoop<'a> {
 						}
 					}
 				}
-				ShellEvent::SubprocessExited(pid, exit_code) => {
-					// Log the exit of a subprocess.
-					debug!("Process '{}' exited with code {}", pid, exit_code);
-				}
 				ShellEvent::Signal(signal) => {
 					// Handle received signals.
-					self.handle_signal(signal).await;
+					if let Err(e) = self.handle_signal(signal).await {
+						eprintln!("{}",ShellErrorFull::from(self.shellenv.get_last_input(), e));
+					}
 				}
 				ShellEvent::CatchError(err) => {
 					// Handle errors, exiting if fatal.
 					let fatal = err.is_fatal();
 					let error_display = ShellErrorFull::from(self.shellenv.get_last_input(), err);
 					if fatal {
-						error!("Fatal: {}", error_display);
+						eprintln!("Fatal: {}", error_display);
 						std::process::exit(1);
 					} else {
 						println!("{}",error_display);
@@ -375,13 +378,47 @@ impl<'a> EventLoop<'a> {
 		}
 		Ok(code)
 	}
-	async fn handle_signal(&self, signal: Signals) {
+	async fn handle_signal(&self, signal: Signals) -> Result<(), ShellError> {
 		match signal {
 			Signals::SIGQUIT => {
 				std::process::exit(0);
 			}
+			Signals::SIGCHLD => {
+				let job_pid: Pid;
+				let status = match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
+					Ok(WaitStatus::Exited(pid,status)) => {
+						job_pid = pid;
+						if status == 0 {
+							RshWaitStatus::Success { span: Span::new() }
+						} else {
+							RshWaitStatus::Fail { code: status, cmd: None, span: Span::new() }
+						}
+					}
+					Ok(WaitStatus::StillAlive) => return Ok(()),
+					Ok(WaitStatus::Signaled(pid, sig, _)) => {
+						job_pid = pid;
+						RshWaitStatus::Signaled { sig }
+					}
+					Ok(WaitStatus::Stopped(pid, sig)) => {
+						job_pid = pid;
+						RshWaitStatus::Stopped { sig }
+					}
+					Err(_) => { /* No child processes found, so */ return Ok(()) },
+					_ => unimplemented!()
+				};
+				let jobs = self.shellenv.jobs.clone();
+				for (_job_id,mut job) in jobs {
+					if job.pid() == job_pid {
+						println!();
+						job.status(status);
+						println!("{}",job);
+						break
+					}
+				}
+			}
 			_ => { },
 		}
+		Ok(())
 	}
 }
 

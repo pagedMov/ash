@@ -6,6 +6,9 @@ version = "0.1.0"
 
 edition = "2021"
 
+[profile.release]
+debug = true
+
 [dependencies]
 regex = "1.11.1"
 log = "0.4.22"
@@ -24,3 +27,5 @@ rustyline = { version = "15.0.0", features = [ "derive" ] }
 chrono = "0.4.39"
 crossterm = "0.28.1"
 skim = "0.15.7"
+perf = "0.0.2"
+signal-hook = "0.3.17"

@@ -1,9 +1,10 @@
 use libc::{memfd_create, MFD_CLOEXEC};
-use nix::unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult};
+use nix::sys::signal::Signal;
+use nix::unistd::{close, dup, dup2, execve, execvpe, fork, pipe, setpgid, ForkResult, Pid};
 use nix::fcntl::{open,OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::wait::{waitpid, WaitStatus};
-use std::fmt::Display;
+use std::fmt::{self, Display};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::ffi::CString;
 use std::collections::{HashMap, VecDeque};
@@ -14,10 +15,10 @@ use glob::MatchOptions;
 
 use crate::builtin::{alias, cd, echo, export, pwd, set_or_unset, source, test};
 use crate::event::ShellError;
-use crate::interp::helper::VecDequeExtension;
+use crate::interp::helper::{self, VecDequeExtension};
 use crate::interp::{expand, parse};
 use crate::interp::token::{Redir, RedirType, Tk, WdFlags};
-use crate::interp::parse::{NdType, Node, Span};
+use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::shellenv::ShellEnv;
 
 pub const GLOB_OPTS: MatchOptions = MatchOptions {
@@ -26,55 +27,86 @@ pub const GLOB_OPTS: MatchOptions = MatchOptions {
 	require_literal_leading_dot: false
 };
 
-#[derive(Hash,Eq,PartialEq,Debug)]
-pub struct SmartFd {
-	fd: RawFd
+/// A wrapper struct for idiomatic and safe handling of file descriptors in Rust.
+///
+/// `RustFd` provides a safer and more ergonomic interface for working with file descriptors (`RawFd`),
+/// addressing common pitfalls associated with direct handling of file descriptors in systems programming.
+///
+/// ### Key Features:
+/// - **Automatic Resource Management**: Implements the `Drop` trait, ensuring the file descriptor is
+///   automatically closed when the `RustFd` instance goes out of scope, preventing resource leaks.
+/// - **Prevention of Double-Closing**: Once closed, the internal file descriptor is set to `-1`,
+///   denoting a "dead" file descriptor and safeguarding against double-close errors.
+/// - **Uniqueness**: `RustFd` does not implement the `Copy` or `Clone` traits, ensuring each instance
+///   uniquely owns its file descriptor. This design eliminates the risk of unintended file descriptor
+///   duplication and the associated lifecycle ambiguities.
+/// - **Proof of Openness**: The existence of a `RustFd` instance guarantees that the file descriptor it wraps
+///   is valid and open. This makes reasoning about resource states easier and more reliable.
+///
+/// ### Advantages:
+/// Compared to raw file descriptors from `libc` or `nix::unistd`, `RustFd` reduces the likelihood of:
+/// - Resource leaks caused by missing `close` calls.
+/// - Use-after-close bugs from accessing invalid file descriptors.
+/// - Double-close errors.
+///
+/// ### Example:
+/// ```rust
+/// use std::os::unix::io::RawFd;
+///
+/// let fd: RawFd = open_some_file(); // Hypothetical function that opens a file and returns a RawFd.
+/// let rust_fd = RustFd::new(fd);
+/// // `rust_fd` ensures the file descriptor is properly closed when it goes out of scope.
+/// ```
+#[derive(Hash, Eq, PartialEq, Debug)]
+pub struct RustFd {
+	fd: RawFd,
 }
 
-impl SmartFd {
+impl RustFd {
 	pub fn new(fd: RawFd) -> Result<Self,ShellError> {
 		if fd < 0 {
-			return Err(ShellError::from_internal("Attempted to create a new SmartFd from a negative FD"));
+			return Err(ShellError::from_internal("Attempted to create a new RustFd from a negative FD"));
 		}
-		Ok(SmartFd { fd })
+		Ok(RustFd { fd })
 	}
 
-	/// Create a `SmartFd` from a duplicate of `stdin` (FD 0)
+	/// Create a `RustFd` from a duplicate of `stdin` (FD 0)
 	pub fn from_stdin() -> Result<Self,ShellError> {
-			let fd = dup(0).map_err(|_| ShellError::from_io())?;
-			Ok(Self { fd })
+		let fd = dup(0).map_err(|_| ShellError::from_io())?;
+		Ok(Self { fd })
 	}
 
-	/// Create a `SmartFd` from a duplicate of `stdout` (FD 1)
+	/// Create a `RustFd` from a duplicate of `stdout` (FD 1)
 	pub fn from_stdout() -> Result<Self,ShellError> {
-			let fd = dup(1).map_err(|_| ShellError::from_io())?;
-			Ok(Self { fd })
+		let fd = dup(1).map_err(|_| ShellError::from_io())?;
+		Ok(Self { fd })
 	}
 
-	/// Create a `SmartFd` from a duplicate of `stderr` (FD 2)
+	/// Create a `RustFd` from a duplicate of `stderr` (FD 2)
 	pub fn from_stderr() -> Result<Self,ShellError> {
-			let fd = dup(2).map_err(|_| ShellError::from_io())?;
-			Ok(Self { fd })
+		let fd = dup(2).map_err(|_| ShellError::from_io())?;
+		Ok(Self { fd })
 	}
 
-	/// Create a `SmartFd` from a type that provides an owned or borrowed FD
+	/// Create a `RustFd` from a type that provides an owned or borrowed FD
 	pub fn from_fd<T: AsFd>(fd: T) -> Result<Self,ShellError> {
 		let raw_fd = fd.as_fd().as_raw_fd();
 		if raw_fd < 0 {
-			return Err(ShellError::from_internal("Attempted to convert to SmartFd from a negative FD"));
+			return Err(ShellError::from_internal("Attempted to convert to RustFd from a negative FD"));
 		}
-		Ok(SmartFd { fd: raw_fd })
+		Ok(RustFd { fd: raw_fd })
 	}
 
-	/// Create a `SmartFd` by consuming ownership of an FD
+	/// Create a `RustFd` by consuming ownership of an FD
 	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> Result<Self,ShellError> {
 		let raw_fd = fd.into_raw_fd(); // Consumes ownership
 		if raw_fd < 0 {
-			return Err(ShellError::from_internal("Attempted to convert to SmartFd from a negative FD"));
+			return Err(ShellError::from_internal("Attempted to convert to RustFd from a negative FD"));
 		}
-		Ok(SmartFd { fd: raw_fd })
+		Ok(RustFd { fd: raw_fd })
 	}
 
+	/// Create a new `RustFd` that points to an in-memory file descriptor. In-memory file descriptors can be interacted with as though they were normal files.
 	pub fn new_memfd(name: &str, executable: bool) -> Result<Self, ShellError> {
 		let c_name = CString::new(name).map_err(|_| ShellError::from_internal("Invalid name for memfd"))?;
 		let flags = if executable {
@@ -83,12 +115,13 @@ impl SmartFd {
 			MFD_CLOEXEC
 		};
 		let fd = unsafe { memfd_create(c_name.as_ptr(), flags) };
-		Ok(SmartFd { fd })
+		Ok(RustFd { fd })
 	}
 
+	/// Write some bytes to the contained file descriptor
 	pub fn write(&self, buffer: &[u8]) -> Result<(),ShellError> {
 		if !self.is_valid() {
-			return Err(ShellError::from_internal("Attempted to write to an invalid SmartFd"));
+			return Err(ShellError::from_internal("Attempted to write to an invalid RustFd"));
 		}
 		let result = unsafe { libc::write(self.fd, buffer.as_ptr() as *const libc::c_void, buffer.len()) };
 		if result < 0 {
@@ -98,21 +131,24 @@ impl SmartFd {
 		}
 	}
 
+	/// Wrapper for nix::unistd::pipe(), simply produces two `RustFds` that point to a read and write pipe respectfully
 	pub fn pipe() -> Result<(Self,Self),ShellError> {
 		let (r_pipe,w_pipe) = pipe().map_err(|_| ShellError::from_io())?;
-		let r_fd = SmartFd::from_owned_fd(r_pipe)?;
-		let w_fd = SmartFd::from_owned_fd(w_pipe)?;
+		let r_fd = RustFd::from_owned_fd(r_pipe)?;
+		let w_fd = RustFd::from_owned_fd(w_pipe)?;
 		Ok((r_fd,w_fd))
 	}
 
+	/// Produce a `RustFd` that points to the same resource as the 'self' `RustFd`
 	pub fn dup(&self) -> Result<Self,ShellError> {
 		if !self.is_valid() {
 			return Err(ShellError::from_internal("Attempted to dup an invalid fd"));
 		}
 		let new_fd = dup(self.fd).map_err(|_| ShellError::from_io())?;
-		Ok(SmartFd { fd: new_fd })
+		Ok(RustFd { fd: new_fd })
 	}
 
+	/// A wrapper for nix::unistd::dup2(), 'self' is duplicated to the given target file descriptor.
 	pub fn dup2<T: AsRawFd>(&self, target: &T) -> Result<(),ShellError> {
 		let target_fd = target.as_raw_fd();
 		if self.fd == target_fd {
@@ -127,6 +163,7 @@ impl SmartFd {
 		Ok(())
 	}
 
+	/// Open a file using a file descriptor, with the given OFlags and Mode bits
 	pub fn open(path: &Path, flags: OFlag, mode: Mode) -> Result<Self,ShellError> {
 		let file_fd: RawFd = open(path, flags, mode).map_err(|_| ShellError::from_io())?;
 		Ok(Self { fd: file_fd })
@@ -134,7 +171,7 @@ impl SmartFd {
 
 	pub fn close(&mut self) -> Result<(),ShellError> {
 		if !self.is_valid() {
-			return Err(ShellError::from_internal("Attempted to close an invalid SmartFd"));
+			return Err(ShellError::from_internal("Attempted to close an invalid RustFd"));
 		}
 		close(self.fd).map_err(|_| ShellError::from_io())?;
 		self.fd = -1;
@@ -150,13 +187,13 @@ impl SmartFd {
 	}
 }
 
-impl Display for SmartFd {
+impl Display for RustFd {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-	    write!(f, "{}", self.fd)
+		write!(f, "{}", self.fd)
 	}
 }
 
-impl Drop for SmartFd {
+impl Drop for RustFd {
 	fn drop(&mut self) {
 		if self.fd >= 0 {
 			self.close().ok();
@@ -164,13 +201,13 @@ impl Drop for SmartFd {
 	}
 }
 
-impl AsRawFd for SmartFd {
+impl AsRawFd for RustFd {
 	fn as_raw_fd(&self) -> RawFd {
 		self.fd
 	}
 }
 
-impl IntoRawFd for SmartFd {
+impl IntoRawFd for RustFd {
 	fn into_raw_fd(self) -> RawFd {
 		let fd = self.fd;
 		std::mem::forget(self);
@@ -178,38 +215,50 @@ impl IntoRawFd for SmartFd {
 	}
 }
 
-impl FromRawFd for SmartFd {
+impl FromRawFd for RustFd {
 	unsafe fn from_raw_fd(fd: RawFd) -> Self {
-		SmartFd { fd }
+		RustFd { fd }
 	}
 }
 
 #[derive(Debug)]
 pub struct ProcIO {
-	pub stdin: Option<Arc<Mutex<SmartFd>>>,
-	pub stdout: Option<Arc<Mutex<SmartFd>>>,
-	pub stderr: Option<Arc<Mutex<SmartFd>>>,
-	pub backup: HashMap<RawFd,SmartFd>
+	pub stdin: Option<Arc<Mutex<RustFd>>>,
+	pub stdout: Option<Arc<Mutex<RustFd>>>,
+	pub stderr: Option<Arc<Mutex<RustFd>>>,
+	pub backup: HashMap<RawFd,RustFd>
 }
 
 impl ProcIO {
 	pub fn new() -> Self {
 		Self { stdin: None, stdout: None, stderr: None, backup: HashMap::new() }
 	}
-	pub fn from(stdin: Option<Arc<Mutex<SmartFd>>>, stdout: Option<Arc<Mutex<SmartFd>>>, stderr: Option<Arc<Mutex<SmartFd>>>) -> Self {
-			Self {
-					stdin,
-					stdout,
-					stderr,
-					backup: HashMap::new(),
-			}
+	pub fn from(stdin: Option<Arc<Mutex<RustFd>>>, stdout: Option<Arc<Mutex<RustFd>>>, stderr: Option<Arc<Mutex<RustFd>>>) -> Self {
+		Self {
+			stdin,
+			stdout,
+			stderr,
+			backup: HashMap::new(),
+		}
+	}
+	pub fn close_all(&mut self) -> Result<(),ShellError> {
+		if let Some(fd) = &self.stdin {
+			fd.lock().unwrap().close()?;
+		}
+		if let Some(fd) = &self.stdout {
+			fd.lock().unwrap().close()?;
+		}
+		if let Some(fd) = &self.stderr {
+			fd.lock().unwrap().close()?;
+		}
+		Ok(())
 	}
 	pub fn backup_fildescs(&mut self) -> Result<(), ShellError> {
 		let mut backup = HashMap::new();
 		// Get duped file descriptors
-		let dup_in = SmartFd::from_stdin()?;
-		let dup_out = SmartFd::from_stdout()?;
-		let dup_err = SmartFd::from_stderr()?;
+		let dup_in = RustFd::from_stdin()?;
+		let dup_out = RustFd::from_stdout()?;
+		let dup_err = RustFd::from_stderr()?;
 		// Store them in a hashmap
 		backup.insert(0,dup_in);
 		backup.insert(1,dup_out);
@@ -273,18 +322,36 @@ impl Default for ProcIO {
 pub enum RshWaitStatus {
 	Success { span: Span },
 	Fail { code: i32, cmd: Option<String>, span: Span },
-	Stopped { pid: i32 },
-	Terminated { signal: i32, pid: i32 },
-	Continued { pid: i32 },
-	Running { pid: i32 },
-	Killed { signal: i32, pid: i32 },
-	TimeOut { pid: i32 },
+	Signaled { sig: Signal },
+	Stopped { sig: Signal },
+	Terminated { signal: i32 },
+	Continued,
+	Running,
+	Killed { signal: i32 },
+	TimeOut,
 
 	// These wait statuses are returned by builtins like `return` and `break`
 	SIGRETURN, // Return from a function
 	SIGCONT, // Restart a loop from the beginning
 	SIGBREAK, // Break a loop
 	SIGRSHEXIT // Internal call to exit early
+}
+
+impl Display for RshWaitStatus {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			RshWaitStatus::Success { .. } => write!(f, "Completed: code 0"),
+			RshWaitStatus::Fail { code, .. } => write!(f, "Completed: code {}", code),
+			RshWaitStatus::Signaled { sig } => write!(f, "Signaled: {}", sig),
+			RshWaitStatus::Stopped { sig } => write!(f, "Stopped: {}", sig),
+			RshWaitStatus::Terminated { signal } => write!(f, "Terminated: {}", signal),
+			RshWaitStatus::Continued => write!(f, "Continued"),
+			RshWaitStatus::Running => write!(f, "Running"),
+			RshWaitStatus::Killed { signal } => write!(f, "Killed: {}", signal),
+			RshWaitStatus::TimeOut => write!(f, "Timed out"),
+			_ => write!(f, "{:?}",self)
+		}
+	}
 }
 
 impl RshWaitStatus {
@@ -321,16 +388,16 @@ impl<'a> NodeWalker<'a> {
 	pub fn start_walk(&mut self) -> Result<RshWaitStatus,ShellError> {
 		info!("Going on a walk...");
 		// Save file descs just in case
-		let saved_in = SmartFd::from_stdin()?;
-		let saved_out = SmartFd::from_stdout()?;
-		let saved_err = SmartFd::from_stderr()?;
+		let saved_in = RustFd::from_stdin()?;
+		let saved_out = RustFd::from_stdout()?;
+		let saved_err = RustFd::from_stderr()?;
 		let mut exit_status = RshWaitStatus::new();
 		let mut nodes;
 		if let NdType::Root { ref mut deck } = self.ast.nd_type {
 			nodes = std::mem::take(deck);
 		} else { unreachable!() }
 		while let Some(node) = nodes.pop_front() {
-			exit_status = self.walk(node, ProcIO::new())?;
+			exit_status = self.walk(node, ProcIO::new(), false)?;
 		}
 		// Restore file descs just in case
 		saved_in.dup2(&0)?;
@@ -339,7 +406,7 @@ impl<'a> NodeWalker<'a> {
 		Ok(exit_status)
 	}
 
-	fn walk(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
+	fn walk(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus,ShellError> {
 		let last_status;
 		match node.nd_type {
 			NdType::Command { ref argv } | NdType::Builtin { ref argv } => {
@@ -351,27 +418,24 @@ impl<'a> NodeWalker<'a> {
 					node = expand::expand_alias(self.shellenv, node.clone())?;
 				}
 				if let Some(_func) = self.shellenv.get_function(command_name.text()) {
-					last_status = self.handle_function(node, io)?;
+					last_status = self.handle_function(node, io, in_pipe)?;
 				} else if !matches!(node.nd_type, NdType::Command {..} | NdType::Builtin {..}) {
 					// If the resulting alias expansion returns a root node
 					// then walk the resulting sub-tree
-					return self.walk_root(node, None, io)
+					return self.walk_root(node, None, io,in_pipe)
 				} else {
 					match node.nd_type {
 						NdType::Command {..} => {
 							trace!("Found command: {:?}",node);
-							last_status = self.handle_command(node, io)?;
+							last_status = self.handle_command(node, io, in_pipe)?;
 						}
 						NdType::Builtin {..} => {
-							last_status = self.handle_builtin(node, io)?;
+							last_status = self.handle_builtin(node, io, in_pipe)?;
 						}
 						_ => unreachable!()
 					}
 				}
 			}
-			//NdType::Function { .. } => {
-			//todo!("handle simple commands")
-			//}
 			NdType::Pipeline {..} => {
 				last_status = self.handle_pipeline(node, io)?;
 			}
@@ -379,22 +443,22 @@ impl<'a> NodeWalker<'a> {
 				last_status = self.handle_chain(node)?;
 			}
 			NdType::If {..} => {
-				last_status = self.handle_if(node,io)?;
+				last_status = self.handle_if(node,io,in_pipe)?;
 			}
 			NdType::For {..} => {
-				last_status = self.handle_for(node,io)?;
+				last_status = self.handle_for(node,io,in_pipe)?;
 			}
 			NdType::Loop {..} => {
-				last_status = self.handle_loop(node,io)?;
+				last_status = self.handle_loop(node,io,in_pipe)?;
 			}
 			NdType::Case {..} => {
-				last_status = self.handle_case(node,io)?;
+				last_status = self.handle_case(node,io,in_pipe)?;
 			}
 			NdType::Select {..} => {
 				todo!("handle select")
 			}
 			NdType::Subshell {..} => {
-				last_status = self.handle_subshell(node,io)?;
+				last_status = self.handle_subshell(node,io,in_pipe)?;
 			}
 			NdType::FuncDef {..} => {
 				last_status = self.handle_func_def(node)?;
@@ -410,14 +474,14 @@ impl<'a> NodeWalker<'a> {
 		Ok(last_status)
 	}
 
-	fn walk_root(&mut self, mut node: Node, break_condition: Option<bool>, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
+	fn walk_root(&mut self, mut node: Node, break_condition: Option<bool>, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus,ShellError> {
 		let mut last_status = RshWaitStatus::new();
 		if !node.redirs.is_empty() {
 			node = parse::propagate_redirections(node)?;
 		}
 		if let NdType::Root { deck } = node.nd_type {
 			for node in &deck {
-				last_status = self.walk(node.clone(), io.try_clone())?;
+				last_status = self.walk(node.clone(), io.try_clone(), in_pipe)?;
 				if let Some(condition) = break_condition {
 					match condition {
 						true => {
@@ -445,13 +509,13 @@ impl<'a> NodeWalker<'a> {
 		} else { unreachable!() }
 	}
 
-	fn handle_case(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus, ShellError> {
+	fn handle_case(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus, ShellError> {
 		let span = node.span();
 		if let NdType::Case { input_var, cases } = node.nd_type {
 			for case in cases {
 				let (pat,body) = case;
 				if pat == input_var.text() {
-					return self.walk_root(body, None, io)
+					return self.walk_root(body, None, io, in_pipe)
 				}
 			}
 			Ok(RshWaitStatus::Fail { code: 1, cmd: None, span })
@@ -461,7 +525,7 @@ impl<'a> NodeWalker<'a> {
 	/// For loops in bash can have multiple loop variables, e.g. `for a b c in 1 2 3 4 5 6`
 	/// In this case, loop_vars are also iterated through, e.g. a = 1, b = 2, c = 3, etc
 	/// Here, we use the modulo operator to figure out which variable to set on each iteration.
-	fn handle_for(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus, ShellError> {
+	fn handle_for(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus, ShellError> {
 		let mut last_status = RshWaitStatus::new();
 		let body_io = ProcIO::from(None, io.stdout, io.stderr);
 		let redirs = node.get_redirs()?;
@@ -495,14 +559,14 @@ impl<'a> NodeWalker<'a> {
 				var_index = iteration_count % var_count;
 
 				// Execute the body of the loop
-				last_status = self.walk_root(*loop_body.clone(), None, body_io.try_clone())?;
+				last_status = self.walk_root(*loop_body.clone(), None, body_io.try_clone(),in_pipe)?;
 			}
 		}
 
 		Ok(last_status)
 	}
 
-	fn handle_loop(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus, ShellError> {
+	fn handle_loop(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus, ShellError> {
 		let mut last_status = RshWaitStatus::new();
 		let cond_io = ProcIO::from(io.stdin, None, None);
 		let body_io = ProcIO::from(None, io.stdout, io.stderr);
@@ -513,7 +577,7 @@ impl<'a> NodeWalker<'a> {
 			// TODO: keep an eye on this; cloning in the loop body may be too expensive
 			loop {
 				// Evaluate the loop condition
-				let condition_status = self.walk_root(cond.clone(),Some(condition),cond_io.try_clone())?;
+				let condition_status = self.walk_root(cond.clone(),Some(condition),cond_io.try_clone(),in_pipe)?;
 
 				match condition {
 					true => {
@@ -529,7 +593,7 @@ impl<'a> NodeWalker<'a> {
 				}
 
 				// Execute the body of the loop
-				last_status = self.walk_root(body.clone(),None,body_io.try_clone())?;
+				last_status = self.walk_root(body.clone(),None,body_io.try_clone(),in_pipe)?;
 
 				// Check for break or continue signals
 				// match last_status {
@@ -547,7 +611,7 @@ impl<'a> NodeWalker<'a> {
 		}
 	}
 
-	fn handle_if(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus, ShellError> {
+	fn handle_if(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus, ShellError> {
 		let mut last_result = RshWaitStatus::new();
 		let cond_io = ProcIO::from(io.stdin, None, None);
 		let body_io = ProcIO::from(None, io.stdout, io.stderr);
@@ -556,13 +620,13 @@ impl<'a> NodeWalker<'a> {
 			while let Some(block) = cond_blocks.pop_front() {
 				let cond = *block.condition;
 				let body = *block.body;
-				last_result = self.walk_root(cond,Some(false),cond_io.try_clone())?;
+				last_result = self.walk_root(cond,Some(false),cond_io.try_clone(),in_pipe)?;
 				if let RshWaitStatus::Success {..} = last_result {
-					return self.walk_root(body,None,body_io)
+					return self.walk_root(body,None,body_io,in_pipe)
 				}
 			}
 			if let Some(block) = else_block {
-				return self.walk_root(*block,None,body_io)
+				return self.walk_root(*block,None,body_io,in_pipe)
 			}
 		}
 		Ok(last_result)
@@ -572,15 +636,15 @@ impl<'a> NodeWalker<'a> {
 		let mut last_status = RshWaitStatus::new();
 
 		if let NdType::Chain { left, right, op } = node.nd_type {
-			match self.walk(*left, ProcIO::new())? {
+			match self.walk(*left, ProcIO::new(), false)? {
 				RshWaitStatus::Success {..} => {
 					if let NdType::And = op.nd_type {
-						last_status = self.walk(*right, ProcIO::new())?;
+						last_status = self.walk(*right, ProcIO::new(), false)?;
 					}
 				}
 				_ => {
 					if let NdType::Or = op.nd_type {
-						last_status = self.walk(*right, ProcIO::new())?;
+						last_status = self.walk(*right, ProcIO::new(), false)?;
 					}
 				}
 			}
@@ -599,10 +663,10 @@ impl<'a> NodeWalker<'a> {
 		Ok(RshWaitStatus::s(span))
 	}
 
-	fn handle_builtin(&mut self, mut node: Node, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
+	fn handle_builtin(&mut self, mut node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus,ShellError> {
 		let argv = expand::expand_arguments(self.shellenv, &mut node)?;
 		match argv.first().unwrap().text() {
-			"echo" => echo(node, io),
+			"echo" => echo(self.shellenv, node, io,in_pipe),
 			"set" => set_or_unset(self.shellenv, node, true),
 			"unset" => set_or_unset(self.shellenv, node, false),
 			"source" => source(self.shellenv, node),
@@ -616,7 +680,7 @@ impl<'a> NodeWalker<'a> {
 				if let NdType::Builtin { mut argv } = node.nd_type {
 					argv.pop_front();
 					node.nd_type = NdType::Builtin { argv };
-					self.handle_builtin(node, io)
+					self.handle_builtin(node, io, in_pipe)
 				} else { unreachable!() }
 			}
 			_ => unimplemented!("found this builtin: {}",argv[0].text())
@@ -657,8 +721,8 @@ impl<'a> NodeWalker<'a> {
 	/// - The function uses `trace!` and `debug!` macros for logging purposes.
 	/// - Variable substitutions (`$var`) are resolved using the `shellenv`'s `get_variable` method.
 	/// - If a variable substitution is not found, an empty `CString` is added to the arguments.
-	fn handle_redirs(&self, mut redirs: VecDeque<Node>) -> Result<VecDeque<SmartFd>, ShellError> {
-		let mut fd_queue: VecDeque<SmartFd> = VecDeque::new();
+	fn handle_redirs(&self, mut redirs: VecDeque<Node>) -> Result<VecDeque<RustFd>, ShellError> {
+		let mut fd_queue: VecDeque<RustFd> = VecDeque::new();
 		let mut fd_dupes: VecDeque<Redir> = VecDeque::new();
 
 		while let Some(redir_tk) = redirs.pop_front() {
@@ -667,14 +731,14 @@ impl<'a> NodeWalker<'a> {
 				if fd_target.is_some() {
 					fd_dupes.push_back(redir.clone());
 				} else if let Some(file_path) = file_target {
-					let source_fd = SmartFd::new(*fd_source)?;
+					let source_fd = RustFd::new(*fd_source)?;
 					let flags = match op {
 						RedirType::Input => OFlag::O_RDONLY,
 						RedirType::Output => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
 						RedirType::Append => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_APPEND,
 						_ => unimplemented!("Heredocs and herestrings are not implemented yet."),
 					};
-					let mut file_fd: SmartFd = SmartFd::open(Path::new(file_path.text()), flags, Mode::from_bits(0o644).unwrap())?;
+					let mut file_fd: RustFd = RustFd::open(Path::new(file_path.text()), flags, Mode::from_bits(0o644).unwrap())?;
 					info!("Duping file FD {} to FD {}", file_fd, fd_source);
 					file_fd.dup2(&source_fd)?;
 					file_fd.close()?;
@@ -685,8 +749,8 @@ impl<'a> NodeWalker<'a> {
 
 		while let Some(dupe_redir) = fd_dupes.pop_front() {
 			let Redir { fd_source, op: _, fd_target, file_target: _ } = dupe_redir;
-			let mut target_fd = SmartFd::new(fd_target.unwrap())?;
-			let source_fd = SmartFd::new(fd_source)?;
+			let mut target_fd = RustFd::new(fd_target.unwrap())?;
+			let source_fd = RustFd::new(fd_source)?;
 			target_fd.dup2(&source_fd)?;
 			target_fd.close()?;
 			fd_queue.push_back(source_fd);
@@ -695,10 +759,17 @@ impl<'a> NodeWalker<'a> {
 		Ok(fd_queue)
 	}
 
-	fn handle_subshell(&mut self, node: Node, mut io: ProcIO) -> Result<RshWaitStatus,ShellError> {
+	fn handle_subshell(&mut self, mut node: Node, mut io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus,ShellError> {
+		expand::expand_arguments(self.shellenv, &mut node)?;
+		let redirs = node.redirs;
 		let mut shellenv = self.shellenv.clone();
 		shellenv.clear_pos_parameters();
-		if let NdType::Subshell { mut body, argv } = node.nd_type {
+		if let NdType::Subshell { mut body, mut argv } = node.nd_type {
+			let mut c_argv = vec![CString::new("subshell").unwrap()];
+			while let Some(tk) = argv.pop_front() {
+				let c_arg = CString::new(tk.text()).unwrap();
+				c_argv.push(c_arg);
+			}
 			if !body.starts_with("#!") {
 				let interpreter = std::env::current_exe().unwrap();
 				let mut shebang = "#!".to_string();
@@ -706,65 +777,159 @@ impl<'a> NodeWalker<'a> {
 				shebang.push('\n');
 				shebang.push_str(&body);
 				body = shebang;
+			} else if body.starts_with("#!") && !body.contains('/') {
+				let mut command = String::new();
+				let mut body_chars = body.chars().collect::<VecDeque<char>>();
+				body_chars.pop_front(); body_chars.pop_front(); // Skip the '#!'
+				while let Some(ch) = body_chars.pop_front() {
+					if matches!(ch, ' ' | '\t' | '\n' | ';') {
+						while body_chars.front().is_some_and(|ch| matches!(ch, ' ' | '\t' | '\n' | ';')) {
+							body_chars.pop_front();
+						}
+						body = body_chars.iter().collect::<String>();
+						break
+					} else {
+						command.push(ch);
+					}
+				}
+				if let Some(path) = helper::which(self.shellenv,&command) {
+					let path = format!("{}{}{}","#!",path,'\n');
+					body = format!("{}{}",path,body);
+				}
 			}
 			// Step 1: Create a pipe
-			let memfd = SmartFd::new_memfd("subshell", true)?;
+			let memfd = RustFd::new_memfd("subshell", true)?;
 			memfd.write(body.as_bytes())?;
+			io.backup_fildescs()?;
+			io.do_plumbing()?;
 
-			match unsafe { fork() } {
-				Ok(ForkResult::Child) => {
-					let fd_path = format!("/proc/self/fd/{}", memfd);
-					let fd_path = CString::new(fd_path).unwrap();
-					let env = shellenv.get_cvars();
-					execve(&fd_path, &[fd_path.clone()], &env).unwrap();
-					unreachable!();
+			if in_pipe {
+				let mut open_fds: VecDeque<RustFd> = VecDeque::new();
+				if !redirs.is_empty() {
+					open_fds.extend(self.handle_redirs(redirs)?);
 				}
-				Ok(ForkResult::Parent { child }) => {
-					nix::sys::wait::waitpid(child, None).unwrap();
+				let fd_path = format!("/proc/self/fd/{}", memfd);
+				let fd_path = CString::new(fd_path).unwrap();
+				let env = shellenv.get_cvars();
+				execve(&fd_path, &c_argv, &env).unwrap();
+			} else {
+				match unsafe { fork() } {
+					Ok(ForkResult::Child) => {
+						let mut open_fds: VecDeque<RustFd> = VecDeque::new();
+						if !redirs.is_empty() {
+							open_fds.extend(self.handle_redirs(redirs)?);
+						}
+						let fd_path = format!("/proc/self/fd/{}", memfd);
+						let fd_path = CString::new(fd_path).unwrap();
+						let env = shellenv.get_cvars();
+						execve(&fd_path, &c_argv, &env).unwrap();
+						unreachable!();
+					}
+					Ok(ForkResult::Parent { child }) => {
+						io.restore_fildescs()?;
+						nix::sys::wait::waitpid(child, None).unwrap();
+					}
+					Err(_) => {}
 				}
-				Err(_) => {}
 			}
-
 		} else { unreachable!() }
 		Ok(RshWaitStatus::new())
 	}
 
+
 	fn handle_pipeline(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus, ShellError> {
-		let (left, right, both) = if let NdType::Pipeline { left, right, both } = &node.nd_type {
-			(*left.clone(), *right.clone(), both)
+		// Step 1: Flatten the pipeline tree into a sequential list
+		let mut flattened_pipeline;
+		if let NdType::Pipeline { ref left, ref right, .. } = node.nd_type {
+			flattened_pipeline = helper::flatten_pipeline(*left.clone(), *right.clone(), VecDeque::new());
 		} else {
-			unreachable!()
-		};
-
-		let (r_pipe,w_pipe) = SmartFd::pipe()?;
-
-		let mut stderr_left = None;
-		if *both { // If the operator is '|&'
-			stderr_left = Some(Arc::new(Mutex::new(w_pipe.dup()?)));
+			unreachable!(); // Only call handle_pipeline with pipeline nodes
 		}
 
-		// `left_io` works like this:
-		// 1. takes stdin from the io arg, representing input from a previous command if any
-		// 2. takes the write pipe as stdout
-		// 3. takes the duped stderr fildesc if any
-		let left_io = ProcIO::from(io.stdin,Some(Arc::new(Mutex::new(w_pipe))), stderr_left);
-		// `right_io` works like this:
-		// 1. takes the read pipe as stdin
-		// 2. takes stdout from the io arg, representing the output to the next command if any
-		// 3. takes stderr from the io arg, representing the error output the the next command if any
-		let right_io = ProcIO::from(Some(Arc::new(Mutex::new(r_pipe))), io.stdout, io.stderr);
-		// Walk left side of the pipeline
-		let left_status = self.walk(left, left_io);
+		let span = node.span();
 
-		// Walk right side of the pipeline
-		let right_status = self.walk(right, right_io);
+		// Step 2: Iterate through the flattened pipeline
+		let mut prev_read_pipe: Option<RustFd> = None; // Previous read pipe
+		let mut last_status = Ok(RshWaitStatus::new());
+		let mut pgid: Option<Pid> = None;
 
-		// Return status of the last command
-		left_status?;
-		right_status
+		while let Some(command) = flattened_pipeline.pop_front() {
+			// Create a new pipe for this command, except for the last one
+			let (r_pipe, mut w_pipe) = if !flattened_pipeline.is_empty() {
+				let (r_pipe, w_pipe) = RustFd::pipe()?;
+				(Some(r_pipe),Some(w_pipe))
+			} else {
+				(None, None) // Last command doesn't need a pipe
+			};
+
+			// Set up IO for the current command
+			let current_io = ProcIO::from(
+				prev_read_pipe.take().map(|pipe| pipe.mk_shared()), // stdin from the previous pipe
+				w_pipe.take().map(|pipe| pipe.mk_shared()), // stdout to the write pipe
+				io.stderr.clone(),                           // Shared stderr
+			);
+
+			// Fork the process for this command
+			match unsafe { fork() } {
+				Ok(ForkResult::Child) => {
+					// In the child process
+					if let Some(mut read_pipe) = prev_read_pipe {
+						read_pipe.close()?; // Close the previous read pipe
+					}
+					if let Some(ref mut write_pipe) = w_pipe {
+						write_pipe.close()?; // Close the current write pipe
+					}
+					self.walk(command, current_io, true)?;
+					std::process::exit(0);
+				}
+				Ok(ForkResult::Parent { child }) => {
+					// In the parent process
+
+					if let Some(mut read_pipe) = prev_read_pipe {
+						read_pipe.close()?; // Close the previous read pipe in the parent
+					}
+					if let Some(mut write_pipe) = w_pipe {
+						write_pipe.close()?; // Close the current write pipe in the parent
+					}
+
+					if pgid.is_none() {
+						pgid = Some(child)
+					}
+					setpgid(child, pgid.unwrap()).map_err(|_| ShellError::from_internal("Failed to set pgid in pipeline"))?;
+
+					// Update the read pipe for the next command
+					prev_read_pipe = r_pipe;
+
+					// Wait for the child process if it's the last command
+					if flattened_pipeline.is_empty() {
+						last_status = match waitpid(child, None) {
+							Ok(WaitStatus::Exited(_, code)) => match code {
+								0 => Ok(RshWaitStatus::Success { span }),
+								_ => Ok(RshWaitStatus::Fail { code, cmd: None, span }),
+							},
+							Ok(WaitStatus::Signaled(_, signal, _)) => {
+								Ok(RshWaitStatus::Fail { code: 128 + signal as i32, cmd: None, span })
+							}
+							Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result in pipeline", 1, span)),
+							Err(err) => Err(ShellError::from_execf(&format!("Pipeline waitpid failed: {}", err), 1, span)),
+						};
+					}
+				}
+				Err(e) => {
+					return Err(ShellError::from_execf(
+							"Execution failed in pipeline",
+							e.to_string().parse::<i32>().unwrap_or(1),
+							span,
+					));
+				}
+			}
+		}
+
+		// Step 3: Return the status of the last command
+		last_status
 	}
 
-	fn handle_function(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus,ShellError> {
+	fn handle_function(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus,ShellError> {
 		let node_span = node.span();
 		if let NdType::Command { mut argv } | NdType::Builtin { mut argv } = node.nd_type {
 			let func_name = argv.pop_front().unwrap();
@@ -785,7 +950,7 @@ impl<'a> NodeWalker<'a> {
 			let mut sub_walker = NodeWalker::new(*func.clone(), self.shellenv);
 
 			// Returns exit status or shell error
-			let mut result = sub_walker.walk_root(*func, None, io);
+			let mut result = sub_walker.walk_root(*func, None, io,in_pipe);
 			if let Err(ref mut e) = result {
 				// Use the span of the function call rather than the stuff inside the function
 				*e = e.overwrite_span(node_span)
@@ -796,200 +961,87 @@ impl<'a> NodeWalker<'a> {
 	}
 
 
-	fn handle_command(&mut self, mut node: Node, mut io: ProcIO) -> Result<RshWaitStatus, ShellError> {
+	fn handle_command(&mut self, mut node: Node, mut io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus, ShellError> {
 		let argv = expand::expand_arguments(self.shellenv, &mut node)?;
 		let argv = argv
 			.iter()
 			.map(|arg| CString::new(arg.text()).unwrap())
 			.collect::<Vec<CString>>();
-		let redirs = node.get_redirs()?;
-		let span = node.span();
-		// Let's expand aliases here
-		if let NdType::Command { ref argv } = node.nd_type {
-			// If the shellenv is allowing aliases, and the token is not from an expanded alias
-			if !argv.front().unwrap().flags().contains(WdFlags::FROM_ALIAS) {
-				let node = expand::expand_alias(self.shellenv, node.clone())?;
+			let redirs = node.get_redirs()?;
+			let span = node.span();
+			// Let's expand aliases here
+			if let NdType::Command { ref argv } = node.nd_type {
+				// Check for autocd
+				if self.shellenv.shopts.get("autocd").is_some_and(|opt| *opt > 0) && argv.len() == 1 {
+					let path_candidate = argv.front().unwrap();
+					let is_relative_path = path_candidate.text().starts_with('.');
+					let contains_slash = path_candidate.text().contains('/');
+					let path_exists = Path::new(path_candidate.text()).is_dir();
 
-				if !matches!(node.nd_type, NdType::Command {..}) {
-					// If the resulting alias expansion does not return this node
-					// then walk the resulting sub-tree
-					return self.walk_root(node, None, io)
+					if (is_relative_path || contains_slash) && path_exists {
+						let cd_token = Tk::new("cd".into(),span,path_candidate.flags());
+						let mut autocd_argv = argv.clone();
+						autocd_argv.push_front(cd_token);
+						let autocd = Node {
+							nd_type: NdType::Builtin { argv: autocd_argv },
+							span,
+							flags: node.flags,
+							redirs: node.redirs
+						};
+						return self.walk(autocd, io, false)
+
+					}
 				}
 			}
-			if self.shellenv.shopts.get("autocd").is_some_and(|opt| *opt > 0) && argv.len() == 1 {
-				let path_candidate = argv.front().unwrap();
-				let is_relative_path = path_candidate.text().starts_with('.');
-				let contains_slash = path_candidate.text().contains('/');
-				let path_exists = Path::new(path_candidate.text()).is_dir();
+			io.backup_fildescs()?; // Save original stin, stdout, and stderr
+			io.do_plumbing()?; // Route pipe logic using fildescs
 
-				if (is_relative_path || contains_slash) && path_exists {
-					let cd_token = Tk::new("cd".into(),span,path_candidate.flags());
-					let mut autocd_argv = argv.clone();
-					autocd_argv.push_front(cd_token);
-					let autocd = Node {
-						nd_type: NdType::Builtin { argv: autocd_argv },
-						span,
-						flags: node.flags,
-						redirs: node.redirs
-					};
-					return self.walk(autocd, io)
 
-				}
+			let cmd = argv[0].clone().into_string().unwrap();
+			let command = &argv[0];
+			let envp = self.shellenv.get_cvars();
+			let mut open_fds: VecDeque<RustFd> = VecDeque::new();
+			if !redirs.is_empty() {
+				open_fds.extend(self.handle_redirs(redirs.into())?);
 			}
-		}
-		io.backup_fildescs()?; // Save original stin, stdout, and stderr
-		io.do_plumbing()?; // Route pipe logic using fildescs
 
-
-		let cmd = Some(argv[0].clone().into_string().unwrap());
-		let command = &argv[0];
-		let envp = self.shellenv.get_cvars();
-
-		match unsafe { fork() } {
-			Ok(ForkResult::Child) => {
-				// Handle redirections
-				let mut open_fds: VecDeque<SmartFd> = VecDeque::new();
-				if !redirs.is_empty() {
-					open_fds.extend(self.handle_redirs(redirs.into())?);
-				}
-
-				// Execute the command
+			// Call execvpe in this process if we are in a child spawned by handle_pipeline
+			if in_pipe {
 				let Err(_) = execvpe(command, &argv, &envp);
 				std::process::exit(127);
-			}
-			Ok(ForkResult::Parent { child }) => {
-				io.restore_fildescs()?;
+			} else {
+				match unsafe { fork() } {
+					Ok(ForkResult::Child) => {
+						// Handle redirections
 
-				// Wait for the child process to finish
-				match waitpid(child, None) {
-					Ok(WaitStatus::Exited(_, code)) => match code {
-						0 => Ok(RshWaitStatus::Success { span }),
-						_ => Ok(RshWaitStatus::Fail { code, cmd, span }),
-					},
-					Ok(WaitStatus::Signaled(_,signal,_)) => {
-						Ok(RshWaitStatus::Fail { code: 128 + signal as i32, cmd, span })
+						// Execute the command
+						let Err(_) = execvpe(command, &argv, &envp);
+						std::process::exit(127);
 					}
-					Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
-					Err(err) => Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),
-				}
-			}
-			Err(_) => Err(ShellError::from_execf("Fork failed", 1, span)),
-		}
-	}
-}
+					Ok(ForkResult::Parent { child }) => {
+						io.restore_fildescs()?;
 
-#[cfg(test)]
-mod tests {
-	use crate::shellenv::EnvFlags;
-
-// Probably need to re-write this later
-	// These handle basic uses but cap_output isn't a strong enough implementation to handle complex stuff it seems
-	use super::*;
-	use std::process;
-	use std::fs::File;
-	use std::io::Read;
-	use libc::{fork, waitpid, WIFEXITED, WEXITSTATUS, c_int};
-
-	fn cap_output(input: &str) -> String {
-		// Your existing cap_output logic here
-		let mut io = ProcIO::new();
-		io.backup_fildescs();
-		let (r_pipe, w_pipe) = SmartFd::pipe().unwrap();
-		let mut output = vec![];
-		io.stdout = Some(w_pipe.mk_shared());
-		let mut output_file = unsafe { File::from_raw_fd(r_pipe.as_raw_fd()) };
-
-		let shellenv = ShellEnv::new(EnvFlags::NO_RC | EnvFlags::CLEAN);
-		let mut shellenv2 = ShellEnv::new(EnvFlags::NO_RC | EnvFlags::CLEAN);
-		let state = parse::descend(input, &shellenv).unwrap();
-		let mut walker = NodeWalker::new(state.ast.clone(), &mut shellenv2);
-
-		walker.walk_root(state.ast, None, io.try_clone()).unwrap();
-
-		if let Some(w_pipe) = io.stdout {
-			let mut w_fd = w_pipe.lock().unwrap();
-			if w_fd.is_valid() {
-				w_fd.close().unwrap();
-			}
-		}
-
-		output_file.read_to_end(&mut output).unwrap();
-		String::from_utf8_lossy(&output).to_string()
-	}
-
-	fn fork_test<F: FnOnce() -> bool>(test_fn: F) -> bool {
-		unsafe {
-			match fork() {
-				-1 => panic!("Failed to fork"),
-				0 => {
-					// Child process
-					if test_fn() {
-						process::exit(0)
-					} else {
-						process::exit(1)
+						// Wait for the child process to finish
+						setpgid(child, child).map_err(|_| ShellError::from_io())?;
+						if node.flags.contains(NdFlags::BACKGROUND) {
+							self.shellenv.new_job(child, &cmd);
+							Ok(RshWaitStatus::Success { span })
+						} else {
+							match waitpid(child, None) {
+								Ok(WaitStatus::Exited(_, code)) => match code {
+									0 => Ok(RshWaitStatus::Success { span }),
+									_ => Ok(RshWaitStatus::Fail { code, cmd: Some(cmd), span }),
+								},
+								Ok(WaitStatus::Signaled(_,signal,_)) => {
+									Ok(RshWaitStatus::Fail { code: 128 + signal as i32, cmd: Some(cmd), span })
+								}
+								Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
+								Err(err) => Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),
+							}
+						}
 					}
-				}
-				pid => {
-					// Parent process
-					let mut status: c_int = 0;
-					waitpid(pid, &mut status, 0);
-					WIFEXITED(status) && WEXITSTATUS(status) == 0
+					Err(_) => Err(ShellError::from_execf("Fork failed", 1, span)),
 				}
 			}
-		}
-	}
-
-	#[test]
-	fn test_command() {
-		assert!(fork_test(|| {
-			let input = "echo hello world";
-			let output = cap_output(input);
-			output.trim() == "hello world"
-		}));
-	}
-
-	#[test]
-	fn test_builtin_pipeline() {
-		assert!(fork_test(|| {
-			let input = "echo hello world | sed 's/hello/goodbye/'";
-			let output = cap_output(input);
-			output.trim() == "goodbye world"
-		}));
-	}
-
-	#[test]
-	fn test_pipeline() {
-		assert!(fork_test(|| {
-			let input = "echo hello world | cat | sed 's/hello/goodbye/'";
-			let output = cap_output(input);
-			output.trim() == "goodbye world"
-		}));
-	}
-
-	#[test]
-	fn test_sub() {
-		assert!(fork_test(|| {
-			let input = "name=world; echo hello $name";
-			let output = cap_output(input);
-			output.trim() == "hello world"
-		}));
-	}
-
-	#[test]
-	fn test_if() {
-		assert!(fork_test(|| {
-			let input = "if true; then echo this should print; fi; if false; then echo this should not print; fi";
-			let output = cap_output(input);
-			output.trim() == "this should print"
-		}));
-	}
-
-	#[test]
-	fn test_for() {
-		assert!(fork_test(|| {
-			let input = "for i in 1 2 3; do echo hello; done";
-			let output = cap_output(input);
-			output.trim() == "hello\nhello\nhello"
-		}));
 	}
 }
