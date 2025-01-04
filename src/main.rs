@@ -32,7 +32,7 @@ pub mod comp;
 use std::{env, fs::File, io::Read, os::fd::{AsFd, BorrowedFd}};
 
 use event::{EventLoop, ShellError, ShellErrorFull};
-use execute::{NodeWalker, RshWaitStatus};
+use execute::{NodeWalker, RshWait};
 use interp::parse::descend;
 use libc::STDERR_FILENO;
 use log::info;
@@ -41,6 +41,8 @@ use shellenv::EnvFlags;
 
 //use crate::event::EventLoop;
 use crate::shellenv::ShellEnv;
+
+pub type RshResult<T> = Result<T, ShellError>;
 
 
 #[tokio::main]
@@ -112,7 +114,7 @@ async fn main_noninteractive(args: Vec<String>, mut shellenv: ShellEnv) {
 			match walker.start_walk() {
 				Ok(code) => {
 					info!("Last exit status: {:?}", code);
-					if let RshWaitStatus::Fail { code, cmd, span } = code {
+					if let RshWait::Fail { code, cmd, span } = code {
 						if code == 127 {
 							if let Some(cmd) = cmd {
 								let err = ShellErrorFull::from(shellenv.get_last_input(),ShellError::from_no_cmd(&cmd, span));

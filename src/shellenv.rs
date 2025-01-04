@@ -16,19 +16,21 @@ use bitflags::bitflags;
 use log::{debug, info, trace};
 
 use crate::event::{ShellError, ShellErrorFull};
-use crate::execute::{NodeWalker, RshWaitStatus};
+use crate::execute::{NodeWalker, RshWait};
 use crate::interp::expand::expand_var;
 use crate::interp::helper;
 use crate::interp::parse::{descend, Node, Span};
+use crate::RshResult;
 
 bitflags! {
-	#[derive(Debug,Clone)]
+	#[derive(Debug,Copy,Clone)]
 	pub struct JobFlags: i8 {
 		const LONG      = 0b00000001;
 		const PIDS_ONLY = 0b00000010;
 		const NEW_ONLY  = 0b00000100;
 		const RUNNING   = 0b00001000;
 		const STOPPED   = 0b00010000;
+		const INIT      = 0b00100000;
 	}
 }
 
@@ -38,17 +40,15 @@ pub struct Job {
 	pids: Vec<Pid>,
 	commands: Vec<String>,
 	pgid: Pid,
-	statuses: Vec<RshWaitStatus>,
-	current: bool,
-	prev: bool,
+	statuses: Vec<RshWait>,
 }
 
 impl Job {
 	pub fn new(job_id: i32, pids: Vec<Pid>, commands: Vec<String>, pgid: Pid) -> Self {
 		let num_pids = pids.len();
-		Self { job_id, pgid, pids, commands, statuses: vec![RshWaitStatus::Running;num_pids], current: true, prev: false }
+		Self { job_id, pgid, pids, commands, statuses: vec![RshWait::Running;num_pids] }
 	}
-	pub fn update_status(&mut self, pid_index: usize, new_stat: RshWaitStatus) {
+	pub fn update_status(&mut self, pid_index: usize, new_stat: RshWait) {
 			if pid_index < self.statuses.len() {
 					self.statuses[pid_index] = new_stat;
 			} else {
@@ -62,10 +62,16 @@ impl Job {
 	pub fn pgid(&self) -> &Pid {
 		&self.pgid
 	}
+	pub fn get_proc_statuses(&self) -> &[RshWait] {
+		&self.statuses
+	}
+	pub fn id(&self) -> i32 {
+		self.job_id
+	}
 	pub fn commands(&self) -> Vec<String> {
 		self.commands.clone()
 	}
-	pub fn signal_proc(&self, sig: Signal) -> Result<(),ShellError> {
+	pub fn signal_proc(&self, sig: Signal) -> RshResult<()> {
 		if self.pids().len() == 1 {
 			let pid = *self.pids().first().unwrap();
 				signal::kill(pid, sig).map_err(|_| ShellError::from_io())
@@ -73,66 +79,65 @@ impl Job {
 			signal::killpg(self.pgid, sig).map_err(|_| ShellError::from_io())
 		}
 	}
-	pub fn print(&self, long: bool) -> String {
+	pub fn print(&self, current: Option<i32>, flags: JobFlags) -> String {
+		let long = flags.contains(JobFlags::LONG);
+		let init = flags.contains(JobFlags::INIT);
 		let mut output = String::new();
 
+		const GREEN: &str = "\x1b[32m";
+		const RED: &str = "\x1b[31m";
+		const CYAN: &str = "\x1b[35m";
+		const RESET: &str = "\x1b[0m";
+
 		// Add job ID and status
-		let symbol = if self.current { "+" } else if self.prev { "-" } else { " " };
+		let symbol = if current.is_some_and(|cur| cur == self.job_id) {
+			"+"
+		} else if current.is_some_and(|cur| cur == self.job_id + 1) {
+			"-"
+		} else {
+			" "
+		};
 		output.push_str(&format!("[{}]{} ", self.job_id, symbol));
 		let padding_num = symbol.len() + self.job_id.to_string().len() + 3;
 		let padding: String = " ".repeat(padding_num);
 
 		// Add commands and PIDs
 		for (i, cmd) in self.commands.iter().enumerate() {
-			let mut cmd = cmd.clone();
+			let cmd = cmd.clone();
+			let status1 = if init { self.pids().get(i).unwrap().to_string() } else { self.statuses.get(i).unwrap().to_string() };
+			let status2 = format!("{}\t{}",status1,cmd);
+			let mut status_final = if status2.starts_with("done") {
+				format!("{}{}{}",GREEN,status2,RESET)
+			} else if status2.starts_with("exit") {
+				format!("{}{}{}",RED,status2,RESET)
+			} else {
+				format!("{}{}{}",CYAN,status2,RESET)
+			};
 			if i != self.commands.len() - 1 {
-				cmd.push_str(" |");
+				status_final.push_str(" |");
 			}
-			if long {
+			status_final.push('\n');
+			let status_line = if long {
 				// Long format includes PIDs
-				output.push_str(&format!(
-						"{}{}{}\t{}\n",
+				format!(
+						"{}{} {}",
 						if i != 0 { padding.clone() } else { "".into() },
 						self.pids().get(i).unwrap(),
-						self.statuses.get(i).unwrap(),
-						cmd
-				));
+						status_final
+				)
 			} else {
-				// Short format only includes commands
-				output.push_str(&format!(
-						"{}{}\t{}\n",
+				format!(
+						"{}{}",
 						if i != 0 { padding.clone() } else { "".into() },
-						self.statuses.get(i).unwrap(),
-						cmd
-					)
-				);
-			}
+						status_final
+				)
+			};
+			output.push_str(&status_line);
 		}
 
 		output
 	}
 
-}
-
-impl Display for Job {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Determine the job symbol
-        let symbol = if self.current { "+" } else if self.prev { "-" } else { "" };
-
-        // Write the job ID and symbol
-        write!(f, "[{}]{} ", self.job_id, symbol)?;
-
-        // Iterate over processes in the job
-				for i in 0..self.pids.len() {
-					let cmd = self.commands.get(i).unwrap();
-            // Add padding for subsequent lines
-            let padding = if i == 0 { "" } else { "     " };
-						let cmd = if i == self.pids.len() - 1 { cmd } else { &format!("{}{}",cmd," |") };
-            writeln!(f, "{}\t{}", padding, cmd)?;
-        }
-
-        Ok(())
-    }
 }
 
 bitflags! {
@@ -195,7 +200,6 @@ impl PartialEq for ShellEnv {
 pub struct JobTable {
 	jobs: HashMap<i32,Job>,
 	curr_job: Option<i32>,
-	prev_job: Option<i32>,
 	updated_since_check: HashMap<i32,Job>
 }
 
@@ -204,19 +208,22 @@ impl JobTable {
 		Self {
 			jobs: HashMap::new(),
 			curr_job: None,
-			prev_job: None,
 			updated_since_check: HashMap::new()
 		}
 	}
+	pub fn curr_job(&self) -> Option<i32> {
+		self.curr_job
+	}
 	pub fn print_jobs(&self, flags: &JobFlags) {
-		let jobs = self.jobs.values().collect::<Vec<&Job>>();
+		let mut jobs = self.jobs.values().collect::<Vec<&Job>>();
+		jobs.sort_by_key(|job| job.job_id);
 		for job in jobs {
 			let id = job.job_id;
 			// Filter jobs based on flags
-			if flags.contains(JobFlags::RUNNING) && !matches!(job.statuses.get(id as usize).unwrap(), RshWaitStatus::Running) {
+			if flags.contains(JobFlags::RUNNING) && !matches!(job.statuses.get(id as usize).unwrap(), RshWait::Running) {
 				continue;
 			}
-			if flags.contains(JobFlags::STOPPED) && !matches!(job.statuses.get(id as usize).unwrap(), RshWaitStatus::Stopped {..}) {
+			if flags.contains(JobFlags::STOPPED) && !matches!(job.statuses.get(id as usize).unwrap(), RshWait::Stopped {..}) {
 				continue;
 			}
 			if flags.contains(JobFlags::PIDS_ONLY) {
@@ -226,7 +233,7 @@ impl JobTable {
 				}
 			} else {
 				// Print the job in the selected format
-				println!("{}", job.print(flags.contains(JobFlags::LONG)));
+				println!("{}", job.print(self.curr_job, *flags));
 			}
 		}
 	}
@@ -289,7 +296,7 @@ impl ShellEnv {
 	pub fn new_job(&mut self, pids: Vec<Pid>, commands: Vec<String>, pgid: Pid) {
 		let job_id = self.job_table.jobs.len() + 1;
 		let job = Job::new(job_id as i32,pids,commands,pgid);
-		println!("{}",job);
+		println!("{}",job.print(Some(job_id as i32), JobFlags::INIT));
 		self.job_table.jobs.insert(job_id as i32, job);
 		self.set_curr_job(job_id as i32);
 	}
@@ -299,8 +306,9 @@ impl ShellEnv {
 	}
 
 	pub fn set_curr_job(&mut self, job_id: i32) {
-		self.job_table.prev_job = self.job_table.curr_job;
-		self.job_table.curr_job = Some(job_id);
+		if !self.job_table.jobs.is_empty() {
+			self.job_table.curr_job = Some(job_id);
+		}
 	}
 
 	fn init_env_vars(clean: bool) -> HashMap<String,String> {
@@ -368,13 +376,13 @@ impl ShellEnv {
 		self.last_input.clone().unwrap_or_default()
 	}
 
-	pub fn source_profile(&mut self) -> Result<(),ShellError> {
+	pub fn source_profile(&mut self) -> RshResult<()> {
 		let home = self.get_variable("HOME").unwrap();
 		let path = PathBuf::from(format!("{}/.rsh_profile",home));
 		self.source_file(path)
 	}
 
-	pub fn source_file(&mut self, path: PathBuf) -> Result<(),ShellError> {
+	pub fn source_file(&mut self, path: PathBuf) -> RshResult<()> {
 		let mut file = File::open(&path).map_err(|_| ShellError::from_io())?;
 		let mut buffer = String::new();
 		file.read_to_string(&mut buffer).map_err(|_| ShellError::from_io())?;
@@ -388,7 +396,7 @@ impl ShellEnv {
 				match walker.start_walk() {
 					Ok(code) => {
 						info!("Last exit status: {:?}", code);
-						if let RshWaitStatus::Fail { code, cmd, span } = code {
+						if let RshWait::Fail { code, cmd, span } = code {
 							if code == 127 {
 								if let Some(cmd) = cmd {
 									let err = ShellErrorFull::from(self.get_last_input(),ShellError::from_no_cmd(&format!("Command not found: {}",cmd), span));
@@ -411,8 +419,8 @@ impl ShellEnv {
 		Ok(())
 	}
 
-	pub fn change_dir(&mut self, path: &Path, span: Span) -> Result<(), ShellError> {
-		let result = helper::suppress_err(|| env::set_current_dir(path));
+	pub fn change_dir(&mut self, path: &Path, span: Span) -> RshResult<()> {
+		let result = env::set_current_dir(path);
 		match result {
 			Ok(_) => {
 				let old_pwd = self.env_vars.remove("PWD").unwrap_or_default();
@@ -473,10 +481,10 @@ impl ShellEnv {
 		self.open_fds.remove(&fd);
 	}
 
-	pub fn handle_exit_status(&mut self, wait_status: RshWaitStatus) {
+	pub fn handle_exit_status(&mut self, wait_status: RshWait) {
 		match wait_status {
-			RshWaitStatus::Success { .. } => self.set_parameter("?".into(), "0".into()),
-			RshWaitStatus::Fail { code, cmd: _, span: _ } => self.set_parameter("?".into(), code.to_string()),
+			RshWait::Success { .. } => self.set_parameter("?".into(), "0".into()),
+			RshWait::Fail { code, cmd: _, span: _ } => self.set_parameter("?".into(), code.to_string()),
 			_ => unimplemented!()
 		}
 	}
@@ -572,7 +580,7 @@ impl ShellEnv {
 		self.functions.get(name).cloned()
 	}
 
-	pub fn set_function(&mut self, name: String, body: Box<Node>) -> Result<(),ShellError> {
+	pub fn set_function(&mut self, name: String, body: Box<Node>) -> RshResult<()> {
 		if self.get_alias(name.as_str()).is_some() {
 			return Err(ShellError::from_parse(format!("The name `{}` is already being used as an alias",name).as_str(), body.span()))
 		}

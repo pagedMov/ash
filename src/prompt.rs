@@ -80,6 +80,7 @@ pub async fn prompt(sender: mpsc::Sender<ShellEvent>, shellenv: &mut ShellEnv) {
 				Ok(parse_state) => {
 					if let NdType::Root { deck } = &parse_state.ast.nd_type {
 						if !deck.is_empty() {
+							let _ = sender.send(ShellEvent::NewInput(parse_state.input.to_string())).await;
 							let _ = sender.send(ShellEvent::NewAST(parse_state.ast)).await;
 						}
 					}

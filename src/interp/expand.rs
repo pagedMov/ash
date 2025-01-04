@@ -8,6 +8,7 @@ use crate::event::ShellError;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
 use crate::interp::helper::{self,StrExtension, VecDequeExtension};
 use crate::shellenv::{EnvFlags, ShellEnv};
+use crate::RshResult;
 
 use super::parse::{self, NdType, Node, ParseState};
 use super::token::RshTokenizer;
@@ -17,7 +18,7 @@ pub fn check_globs(string: String) -> bool {
 		string.has_unescaped("*")
 }
 
-pub fn expand_arguments(shellenv: &ShellEnv, node: &mut Node) -> Result<Vec<Tk>,ShellError> {
+pub fn expand_arguments(shellenv: &ShellEnv, node: &mut Node) -> RshResult<Vec<Tk>> {
 	let argv = node.get_argv()?;
 	let mut expand_buffer = Vec::new();
 	for arg in &argv {
@@ -283,7 +284,7 @@ pub fn process_ansi_escapes(input: &str) -> String {
 	result
 }
 
-pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> Result<Node, ShellError> {
+pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> RshResult<Node> {
 	match node.nd_type {
 		NdType::Command { ref mut argv } | NdType::Builtin { ref mut argv } => {
 			if let Some(cmd_tk) = argv.pop_front() {

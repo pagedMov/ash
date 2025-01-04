@@ -7,6 +7,7 @@ use std::mem::take;
 use crate::event::ShellError;
 use crate::shellenv::{EnvFlags, ShellEnv};
 use crate::interp::token::{RedirType, RshTokenizer, Tk, TkType};
+use crate::RshResult;
 
 use super::token::{Redir, WdFlags};
 
@@ -140,7 +141,7 @@ impl Node {
 	pub fn set_span(&mut self,span: Span) {
 		self.span = span
 	}
-	pub fn get_argv(&self) -> Result<Vec<Tk>,ShellError> {
+	pub fn get_argv(&self) -> RshResult<Vec<Tk>> {
 		let mut arg_vec = vec![];
 		match &self.nd_type {
 			NdType::Command { argv } | NdType::Builtin { argv } | NdType::Subshell { body: _, argv } => {
@@ -152,7 +153,7 @@ impl Node {
 			_ => Err(ShellError::from_internal("Attempt to call `get_argv()` on a non-command node")),
 		}
 	}
-	pub fn get_redirs(&self) -> Result<Vec<Node>,ShellError> {
+	pub fn get_redirs(&self) -> RshResult<Vec<Node>> {
 		if !self.flags.contains(NdFlags::VALID_OPERAND) {
 			return Err(ShellError::from_internal("Called get_redirs with an invalid operand"))
 		}
@@ -278,7 +279,7 @@ impl DescentContext {
 	}
 }
 
-pub fn descend<'a>(input: &'a str, shellenv: &'a ShellEnv) -> Result<ParseState<'a>,ShellError> {
+pub fn descend<'a>(input: &'a str, shellenv: &'a ShellEnv) -> RshResult<ParseState<'a>> {
 	info!("Starting descent into parsing with input: {:?}", input);
 	let mut tokenizer = RshTokenizer::new(input);
 	let mut state = ParseState {
@@ -306,7 +307,7 @@ pub fn descend<'a>(input: &'a str, shellenv: &'a ShellEnv) -> Result<ParseState<
 /// propagated up here and then converted to a complete ShellErrorFull using the context of
 /// ParseState. This is done because propagating errors upwards is probably
 /// cheaper (and definitely easier) than propagating the raw input text downwards.
-pub fn parse(state: ParseState) -> Result<ParseState,ShellError> {
+pub fn parse(state: ParseState) -> RshResult<ParseState> {
 	let ctx = DescentContext::new(state.tokens.clone());
 
 	get_tree(ctx).map(|ast| {
@@ -320,7 +321,7 @@ pub fn parse(state: ParseState) -> Result<ParseState,ShellError> {
 	})
 }
 
-pub fn get_tree(ctx: DescentContext) -> Result<Node, ShellError> {
+pub fn get_tree(ctx: DescentContext) -> RshResult<Node> {
 	trace!("Building AST from tokens: {:?}",ctx.tokens);
 	let span = compute_span(&ctx.tokens.clone());
 	let ctx = parse_linear(ctx,false)?;
@@ -335,7 +336,7 @@ pub fn get_tree(ctx: DescentContext) -> Result<Node, ShellError> {
 	Ok(tree)
 }
 
-pub fn parse_linear(mut ctx: DescentContext, once: bool) -> Result<DescentContext, ShellError> {
+pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentContext> {
 	// First pass just makes nodes without joining at operators
 	info!("Starting linear parsing of tokens...");
 	while let Some(tk) = ctx.next_tk() {
@@ -496,7 +497,7 @@ pub fn check_valid_operand(node: &Node) -> bool {
 	matches!(node.nd_type, Pipeline {..} | Subshell {..} | Chain {..} | If {..} | For {..} | Loop {..} | Case {..} | Select {..} | Command {..} | Builtin {..})
 }
 
-pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
+pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let mut buffer: VecDeque<Node> = VecDeque::new();
 
 	// First pass: Redirection operators
@@ -609,7 +610,7 @@ pub fn join_at_operators(mut ctx: DescentContext) -> Result<DescentContext, Shel
 	ctx.root.extend(buffer.drain(..));
 	Ok(ctx)
 }
-pub fn propagate_redirections(mut node: Node) -> Result<Node,ShellError> {
+pub fn propagate_redirections(mut node: Node) -> RshResult<Node> {
 	// This function allows for redirections for higher order control flow structures
 	// e.g. `while true; do echo hello world; done > file.txt`
 	// The entire AST is rebuilt in-place, while carrying redirections out to the leaf nodes
@@ -752,7 +753,7 @@ pub fn propagate_redirections(mut node: Node) -> Result<Node,ShellError> {
 	Ok(node)
 }
 
-fn get_flow_ctl_redirections(node: &Node) -> Result<(Vec<Node>, Vec<Node>),ShellError> {
+fn get_flow_ctl_redirections(node: &Node) -> RshResult<(Vec<Node>, Vec<Node>)> {
 	// Separates redirections into two baskets; one for conditions and one for bodies
 	// Input redirections like `while read -r line; do echo $line; done < lines.txt` go to the condition
 	// Output redirections like `while true; do echo hello world; done >> hello.txt` go to the body
@@ -775,7 +776,7 @@ fn compute_span(tokens: &VecDeque<Tk>) -> Span {
 	}
 }
 
-fn parse_and_attach(mut tokens: VecDeque<Tk>, mut root: VecDeque<Node>) -> Result<VecDeque<Node>,ShellError> {
+fn parse_and_attach(mut tokens: VecDeque<Tk>, mut root: VecDeque<Node>) -> RshResult<VecDeque<Node>> {
 	let mut sub_ctx = DescentContext::new(take(&mut tokens));
 	sub_ctx = parse_linear(sub_ctx,true)?;
 	while let Some(node) = sub_ctx.root.pop_back() {
@@ -790,7 +791,7 @@ fn get_conditional(cond_root: VecDeque<Node>, cond_span: Span, body_root: VecDeq
 	Conditional { condition, body }
 }
 
-pub fn build_redirection(mut ctx: DescentContext) -> Result<DescentContext,ShellError> {
+pub fn build_redirection(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let span_start = ctx.mark_start();
 	let redir_tk = ctx.next_tk()
 		.ok_or_else(|| ShellError::from_internal("Called build_redirection with an empty token queue"))?;
@@ -825,7 +826,7 @@ pub fn build_redirection(mut ctx: DescentContext) -> Result<DescentContext,Shell
 		Ok(ctx)
 }
 
-pub fn build_if(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
+pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let mut cond_tokens = VecDeque::new();
 	let mut cond_root = VecDeque::new();
 	let mut body_tokens = VecDeque::new();
@@ -990,7 +991,7 @@ pub fn build_if(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
 	Ok(ctx)
 }
 
-pub fn build_for(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
+pub fn build_for(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let mut phase = Phase::Vars;
 
 	let mut loop_vars: VecDeque<Tk> = VecDeque::new();
@@ -1094,7 +1095,7 @@ pub fn build_for(mut ctx: DescentContext) -> Result<DescentContext, ShellError> 
 	Ok(ctx)
 }
 
-pub fn build_loop(condition: bool, mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
+pub fn build_loop(condition: bool, mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let loop_condition = condition;
 
 	let mut phase = Phase::Condition;
@@ -1185,7 +1186,7 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> Result<DescentCon
 	Ok(ctx)
 }
 
-pub fn build_case(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
+pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let mut cases = HashMap::new();
 	let mut block_string = String::new();
 	let mut block_tokens = VecDeque::new();
@@ -1305,7 +1306,7 @@ pub fn build_case(mut ctx: DescentContext) -> Result<DescentContext, ShellError>
 	Ok(ctx)
 }
 
-pub fn build_select(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
+pub fn build_select(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	// TODO: figure out a way to get 'in' to actually be a keyword
 	// Fix the logic in general so this code doesn't have to use awkward work arounds
 	let mut phase = Phase::Condition;
@@ -1402,7 +1403,7 @@ pub fn build_select(mut ctx: DescentContext) -> Result<DescentContext, ShellErro
 	Ok(ctx)
 }
 
-pub fn build_func_def(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
+pub fn build_func_def(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let def = ctx.next_tk().unwrap();
 	if let TkType::FuncDef = def.tk_type {
 		//TODO: initializing a new shellenv instead of cloning the current one here
@@ -1434,7 +1435,7 @@ pub fn build_func_def(mut ctx: DescentContext) -> Result<DescentContext, ShellEr
 	} else { unreachable!() }
 }
 
-pub fn build_assignment(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
+pub fn build_assignment(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let ass = ctx.next_tk().unwrap();
 	if let TkType::Assignment = ass.tk_type {
 		let (var, val) = ass.text().split_once('=').unwrap();
@@ -1453,11 +1454,11 @@ pub fn build_assignment(mut ctx: DescentContext) -> Result<DescentContext, Shell
 	} else { unreachable!() }
 }
 
-pub fn build_brace_group(tokens: VecDeque<Tk>) -> Result<(Node, VecDeque<Tk>), ShellError> {
+pub fn build_brace_group(tokens: VecDeque<Tk>) -> RshResult<(Node, VecDeque<Tk>)> {
 	todo!("Implement build_brace_group")
 }
 
-pub fn build_command(mut ctx: DescentContext) -> Result<DescentContext, ShellError> {
+pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let mut argv = VecDeque::new();
 	// We handle redirections in join_at_operators(), so hold them here and push them back onto the queue afterward
 	let mut held_redirs = VecDeque::new();

@@ -14,13 +14,14 @@ use std::sync::{Arc, Mutex};
 use log::{info,trace};
 use glob::MatchOptions;
 
-use crate::builtin::{alias, cd, echo, export, jobs, pwd, set_or_unset, source, test};
+use crate::builtin::{alias, cd, echo, export, fg, jobs, pwd, set_or_unset, source, test};
 use crate::event::ShellError;
 use crate::interp::helper::{self, VecDequeExtension};
 use crate::interp::{expand, parse};
 use crate::interp::token::{Redir, RedirType, Tk, TkType, WdFlags};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::shellenv::ShellEnv;
+use crate::RshResult;
 
 pub const GLOB_OPTS: MatchOptions = MatchOptions {
 	case_sensitive: false,
@@ -64,7 +65,7 @@ pub struct RustFd {
 }
 
 impl RustFd {
-	pub fn new(fd: RawFd) -> Result<Self,ShellError> {
+	pub fn new(fd: RawFd) -> RshResult<Self> {
 		if fd < 0 {
 			return Err(ShellError::from_internal("Attempted to create a new RustFd from a negative FD"));
 		}
@@ -72,25 +73,25 @@ impl RustFd {
 	}
 
 	/// Create a `RustFd` from a duplicate of `stdin` (FD 0)
-	pub fn from_stdin() -> Result<Self,ShellError> {
+	pub fn from_stdin() -> RshResult<Self> {
 		let fd = dup(0).map_err(|_| ShellError::from_io())?;
 		Ok(Self { fd })
 	}
 
 	/// Create a `RustFd` from a duplicate of `stdout` (FD 1)
-	pub fn from_stdout() -> Result<Self,ShellError> {
+	pub fn from_stdout() -> RshResult<Self> {
 		let fd = dup(1).map_err(|_| ShellError::from_io())?;
 		Ok(Self { fd })
 	}
 
 	/// Create a `RustFd` from a duplicate of `stderr` (FD 2)
-	pub fn from_stderr() -> Result<Self,ShellError> {
+	pub fn from_stderr() -> RshResult<Self> {
 		let fd = dup(2).map_err(|_| ShellError::from_io())?;
 		Ok(Self { fd })
 	}
 
 	/// Create a `RustFd` from a type that provides an owned or borrowed FD
-	pub fn from_fd<T: AsFd>(fd: T) -> Result<Self,ShellError> {
+	pub fn from_fd<T: AsFd>(fd: T) -> RshResult<Self> {
 		let raw_fd = fd.as_fd().as_raw_fd();
 		if raw_fd < 0 {
 			return Err(ShellError::from_internal("Attempted to convert to RustFd from a negative FD"));
@@ -99,7 +100,7 @@ impl RustFd {
 	}
 
 	/// Create a `RustFd` by consuming ownership of an FD
-	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> Result<Self,ShellError> {
+	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> RshResult<Self> {
 		let raw_fd = fd.into_raw_fd(); // Consumes ownership
 		if raw_fd < 0 {
 			return Err(ShellError::from_internal("Attempted to convert to RustFd from a negative FD"));
@@ -108,7 +109,7 @@ impl RustFd {
 	}
 
 	/// Create a new `RustFd` that points to an in-memory file descriptor. In-memory file descriptors can be interacted with as though they were normal files.
-	pub fn new_memfd(name: &str, executable: bool) -> Result<Self, ShellError> {
+	pub fn new_memfd(name: &str, executable: bool) -> RshResult<Self> {
 		let c_name = CString::new(name).map_err(|_| ShellError::from_internal("Invalid name for memfd"))?;
 		let flags = if executable {
 			0
@@ -120,7 +121,7 @@ impl RustFd {
 	}
 
 	/// Write some bytes to the contained file descriptor
-	pub fn write(&self, buffer: &[u8]) -> Result<(),ShellError> {
+	pub fn write(&self, buffer: &[u8]) -> RshResult<()> {
 		if !self.is_valid() {
 			return Err(ShellError::from_internal("Attempted to write to an invalid RustFd"));
 		}
@@ -133,7 +134,7 @@ impl RustFd {
 	}
 
 	/// Wrapper for nix::unistd::pipe(), simply produces two `RustFds` that point to a read and write pipe respectfully
-	pub fn pipe() -> Result<(Self,Self),ShellError> {
+	pub fn pipe() -> RshResult<(Self,Self)> {
 		let (r_pipe,w_pipe) = pipe().map_err(|_| ShellError::from_io())?;
 		let r_fd = RustFd::from_owned_fd(r_pipe)?;
 		let w_fd = RustFd::from_owned_fd(w_pipe)?;
@@ -141,7 +142,7 @@ impl RustFd {
 	}
 
 	/// Produce a `RustFd` that points to the same resource as the 'self' `RustFd`
-	pub fn dup(&self) -> Result<Self,ShellError> {
+	pub fn dup(&self) -> RshResult<Self> {
 		if !self.is_valid() {
 			return Err(ShellError::from_internal("Attempted to dup an invalid fd"));
 		}
@@ -150,7 +151,7 @@ impl RustFd {
 	}
 
 	/// A wrapper for nix::unistd::dup2(), 'self' is duplicated to the given target file descriptor.
-	pub fn dup2<T: AsRawFd>(&self, target: &T) -> Result<(),ShellError> {
+	pub fn dup2<T: AsRawFd>(&self, target: &T) -> RshResult<()> {
 		let target_fd = target.as_raw_fd();
 		if self.fd == target_fd {
 			// Nothing to do here
@@ -165,12 +166,12 @@ impl RustFd {
 	}
 
 	/// Open a file using a file descriptor, with the given OFlags and Mode bits
-	pub fn open(path: &Path, flags: OFlag, mode: Mode) -> Result<Self,ShellError> {
+	pub fn open(path: &Path, flags: OFlag, mode: Mode) -> RshResult<Self> {
 		let file_fd: RawFd = open(path, flags, mode).map_err(|_| ShellError::from_io())?;
 		Ok(Self { fd: file_fd })
 	}
 
-	pub fn close(&mut self) -> Result<(),ShellError> {
+	pub fn close(&mut self) -> RshResult<()> {
 		if !self.is_valid() {
 			return Err(ShellError::from_internal("Attempted to close an invalid RustFd"));
 		}
@@ -242,7 +243,7 @@ impl ProcIO {
 			backup: HashMap::new(),
 		}
 	}
-	pub fn close_all(&mut self) -> Result<(),ShellError> {
+	pub fn close_all(&mut self) -> RshResult<()> {
 		if let Some(fd) = &self.stdin {
 			fd.lock().unwrap().close()?;
 		}
@@ -254,7 +255,7 @@ impl ProcIO {
 		}
 		Ok(())
 	}
-	pub fn backup_fildescs(&mut self) -> Result<(), ShellError> {
+	pub fn backup_fildescs(&mut self) -> RshResult<()> {
 		let mut backup = HashMap::new();
 		// Get duped file descriptors
 		let dup_in = RustFd::from_stdin()?;
@@ -267,7 +268,7 @@ impl ProcIO {
 		self.backup = backup;
 		Ok(())
 	}
-	pub fn restore_fildescs(&mut self) -> Result<(), ShellError> {
+	pub fn restore_fildescs(&mut self) -> RshResult<()> {
 		// Get duped file descriptors from hashmap
 		if !self.backup.is_empty() {
 			// Dup2 to restore file descriptors
@@ -286,7 +287,7 @@ impl ProcIO {
 		}
 		Ok(())
 	}
-	pub fn do_plumbing(&mut self) -> Result<(), ShellError> {
+	pub fn do_plumbing(&mut self) -> RshResult<()> {
 		if let Some(ref mut err_pipe) = self.stderr {
 			let mut pipe = err_pipe.lock().unwrap();
 			pipe.dup2(&2)?;
@@ -320,7 +321,7 @@ impl Default for ProcIO {
 }
 
 #[derive(PartialEq,Debug,Clone)]
-pub enum RshWaitStatus {
+pub enum RshWait {
 	Success { span: Span },
 	Fail { code: i32, cmd: Option<String>, span: Span },
 	Signaled { sig: Signal },
@@ -338,38 +339,38 @@ pub enum RshWaitStatus {
 	SIGRSHEXIT // Internal call to exit early
 }
 
-impl Display for RshWaitStatus {
+impl Display for RshWait {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			RshWaitStatus::Success { .. } => write!(f, "done"),
-			RshWaitStatus::Fail { code, .. } => write!(f, "exit {}", code),
-			RshWaitStatus::Signaled { sig } => write!(f, "exit {}", sig),
-			RshWaitStatus::Stopped { sig } => write!(f, "stopped {}", sig),
-			RshWaitStatus::Terminated { signal } => write!(f, "terminated {}", signal),
-			RshWaitStatus::Continued => write!(f, "continued"),
-			RshWaitStatus::Running => write!(f, "running"),
-			RshWaitStatus::Killed { signal } => write!(f, "killed {}", signal),
-			RshWaitStatus::TimeOut => write!(f, "time out"),
+			RshWait::Success { .. } => write!(f, "done"),
+			RshWait::Fail { code, .. } => write!(f, "exit {}", code),
+			RshWait::Signaled { sig } => write!(f, "exit {}", sig),
+			RshWait::Stopped { sig } => write!(f, "stopped {}", sig),
+			RshWait::Terminated { signal } => write!(f, "terminated {}", signal),
+			RshWait::Continued => write!(f, "continued"),
+			RshWait::Running => write!(f, "running"),
+			RshWait::Killed { signal } => write!(f, "killed {}", signal),
+			RshWait::TimeOut => write!(f, "time out"),
 			_ => write!(f, "{:?}",self)
 		}
 	}
 }
 
-impl RshWaitStatus {
+impl RshWait {
 	pub fn new() -> Self {
-		RshWaitStatus::Success { span: Span::new() }
+		RshWait::Success { span: Span::new() }
 	}
 	pub fn s(span: Span) -> Self {
-		RshWaitStatus::Success { span }
+		RshWait::Success { span }
 	}
 	pub fn f(code: i32, cmd: Option<String>, span: Span) -> Self {
-		RshWaitStatus::Fail { code, cmd, span }
+		RshWait::Fail { code, cmd, span }
 	}
 }
 
-impl Default for RshWaitStatus {
+impl Default for RshWait {
 	fn default() -> Self {
-		RshWaitStatus::new()
+		RshWait::new()
 	}
 }
 
@@ -386,13 +387,13 @@ impl<'a> NodeWalker<'a> {
 			shellenv
 		}
 	}
-	pub fn start_walk(&mut self) -> Result<RshWaitStatus,ShellError> {
+	pub fn start_walk(&mut self) -> RshResult<RshWait> {
 		info!("Going on a walk...");
 		// Save file descs just in case
 		let saved_in = RustFd::from_stdin()?;
 		let saved_out = RustFd::from_stdout()?;
 		let saved_err = RustFd::from_stderr()?;
-		let mut exit_status = RshWaitStatus::new();
+		let mut exit_status = RshWait::new();
 		let mut nodes;
 		if let NdType::Root { ref mut deck } = self.ast.nd_type {
 			nodes = std::mem::take(deck);
@@ -407,7 +408,7 @@ impl<'a> NodeWalker<'a> {
 		Ok(exit_status)
 	}
 
-	fn walk(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus,ShellError> {
+	fn walk(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
 		let last_status;
 		match node.nd_type {
 			NdType::Command { ref argv } | NdType::Builtin { ref argv } => {
@@ -468,15 +469,15 @@ impl<'a> NodeWalker<'a> {
 				last_status = self.handle_assignment(node)?;
 			}
 			NdType::Cmdsep => {
-				last_status = RshWaitStatus::new();
+				last_status = RshWait::new();
 			}
 			_ => unimplemented!("Support for node type `{:?}` is not yet implemented",node.nd_type)
 		}
 		Ok(last_status)
 	}
 
-	fn walk_root(&mut self, mut node: Node, break_condition: Option<bool>, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus,ShellError> {
-		let mut last_status = RshWaitStatus::new();
+	fn walk_root(&mut self, mut node: Node, break_condition: Option<bool>, io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
+		let mut last_status = RshWait::new();
 		if !node.redirs.is_empty() {
 			node = parse::propagate_redirections(node)?;
 		}
@@ -486,12 +487,12 @@ impl<'a> NodeWalker<'a> {
 				if let Some(condition) = break_condition {
 					match condition {
 						true => {
-							if let RshWaitStatus::Fail {..} = last_status {
+							if let RshWait::Fail {..} = last_status {
 								break
 							}
 						}
 						false => {
-							if let RshWaitStatus::Success {..} = last_status {
+							if let RshWait::Success {..} = last_status {
 								break
 							}
 						}
@@ -502,15 +503,15 @@ impl<'a> NodeWalker<'a> {
 		Ok(last_status)
 	}
 
-	fn handle_func_def(&mut self, node: Node) -> Result<RshWaitStatus, ShellError> {
-		let last_status = RshWaitStatus::new();
+	fn handle_func_def(&mut self, node: Node) -> RshResult<RshWait> {
+		let last_status = RshWait::new();
 		if let NdType::FuncDef { name, body } = node.nd_type {
 			self.shellenv.set_function(name, body)?;
 			Ok(last_status)
 		} else { unreachable!() }
 	}
 
-	fn handle_case(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus, ShellError> {
+	fn handle_case(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
 		let span = node.span();
 		if let NdType::Case { input_var, cases } = node.nd_type {
 			for case in cases {
@@ -519,15 +520,15 @@ impl<'a> NodeWalker<'a> {
 					return self.walk_root(body, None, io, in_pipe)
 				}
 			}
-			Ok(RshWaitStatus::Fail { code: 1, cmd: None, span })
+			Ok(RshWait::Fail { code: 1, cmd: None, span })
 		} else { unreachable!() }
 	}
 
 	/// For loops in bash can have multiple loop variables, e.g. `for a b c in 1 2 3 4 5 6`
 	/// In this case, loop_vars are also iterated through, e.g. a = 1, b = 2, c = 3, etc
 	/// Here, we use the modulo operator to figure out which variable to set on each iteration.
-	fn handle_for(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus, ShellError> {
-		let mut last_status = RshWaitStatus::new();
+	fn handle_for(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
+		let mut last_status = RshWait::new();
 		let body_io = ProcIO::from(None, io.stdout, io.stderr);
 		let redirs = node.get_redirs()?;
 		self.handle_redirs(redirs.into())?;
@@ -567,8 +568,8 @@ impl<'a> NodeWalker<'a> {
 		Ok(last_status)
 	}
 
-	fn handle_loop(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus, ShellError> {
-		let mut last_status = RshWaitStatus::new();
+	fn handle_loop(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
+		let mut last_status = RshWait::new();
 		let cond_io = ProcIO::from(io.stdin, None, None);
 		let body_io = ProcIO::from(None, io.stdout, io.stderr);
 
@@ -582,12 +583,12 @@ impl<'a> NodeWalker<'a> {
 
 				match condition {
 					true => {
-						if !matches!(condition_status,RshWaitStatus::Success {..}) {
+						if !matches!(condition_status,RshWait::Success {..}) {
 							break; // Exit for a `while` loop when condition is false
 						}
 					}
 					false => {
-						if matches!(condition_status,RshWaitStatus::Success {..}) {
+						if matches!(condition_status,RshWait::Success {..}) {
 							break; // Exit for an `until` loop when condition is true
 						}
 					}
@@ -598,8 +599,8 @@ impl<'a> NodeWalker<'a> {
 
 				// Check for break or continue signals
 				// match last_status {
-				// RshWaitStatus::Break => return Ok(RshWaitStatus::Break),
-				// RshWaitStatus::Continue => continue,
+				// RshWait::Break => return Ok(RshWait::Break),
+				// RshWait::Continue => continue,
 				// _ => {}
 				// }
 			}
@@ -612,8 +613,8 @@ impl<'a> NodeWalker<'a> {
 		}
 	}
 
-	fn handle_if(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus, ShellError> {
-		let mut last_result = RshWaitStatus::new();
+	fn handle_if(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
+		let mut last_result = RshWait::new();
 		let cond_io = ProcIO::from(io.stdin, None, None);
 		let body_io = ProcIO::from(None, io.stdout, io.stderr);
 
@@ -622,7 +623,7 @@ impl<'a> NodeWalker<'a> {
 				let cond = *block.condition;
 				let body = *block.body;
 				last_result = self.walk_root(cond,Some(false),cond_io.try_clone(),in_pipe)?;
-				if let RshWaitStatus::Success {..} = last_result {
+				if let RshWait::Success {..} = last_result {
 					return self.walk_root(body,None,body_io,in_pipe)
 				}
 			}
@@ -633,12 +634,12 @@ impl<'a> NodeWalker<'a> {
 		Ok(last_result)
 	}
 
-	fn handle_chain(&mut self, node: Node) -> Result<RshWaitStatus, ShellError> {
-		let mut last_status = RshWaitStatus::new();
+	fn handle_chain(&mut self, node: Node) -> RshResult<RshWait> {
+		let mut last_status = RshWait::new();
 
 		if let NdType::Chain { left, right, op } = node.nd_type {
 			match self.walk(*left, ProcIO::new(), false)? {
-				RshWaitStatus::Success {..} => {
+				RshWait::Success {..} => {
 					if let NdType::And = op.nd_type {
 						last_status = self.walk(*right, ProcIO::new(), false)?;
 					}
@@ -655,21 +656,22 @@ impl<'a> NodeWalker<'a> {
 	}
 
 
-	fn handle_assignment(&mut self, node: Node) -> Result<RshWaitStatus,ShellError> {
+	fn handle_assignment(&mut self, node: Node) -> RshResult<RshWait> {
 		let span = node.span();
 		if let NdType::Assignment { name, value } = node.nd_type {
 			let value = value.unwrap_or_default();
 			self.shellenv.set_variable(name, value);
 		}
-		Ok(RshWaitStatus::s(span))
+		Ok(RshWait::s(span))
 	}
 
-	fn handle_builtin(&mut self, mut node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus,ShellError> {
+	fn handle_builtin(&mut self, mut node: Node, io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
 		let argv = expand::expand_arguments(self.shellenv, &mut node)?;
 		match argv.first().unwrap().text() {
 			"echo" => echo(self.shellenv, node, io,in_pipe),
 			"set" => set_or_unset(self.shellenv, node, true),
 			"jobs" => jobs(self.shellenv, node, io, in_pipe),
+			"fg" => fg(self.shellenv, node, io, in_pipe),
 			"unset" => set_or_unset(self.shellenv, node, false),
 			"source" => source(self.shellenv, node),
 			"cd" => cd(self.shellenv, node),
@@ -723,7 +725,7 @@ impl<'a> NodeWalker<'a> {
 	/// - The function uses `trace!` and `debug!` macros for logging purposes.
 	/// - Variable substitutions (`$var`) are resolved using the `shellenv`'s `get_variable` method.
 	/// - If a variable substitution is not found, an empty `CString` is added to the arguments.
-	fn handle_redirs(&self, mut redirs: VecDeque<Node>) -> Result<VecDeque<RustFd>, ShellError> {
+	fn handle_redirs(&self, mut redirs: VecDeque<Node>) -> RshResult<VecDeque<RustFd>> {
 		let mut fd_queue: VecDeque<RustFd> = VecDeque::new();
 		let mut fd_dupes: VecDeque<Redir> = VecDeque::new();
 
@@ -761,7 +763,7 @@ impl<'a> NodeWalker<'a> {
 		Ok(fd_queue)
 	}
 
-	fn handle_subshell(&mut self, mut node: Node, mut io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus,ShellError> {
+	fn handle_subshell(&mut self, mut node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
 		expand::expand_arguments(self.shellenv, &mut node)?;
 		let redirs = node.redirs;
 		let mut shellenv = self.shellenv.clone();
@@ -835,11 +837,11 @@ impl<'a> NodeWalker<'a> {
 				}
 			}
 		} else { unreachable!() }
-		Ok(RshWaitStatus::new())
+		Ok(RshWait::new())
 	}
 
 
-	fn handle_pipeline(&mut self, node: Node, io: ProcIO) -> Result<RshWaitStatus, ShellError> {
+	fn handle_pipeline(&mut self, node: Node, io: ProcIO) -> RshResult<RshWait> {
 		// Step 1: Flatten the pipeline tree into a sequential list
 		let mut flattened_pipeline;
 		if let NdType::Pipeline { ref left, ref right, .. } = node.nd_type {
@@ -856,7 +858,7 @@ impl<'a> NodeWalker<'a> {
 
 		// Step 2: Iterate through the flattened pipeline
 		let mut prev_read_pipe: Option<RustFd> = None; // Previous read pipe
-		let mut last_status = Ok(RshWaitStatus::new());
+		let mut last_status = Ok(RshWait::new());
 		let mut pgid: Option<Pid> = None;
 		let mut cmds = vec![];
 		let mut pids = vec![];
@@ -928,11 +930,11 @@ impl<'a> NodeWalker<'a> {
 						}
 						last_status = match waitpid(child, None) {
 							Ok(WaitStatus::Exited(_, code)) => match code {
-								0 => Ok(RshWaitStatus::Success { span }),
-								_ => Ok(RshWaitStatus::Fail { code, cmd: None, span }),
+								0 => Ok(RshWait::Success { span }),
+								_ => Ok(RshWait::Fail { code, cmd: None, span }),
 							},
 							Ok(WaitStatus::Signaled(_, signal, _)) => {
-								Ok(RshWaitStatus::Fail { code: 128 + signal as i32, cmd: None, span })
+								Ok(RshWait::Fail { code: 128 + signal as i32, cmd: None, span })
 							}
 							Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result in pipeline", 1, span)),
 							Err(err) => Err(ShellError::from_execf(&format!("Pipeline waitpid failed: {}", err), 1, span)),
@@ -953,7 +955,7 @@ impl<'a> NodeWalker<'a> {
 		last_status
 	}
 
-	fn handle_function(&mut self, mut node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus,ShellError> {
+	fn handle_function(&mut self, mut node: Node, io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
 		let span = node.span();
 		let background = node.flags.contains(NdFlags::BACKGROUND);
 		if let NdType::Command { ref mut argv } | NdType::Builtin { ref mut argv } = node.nd_type {
@@ -973,10 +975,10 @@ impl<'a> NodeWalker<'a> {
 				self.shellenv.set_parameter((index + 1).to_string(), param);
 			}
 
-			let child_instruction = || -> Result<(), ShellError> {
+			let child_instruction = || -> RshResult<()> {
 				let mut sub_walker = NodeWalker::new(func.clone(), self.shellenv);
 				// Returns exit status or shell error
-				let mut result = sub_walker.walk_root(func, None, io,in_pipe);
+				let mut result = sub_walker.walk_root(func, None, io,true);
 				if let Err(ref mut e) = result {
 					// Use the span of the function call rather than the stuff inside the function
 					*e = e.overwrite_span(span)
@@ -1002,17 +1004,17 @@ impl<'a> NodeWalker<'a> {
 							// Add job to the job table
 							self.shellenv.new_job(vec![child], vec![func_name.text().into()], child);
 							// Restore saved file descriptors
-							Ok(RshWaitStatus::Success { span })
+							Ok(RshWait::Success { span })
 						} else {
 							// Wait for the child process to complete
 							let status = loop {
 								match waitpid(child, None) {
 									Ok(WaitStatus::Exited(_, code)) => break Ok(match code {
-										0 => RshWaitStatus::Success { span },
-										_ => RshWaitStatus::Fail { code, cmd: Some(func_name.text().into()), span },
+										0 => RshWait::Success { span },
+										_ => RshWait::Fail { code, cmd: Some(func_name.text().into()), span },
 									}),
 									Ok(WaitStatus::Signaled(_, signal, _)) => {
-										break Ok(RshWaitStatus::Signaled { sig: signal });
+										break Ok(RshWait::Signaled { sig: signal });
 									}
 									Ok(_) => break Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
 									Err(nix::errno::Errno::EINTR) => continue, // Retry on interruption
@@ -1031,7 +1033,7 @@ impl<'a> NodeWalker<'a> {
 	}
 
 
-	fn handle_command(&mut self, mut node: Node, mut io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus, ShellError> {
+	fn handle_command(&mut self, mut node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
 		let argv = expand::expand_arguments(self.shellenv, &mut node)?;
 		let argv = argv
 			.iter()
@@ -1084,7 +1086,7 @@ impl<'a> NodeWalker<'a> {
 			let envp = self.shellenv.get_cvars();
 
 			// Now let's tell the child process what to do
-			let child_instruction = || -> Result<(),ShellError> {
+			let child_instruction = || -> RshResult<()> {
 				// Handle redirections
 				let mut open_fds: VecDeque<RustFd> = VecDeque::new();
 				if !redirs.is_empty() {
@@ -1115,17 +1117,17 @@ impl<'a> NodeWalker<'a> {
 							self.shellenv.new_job(vec![child], vec![cmd], child);
 							// Restore saved file descriptors
 							io.restore_fildescs()?;
-							Ok(RshWaitStatus::Success { span })
+							Ok(RshWait::Success { span })
 						} else {
 							// Wait for the child process to complete
 							let status = loop {
 								match waitpid(child, None) {
 									Ok(WaitStatus::Exited(_, code)) => break Ok(match code {
-										0 => RshWaitStatus::Success { span },
-										_ => RshWaitStatus::Fail { code, cmd: Some(cmd), span },
+										0 => RshWait::Success { span },
+										_ => RshWait::Fail { code, cmd: Some(cmd), span },
 									}),
 									Ok(WaitStatus::Signaled(_, signal, _)) => {
-										break Ok(RshWaitStatus::Signaled { sig: signal });
+										break Ok(RshWait::Signaled { sig: signal });
 									}
 									Ok(_) => break Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
 									Err(nix::errno::Errno::EINTR) => continue, // Retry on interruption

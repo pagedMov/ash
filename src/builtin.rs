@@ -13,12 +13,13 @@ use nix::sys::stat::Mode;
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::{access, fork, isatty, setpgid, AccessFlags, ForkResult};
 
-use crate::execute::{ProcIO, RshWaitStatus, RustFd};
+use crate::execute::{ProcIO, RshWait, RustFd};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType};
 use crate::shellenv::{EnvFlags, JobFlags, ShellEnv};
 use crate::event::ShellError;
+use crate::RshResult;
 
 pub const BUILTINS: [&str; 14] = [
 	"echo", "set", "shift", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node",
@@ -35,7 +36,7 @@ bitflags! {
 	}
 }
 
-fn open_file_descriptors(redirs: VecDeque<Node>) -> Result<Vec<RustFd>, ShellError> {
+fn open_file_descriptors(redirs: VecDeque<Node>) -> RshResult<Vec<RustFd>> {
 	let mut fd_stack: Vec<RustFd> = Vec::new();
 	let mut fd_dupes: Vec<(i32,i32)> = Vec::new();
 	info!("Handling redirections for builtin: {:?}", redirs);
@@ -121,7 +122,7 @@ pub fn catstr(mut c_strings: VecDeque<CString>,newline: bool) -> CString {
 /// ```
 /// let mut args = VecDeque::new();
 /// args.push_back("42".to_string());
-/// let transform = |s: String| -> Result<i32, ShellError> { Ok(s.parse::<i32>().unwrap()) };
+/// let transform = |s: String| -> RshResult<i32> { Ok(s.parse::<i32>().unwrap()) };
 /// let property = |x: &i32| -> bool { *x > 0 };
 /// let result = do_test(&mut args, transform, property);
 /// assert!(result.unwrap());
@@ -131,9 +132,9 @@ fn do_test<T, F1, F2>(
 	transform: F1,
 	property: F2,
 	span: Span
-) -> Result<bool, ShellError>
+) -> RshResult<bool>
 where
-		F1: FnOnce(Tk) -> Result<T, ShellError>,
+		F1: FnOnce(Tk) -> RshResult<T>,
 		F2: FnOnce(&T) -> bool
 {
 	if let Some(st) = args.pop_front() {
@@ -171,7 +172,7 @@ where
 /// ```
 /// let mut args = VecDeque::new();
 /// args.push_back("42".to_string());
-/// let transform = |s: String| -> Result<i32, ShellError> { Ok(s.parse::<i32>().unwrap()) };
+/// let transform = |s: String| -> RshResult<i32> { Ok(s.parse::<i32>().unwrap()) };
 /// let comparison = |x: &i32, y: &i32| -> bool { x == y };
 /// let result = do_cmp("42".to_string(), &mut args, transform, comparison);
 /// assert!(result.unwrap());
@@ -181,9 +182,9 @@ fn do_cmp<T, F1, F2>(
 	args: &mut VecDeque<Tk>,
 	transform: F1,
 	comparison: F2
-) -> Result<bool, ShellError>
+) -> RshResult<bool>
 where
-		F1: Fn(Tk) -> Result<T, ShellError>,
+		F1: Fn(Tk) -> RshResult<T>,
 		F2: FnOnce(&T, &T) -> bool
 {
 	if let Some(st) = args.pop_front() {
@@ -223,9 +224,9 @@ fn do_logical_op(
 	command: Tk,
 	result1: bool,
 	operator: Tk
-) -> Result<bool, ShellError> {
+) -> RshResult<bool> {
 	args.push_front(command);
-	let result2 = test(std::mem::take(args)).map(|res| matches!(res,RshWaitStatus::Success {..}))?;
+	let result2 = test(std::mem::take(args)).map(|res| matches!(res,RshWait::Success {..}))?;
 	match operator.text() {
 		"!" => { Ok(!result2) },
 		"-a" => { Ok(result1 && result2) },
@@ -245,7 +246,7 @@ fn do_logical_op(
 ///
 /// # Returns
 ///
-/// * `Ok(RshWaitStatus)` - Returns a success or failure status based on the evaluation of the conditional expression.
+/// * `Ok(RshWait)` - Returns a success or failure status based on the evaluation of the conditional expression.
 /// * `Err(ShellError)` - Returns an appropriate `ShellError` if there is a syntax error or other issues with the arguments.
 ///
 /// # Examples
@@ -329,20 +330,20 @@ fn do_logical_op(
 /// # Panics
 ///
 /// This function does not panic.
-pub fn test(mut argv: VecDeque<Tk>) -> Result<RshWaitStatus, ShellError> {
+pub fn test(mut argv: VecDeque<Tk>) -> RshResult<RshWait> {
 	info!("Starting builtin test");
 	let span = Span::from(argv.front().unwrap().span().start,argv.back().unwrap().span().end);
-	let is_false = || -> Result<RshWaitStatus, ShellError> { Ok(RshWaitStatus::Fail { code: 1, cmd: Some("test".into()), span }) };
-	let is_true = || -> Result<RshWaitStatus, ShellError> { Ok(RshWaitStatus::Success { span }) };
+	let is_false = || -> RshResult<RshWait> { Ok(RshWait::Fail { code: 1, cmd: Some("test".into()), span }) };
+	let is_true = || -> RshResult<RshWait> { Ok(RshWait::Success { span }) };
 	let is_int = |tk: &Tk| -> bool { tk.text().parse::<i32>().is_ok() };
-	let to_int = |tk: Tk| -> Result<i32, ShellError> {
+	let to_int = |tk: Tk| -> RshResult<i32> {
 		tk.text().parse::<i32>().map_err(|_| ShellError::from_syntax("Expected an integer in test", tk.span()))
 	};
 	let is_path = |tk: &Tk| -> bool { PathBuf::from(tk.text()).exists() };
-	let to_meta = |tk: Tk| -> Result<fs::Metadata, ShellError> {
+	let to_meta = |tk: Tk| -> RshResult<fs::Metadata> {
 		fs::metadata(tk.text()).map_err(|_| ShellError::from_syntax(&format!("Test: Path '{}' does not exist", tk.text()), tk.span()))
 	};
-	let string_noop = |tk: Tk| -> Result<String, ShellError> { Ok(tk.text().into()) };
+	let string_noop = |tk: Tk| -> RshResult<String> { Ok(tk.text().into()) };
 	let command = argv.pop_front().unwrap();
 	let is_bracket = match command.text() {
 		"[" => true,
@@ -460,7 +461,7 @@ pub fn test(mut argv: VecDeque<Tk>) -> Result<RshWaitStatus, ShellError> {
 	}
 }
 
-pub fn alias(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus, ShellError> {
+pub fn alias(shellenv: &mut ShellEnv, node: Node) -> RshResult<RshWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front();
 	while let Some(arg) = argv.pop_front() {
@@ -472,10 +473,10 @@ pub fn alias(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus, Shell
 			return Err(ShellError::from_parse(e.as_str(), node.span()))
 		}
 	}
-	Ok(RshWaitStatus::Success { span: node.span() })
+	Ok(RshWait::Success { span: node.span() })
 }
 
-pub fn cd(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus,ShellError> {
+pub fn cd(shellenv: &mut ShellEnv, node: Node) -> RshResult<RshWait> {
 	let mut argv = node
 		.get_argv()?
 		.iter()
@@ -492,10 +493,18 @@ pub fn cd(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus,ShellErro
 	}
 	let path = Path::new(new_pwd.to_str().unwrap());
 	shellenv.change_dir(path, node.span())?;
-	Ok(RshWaitStatus::Success { span: node.span() })
+	Ok(RshWait::Success { span: node.span() })
 }
 
-pub fn source(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus,ShellError> {
+pub fn fg(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
+	Ok(RshWait::Success { span: node.span() })
+}
+
+pub fn bg(shellenv: &mut ShellEnv, node: Node) -> RshResult<RshWait> {
+	todo!()
+}
+
+pub fn source(shellenv: &mut ShellEnv, node: Node) -> RshResult<RshWait> {
 	let mut argv = node
 		.get_argv()?
 		.iter()
@@ -506,7 +515,7 @@ pub fn source(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus,Shell
 		let file_path = Path::new(OsStr::from_bytes(path.as_bytes()));
 		shellenv.source_file(file_path.to_path_buf())?
 	}
-	Ok(RshWaitStatus::Success { span: node.span() })
+	Ok(RshWait::Success { span: node.span() })
 }
 
 fn flags_from_chars(chars: &str) -> EnvFlags {
@@ -539,7 +548,7 @@ fn flags_from_chars(chars: &str) -> EnvFlags {
 	env_flags
 }
 
-pub fn set_or_unset(shellenv: &mut ShellEnv, node: Node, set: bool) -> Result<RshWaitStatus,ShellError> {
+pub fn set_or_unset(shellenv: &mut ShellEnv, node: Node, set: bool) -> RshResult<RshWait> {
 	let span = node.span();
 	if let NdType::Builtin { mut argv } = node.nd_type {
 		argv.pop_front(); // Ignore 'set'
@@ -554,22 +563,22 @@ pub fn set_or_unset(shellenv: &mut ShellEnv, node: Node, set: bool) -> Result<Rs
 			true => shellenv.set_flags(env_flags),
 			false => shellenv.unset_flags(env_flags),
 		}
-		Ok(RshWaitStatus::new())
+		Ok(RshWait::new())
 	} else { unreachable!() }
 }
 
-pub fn pwd(shellenv: &ShellEnv, span: Span) -> Result<RshWaitStatus, ShellError> {
+pub fn pwd(shellenv: &ShellEnv, span: Span) -> RshResult<RshWait> {
 	if let Some(pwd) = shellenv.get_variable("PWD") {
 		let stdout = RustFd::from_stdout()?;
 		stdout.write(pwd.as_bytes())?;
-		Ok(RshWaitStatus::Success { span })
+		Ok(RshWait::Success { span })
 	} else {
 		Err(ShellError::from_execf("PWD environment variable is unset", 1, span))
 	}
 }
 
-pub fn export(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus, ShellError> {
-	let last_status = RshWaitStatus::Success { span: node.span() };
+pub fn export(shellenv: &mut ShellEnv, node: Node) -> RshResult<RshWait> {
+	let last_status = RshWait::Success { span: node.span() };
 	if let NdType::Builtin { mut argv } = node.nd_type {
 		argv.pop_front(); // Ignore "export"
 		while let Some(ass) = argv.pop_front() {
@@ -583,7 +592,7 @@ pub fn export(shellenv: &mut ShellEnv, node: Node) -> Result<RshWaitStatus, Shel
 	} else { unreachable!() }
 }
 
-pub fn jobs(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus,ShellError> {
+pub fn jobs(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
 	argv.pop_front();
 	let mut flags = JobFlags::empty();
@@ -607,10 +616,10 @@ pub fn jobs(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) 
 	}
 	shellenv.job_table.print_jobs(&flags);
 
-	Ok(RshWaitStatus::Success { span: node.span() })
+	Ok(RshWait::Success { span: node.span() })
 }
 
-pub fn echo(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus, ShellError> {
+pub fn echo(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
 	let mut flags = EchoFlags::empty();
 	let span = node.span();
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
@@ -696,15 +705,15 @@ pub fn echo(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) 
 			if node.flags.contains(NdFlags::BACKGROUND) {
 				setpgid(child, child).map_err(|_| ShellError::from_io())?;
 				shellenv.new_job(vec![child], vec!["echo".into()], child);
-				Ok(RshWaitStatus::Success { span })
+				Ok(RshWait::Success { span })
 			} else {
 				match waitpid(child, None) {
 					Ok(WaitStatus::Exited(_, code)) => match code {
-						0 => Ok(RshWaitStatus::Success { span }),
-						_ => Ok(RshWaitStatus::Fail { code, cmd: Some("echo".into()), span }),
+						0 => Ok(RshWait::Success { span }),
+						_ => Ok(RshWait::Fail { code, cmd: Some("echo".into()), span }),
 					},
 					Ok(WaitStatus::Signaled(_,signal,_)) => {
-						Ok(RshWaitStatus::Fail { code: 128 + signal as i32, cmd: Some("echo".into()), span })
+						Ok(RshWait::Fail { code: 128 + signal as i32, cmd: Some("echo".into()), span })
 					}
 					Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
 					Err(err) => Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),

@@ -9,6 +9,7 @@ use std::mem::take;
 
 use crate::interp::parse::Span;
 use crate::event::ShellError;
+use crate::RshResult;
 
 use super::helper::StrExtension;
 
@@ -273,7 +274,7 @@ impl Tk {
 			}
 		}
 	}
-	pub fn from(mut wd: WordDesc, context: TkState) -> Result<Self,ShellError> {
+	pub fn from(mut wd: WordDesc, context: TkState) -> RshResult<Self> {
 		use crate::interp::token::TkState::*;
 		use crate::interp::token::TkType as TkT;
 		match context {
@@ -329,7 +330,7 @@ impl Tk {
 			wd: WordDesc { text: wd.text.clone(), span: Span::from(pos + 1,pos + 1), flags: WdFlags::empty() }
 		}
 	}
-	fn get_keyword_token(wd: &WordDesc) -> Result<TkType,ShellError> {
+	fn get_keyword_token(wd: &WordDesc) -> RshResult<TkType> {
 		let text = wd.text.clone();
 		match text.as_str() {
 			"if" => Ok(TkType::If),
@@ -349,7 +350,7 @@ impl Tk {
 			_ => Err(ShellError::from_parse(format!("Unrecognized keyword: {}",wd.text).as_str(), wd.span))
 		}
 	}
-	fn split_func(wd: &WordDesc) -> Result<TkType,ShellError> {
+	fn split_func(wd: &WordDesc) -> RshResult<TkType> {
 		let func_raw = &wd.text;
 		let (mut name,mut body) = func_raw.split_once(' ').unwrap();
 		name = name.trim();
@@ -544,7 +545,7 @@ impl RshTokenizer {
 		self.span.end += 1;
 		self.char_stream.pop_front()
 	}
-	pub fn tokenize(&mut self) -> Result<(),ShellError> {
+	pub fn tokenize(&mut self) -> RshResult<()> {
 		use crate::interp::token::TkState::*;
 		let mut wd = WordDesc::empty();
 		while !self.char_stream.is_empty() {
@@ -778,7 +779,7 @@ impl RshTokenizer {
 		wd.span = self.span;
 		self.tokens.push(Tk { tk_type: TkType::String, wd })
 	}
-	fn vardec_context(&mut self, mut wd: WordDesc) -> Result<(),ShellError> {
+	fn vardec_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
 		let mut found = false;
 		loop {
 			let span = wd.span;
@@ -807,7 +808,7 @@ impl RshTokenizer {
 		self.context = TkState::ArrDec;
 		Ok(())
 	}
-	fn arrdec_context(&mut self, mut wd: WordDesc) -> Result<(),ShellError> {
+	fn arrdec_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
 		let mut found = false;
 		while self.char_stream.front().is_some_and(|ch| !matches!(ch, ';' | '\n')) {
 			found = true;
@@ -893,7 +894,7 @@ impl RshTokenizer {
 		wd.text = wd.text.trim().to_string();
 		self.tokens.push(Tk { tk_type: TkType::FuncBody, wd })
 	}
-	fn case_context(&mut self, mut wd: WordDesc) -> Result<(), ShellError> {
+	fn case_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
 		use crate::interp::token::TkState::*;
 		let span = wd.span;
 		self.context = SingleVarDec;

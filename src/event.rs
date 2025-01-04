@@ -8,10 +8,10 @@ use tokio::sync::mpsc;
 use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};
 
-use crate::execute::RshWaitStatus;
+use crate::execute::RshWait;
 use crate::interp::parse::{Node, Span};
-use crate::{execute, prompt};
-use crate::shellenv::{Job, ShellEnv};
+use crate::{execute, prompt, RshResult};
+use crate::shellenv::{Job, JobFlags, ShellEnv};
 
 #[derive(Debug, PartialEq)]
 pub enum ShellError {
@@ -211,8 +211,7 @@ impl fmt::Display for ShellErrorFull {
 			ShellError::ExecFailed(msg, code, span) => {
 				writeln!(
 					f,
-					"Execution failed (exit code {}): {}",
-					code,
+					"Execution failed: {}",
 					msg
 				)?;
 				self.format_error_context(Some(*span));
@@ -243,6 +242,7 @@ impl fmt::Display for ShellErrorFull {
 pub enum ShellEvent {
 	Prompt,
 	Signal(Signals),
+	NewInput(String),
 	NewAST(Node),
 	CatchError(ShellError),
 	Exit(i32)
@@ -298,7 +298,7 @@ impl<'a> EventLoop<'a> {
 	///
 	/// # Returns
 	/// A `Result` containing the exit code (`i32`) or a `ShellError` if an error occurs.
-	pub async fn listen(&mut self) -> Result<i32, ShellError> {
+	pub async fn listen(&mut self) -> RshResult<i32> {
 		let mut signal_listener = SignalListener::new(self.inbox());
 		tokio::spawn(async move {
 			signal_listener.signal_listen().await
@@ -313,7 +313,7 @@ impl<'a> EventLoop<'a> {
 	///
 	/// # Returns
 	/// A `Result` containing the exit code (`i32`) or a `ShellError` if an error occurs.
-	pub async fn event_listen(&mut self) -> Result<i32, ShellError> {
+	pub async fn event_listen(&mut self) -> RshResult<i32> {
 		debug!("Event loop started.");
 		let mut code: i32 = 0;
 
@@ -333,6 +333,9 @@ impl<'a> EventLoop<'a> {
 					// Handle exit events and set the exit code.
 					code = exit_code;
 				}
+				ShellEvent::NewInput(input) => {
+					self.shellenv.set_last_input(&input);
+				}
 				ShellEvent::NewAST(tree) => {
 					// Log and process a new AST node.
 					debug!("new tree:\n {:#?}", tree);
@@ -341,7 +344,7 @@ impl<'a> EventLoop<'a> {
 					match walker.start_walk() {
 						Ok(code) => {
 							info!("Last exit status: {:?}",code);
-							if let RshWaitStatus::Fail { code, cmd, span } = &code {
+							if let RshWait::Fail { code, cmd, span } = &code {
 								if *code == 127 {
 									if let Some(cmd) = cmd {
 										let err = ShellErrorFull::from(self.shellenv.get_last_input(),ShellError::from_no_cmd(cmd, *span));
@@ -379,7 +382,7 @@ impl<'a> EventLoop<'a> {
 		}
 		Ok(code)
 	}
-	async fn handle_signal(&mut self, signal: Signals) -> Result<(), ShellError> {
+	async fn handle_signal(&mut self, signal: Signals) -> RshResult<()> {
 		match signal {
 			Signals::SIGQUIT => {
 				std::process::exit(0);
@@ -390,37 +393,45 @@ impl<'a> EventLoop<'a> {
 				let status = match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
 					Ok(WaitStatus::Exited(pid,status)) => {
 						child_pid = pid;
-						job_pgid = getpgid(Some(pid)).map_err(|_| ShellError::from_io())?;
+						job_pgid = getpgid(Some(pid)).unwrap_or(pid);
 						if status == 0 {
-							RshWaitStatus::Success { span: Span::new() }
+							RshWait::Success { span: Span::new() }
 						} else {
-							RshWaitStatus::Fail { code: status, cmd: None, span: Span::new() }
+							RshWait::Fail { code: status, cmd: None, span: Span::new() }
 						}
 					}
 					Ok(WaitStatus::StillAlive) => return Ok(()),
 					Ok(WaitStatus::Signaled(pid, sig, _)) => {
 						child_pid = pid;
 						job_pgid = getpgid(Some(pid)).map_err(|_| ShellError::from_io())?;
-						RshWaitStatus::Signaled { sig }
+						RshWait::Signaled { sig }
 					}
 					Ok(WaitStatus::Stopped(pid, sig)) => {
 						child_pid = pid;
 						job_pgid = getpgid(Some(pid)).map_err(|_| ShellError::from_io())?;
-						RshWaitStatus::Stopped { sig }
+						RshWait::Stopped { sig }
 					}
 					Err(_) => { /* No child processes found, so */ return Ok(()) },
 					_ => unimplemented!()
 				};
+				let mut new_curr_job_id = None;
+				let curr_job = self.shellenv.job_table.curr_job();
 				let jobs = self.shellenv.borrow_jobs();
 				for (_, job) in jobs.iter_mut() {
 					for i in 0..job.pids().len() {
 						if job.pids().get(i).is_some_and(|pid| *pid == child_pid) {
-							println!();
-							job.update_status(i as usize, status.clone());
-							println!("{}", job);
+							job.update_status(i, status.clone());
+							if !job.get_proc_statuses().iter().any(|stat| *stat == RshWait::Running) {
+								println!();
+								println!("{}",job.print(curr_job, JobFlags::empty()));
+								new_curr_job_id = Some(job.id());
+							}
 							break;
 						}
 					}
+				}
+				if let Some(id) = new_curr_job_id {
+					self.shellenv.set_curr_job(id);
 				}
 			}
 			_ => { },
@@ -463,7 +474,7 @@ impl SignalListener {
 			sigusr2: signal(SignalKind::user_defined2()).unwrap(),
 		}
 	}
-	pub async fn signal_listen(&mut self) -> Result<i32, ShellError> {
+	pub async fn signal_listen(&mut self) -> RshResult<i32> {
 		let sigint = &mut self.sigint;
 		let sigio = &mut self.sigio;
 		let sigpipe = &mut self.sigpipe;
