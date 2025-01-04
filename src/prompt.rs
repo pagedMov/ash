@@ -16,34 +16,34 @@ fn init_prompt(shellenv: &ShellEnv) -> Editor<RshHelper, DefaultHistory> {
 	let mut config = Config::builder();
 
 	// Read options from ShellEnv
-	let max_size = shellenv.get_shopt("max_hist").max(1000); // Default to 1000
-	let hist_dupes = shellenv.get_shopt("hist_ignore_dupes") != 0;
-	let comp_limit = shellenv.get_shopt("comp_limit").max(5); // Default to 5
-	let edit_mode = match shellenv.get_shopt("edit_mode") {
+	let max_size = shellenv.get_shopt("max_hist").unwrap_or(&1000); // Default to 1000
+	let hist_dupes = shellenv.get_shopt("hist_ignore_dupes").is_some_and(|opt| *opt > 0);
+	let comp_limit = shellenv.get_shopt("comp_limit").unwrap_or(&5); // Default to 5
+	let edit_mode = match shellenv.get_shopt("edit_mode").unwrap_or(&1) {
 		0 => EditMode::Emacs,
 		_ => EditMode::Vi,
 	};
-	let auto_hist = shellenv.get_shopt("auto_hist") != 0;
-	let prompt_highlight = match shellenv.get_shopt("prompt_highlight") {
+	let auto_hist = shellenv.get_shopt("auto_hist").is_some_and(|opt| *opt > 0);
+	let prompt_highlight = match shellenv.get_shopt("prompt_highlight").unwrap_or(&1) {
 		0 => ColorMode::Disabled,
 		_ => ColorMode::Enabled,
 	};
-	let tab_stop = shellenv.get_shopt("tab_stop").max(1); // Default to at least 1
+	let tab_stop = shellenv.get_shopt("tab_stop").unwrap_or(&1).max(&1); // Default to at least 1
 
 	// Build configuration
 	config = config
-		.max_history_size(max_size)
+		.max_history_size(*max_size)
 		.unwrap_or_else(|e| {
 			eprintln!("Invalid max history size: {}", e);
 			std::process::exit(1);
 		})
 	.history_ignore_dups(hist_dupes)
 		.unwrap()
-		.completion_prompt_limit(comp_limit)
+		.completion_prompt_limit(*comp_limit)
 		.edit_mode(edit_mode)
 		.auto_add_history(auto_hist)
 		.color_mode(prompt_highlight)
-		.tab_stop(tab_stop);
+		.tab_stop(*tab_stop);
 
 		let config = config.build();
 
@@ -80,7 +80,7 @@ pub async fn prompt(sender: mpsc::Sender<ShellEvent>, shellenv: &mut ShellEnv) {
 				Ok(parse_state) => {
 					if let NdType::Root { deck } = &parse_state.ast.nd_type {
 						if !deck.is_empty() {
-							let _ = sender.send(ShellEvent::NewInput(parse_state.input.to_string())).await;
+							let _ = sender.send(ShellEvent::UpdateEnv(shellenv.clone())).await;
 							let _ = sender.send(ShellEvent::NewAST(parse_state.ast)).await;
 						}
 					}

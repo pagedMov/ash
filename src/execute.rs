@@ -1,12 +1,12 @@
-use libc::{memfd_create, tcsetpgrp, MFD_CLOEXEC, STDIN_FILENO};
+use libc::{memfd_create, tcgetpgrp, MFD_CLOEXEC, STDIN_FILENO};
 use nix::sys::signal::Signal;
-use nix::unistd::{close, dup, dup2, execve, execvpe, fork, getpgid, getpid, isatty, pipe, setpgid, ForkResult, Pid};
+use nix::unistd::{close, dup, dup2, tcsetpgrp, execve, execvpe, fork, getpgid, getpid, isatty, pipe, setpgid, ForkResult, Pid};
 use nix::fcntl::{open,OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::wait::{waitpid, WaitStatus};
 use std::fmt::{self, Display};
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd};
 use std::ffi::CString;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
@@ -375,17 +375,21 @@ impl Default for RshWait {
 }
 
 
-pub struct NodeWalker<'a> {
+pub struct NodeWalker {
 	ast: Node,
-	shellenv: &'a mut ShellEnv,
+	pub shellenv: ShellEnv,
 }
 
-impl<'a> NodeWalker<'a> {
-	pub fn new(ast: Node, shellenv: &'a mut ShellEnv) -> Self {
+impl NodeWalker {
+	pub fn new(ast: Node, shellenv: ShellEnv) -> Self {
 		Self {
 			ast,
 			shellenv
 		}
+	}
+	/// Consumes the `NodeWalker` and returns the held `ShellEnv`
+	pub fn deconstruct(self) -> ShellEnv {
+		self.shellenv
 	}
 	pub fn start_walk(&mut self) -> RshResult<RshWait> {
 		info!("Going on a walk...");
@@ -417,7 +421,7 @@ impl<'a> NodeWalker<'a> {
 				let not_from_alias = !command_name.flags().contains(WdFlags::FROM_ALIAS);
 				let is_not_command_builtin = command_name.text() != "command";
 				if not_from_alias && is_not_command_builtin {
-					node = expand::expand_alias(self.shellenv, node.clone())?;
+					node = expand::expand_alias(&self.shellenv, node.clone())?;
 				}
 				if let Some(_func) = self.shellenv.get_function(command_name.text()) {
 					last_status = self.handle_function(node, io, in_pipe)?;
@@ -540,7 +544,7 @@ impl<'a> NodeWalker<'a> {
 
 			let mut arr_buffer = VecDeque::new();
 			loop_arr.map_rotate(|elem| {
-				for token in expand::expand_token(self.shellenv, elem) {
+				for token in expand::expand_token(&self.shellenv, elem) {
 					arr_buffer.push_back(token);
 				}
 			});
@@ -666,18 +670,18 @@ impl<'a> NodeWalker<'a> {
 	}
 
 	fn handle_builtin(&mut self, mut node: Node, io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
-		let argv = expand::expand_arguments(self.shellenv, &mut node)?;
+		let argv = expand::expand_arguments(&self.shellenv, &mut node)?;
 		match argv.first().unwrap().text() {
-			"echo" => echo(self.shellenv, node, io,in_pipe),
-			"set" => set_or_unset(self.shellenv, node, true),
-			"jobs" => jobs(self.shellenv, node, io, in_pipe),
-			"fg" => fg(self.shellenv, node, io, in_pipe),
-			"unset" => set_or_unset(self.shellenv, node, false),
-			"source" => source(self.shellenv, node),
-			"cd" => cd(self.shellenv, node),
-			"pwd" => pwd(self.shellenv, node.span()),
-			"alias" => alias(self.shellenv, node),
-			"export" => export(self.shellenv, node),
+			"echo" => echo(&mut self.shellenv, node, io,in_pipe),
+			"set" => set_or_unset(&mut self.shellenv, node, true),
+			"jobs" => jobs(&mut self.shellenv, node, io, in_pipe),
+			"fg" => fg(&mut self.shellenv, node, io, in_pipe),
+			"unset" => set_or_unset(&mut self.shellenv, node, false),
+			"source" => source(&mut self.shellenv, node),
+			"cd" => cd(&mut self.shellenv, node),
+			"pwd" => pwd(&mut self.shellenv, node.span()),
+			"alias" => alias(&mut self.shellenv, node),
+			"export" => export(&mut self.shellenv, node),
 			"[" | "test" => test(node.get_argv()?.into()),
 			"builtin" => {
 				// This one allows you to safely wrap builtins in aliases/functions
@@ -764,7 +768,7 @@ impl<'a> NodeWalker<'a> {
 	}
 
 	fn handle_subshell(&mut self, mut node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
-		expand::expand_arguments(self.shellenv, &mut node)?;
+		expand::expand_arguments(&self.shellenv, &mut node)?;
 		let redirs = node.redirs;
 		let mut shellenv = self.shellenv.clone();
 		shellenv.clear_pos_parameters();
@@ -796,7 +800,7 @@ impl<'a> NodeWalker<'a> {
 						command.push(ch);
 					}
 				}
-				if let Some(path) = helper::which(self.shellenv,&command) {
+				if let Some(path) = helper::which(&self.shellenv,&command) {
 					let path = format!("{}{}{}","#!",path,'\n');
 					body = format!("{}{}",path,body);
 				}
@@ -863,6 +867,7 @@ impl<'a> NodeWalker<'a> {
 		let mut cmds = vec![];
 		let mut pids = vec![];
 
+
 		while let Some(command) = flattened_pipeline.pop_front() {
 			// Create a new pipe for this command, except for the last one
 			let (r_pipe, mut w_pipe) = if !flattened_pipeline.is_empty() {
@@ -889,6 +894,7 @@ impl<'a> NodeWalker<'a> {
 				w_pipe.take().map(|pipe| pipe.mk_shared()), // stdout to the write pipe
 				io.stderr.clone(),                           // Shared stderr
 			);
+
 
 			// Fork the process for this command
 			match unsafe { fork() } {
@@ -928,6 +934,7 @@ impl<'a> NodeWalker<'a> {
 							self.shellenv.new_job(pids,cmds,pgid.unwrap());
 							return last_status;
 						}
+							unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0),child.into()) };
 						last_status = match waitpid(child, None) {
 							Ok(WaitStatus::Exited(_, code)) => match code {
 								0 => Ok(RshWait::Success { span }),
@@ -939,6 +946,7 @@ impl<'a> NodeWalker<'a> {
 							Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result in pipeline", 1, span)),
 							Err(err) => Err(ShellError::from_execf(&format!("Pipeline waitpid failed: {}", err), 1, span)),
 						};
+							unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0),getpid().into()) };
 					}
 				}
 				Err(e) => {
@@ -969,21 +977,24 @@ impl<'a> NodeWalker<'a> {
 			for redir in &node.redirs {
 				func.redirs.push_back(redir.clone());
 			}
-			let saved_parameters = self.shellenv.parameters.clone();
+			let saved_parameters = self.shellenv.get_params().clone();
 			self.shellenv.clear_pos_parameters();
 			for (index,param) in pos_params.into_iter().enumerate() {
 				self.shellenv.set_parameter((index + 1).to_string(), param);
 			}
 
 			let child_instruction = || -> RshResult<()> {
-				let mut sub_walker = NodeWalker::new(func.clone(), self.shellenv);
+				let sub_env = self.shellenv.clone();
+				let mut sub_walker = NodeWalker::new(func.clone(), sub_env);
 				// Returns exit status or shell error
 				let mut result = sub_walker.walk_root(func, None, io,true);
 				if let Err(ref mut e) = result {
 					// Use the span of the function call rather than the stuff inside the function
 					*e = e.overwrite_span(span)
 				}
-				self.shellenv.parameters = saved_parameters;
+				sub_walker.shellenv.set_params(saved_parameters);
+				let new_env = sub_walker.deconstruct();
+				self.shellenv = new_env;
 				std::process::exit(0);
 			};
 
@@ -1006,6 +1017,7 @@ impl<'a> NodeWalker<'a> {
 							// Restore saved file descriptors
 							Ok(RshWait::Success { span })
 						} else {
+							unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0),child.into()) };
 							// Wait for the child process to complete
 							let status = loop {
 								match waitpid(child, None) {
@@ -1022,6 +1034,7 @@ impl<'a> NodeWalker<'a> {
 								}
 							};
 
+							unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0),getpid().into()) };
 							// Return wait status
 									status
 						}
@@ -1034,7 +1047,7 @@ impl<'a> NodeWalker<'a> {
 
 
 	fn handle_command(&mut self, mut node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
-		let argv = expand::expand_arguments(self.shellenv, &mut node)?;
+		let argv = expand::expand_arguments(&self.shellenv, &mut node)?;
 		let argv = argv
 			.iter()
 			.map(|arg| CString::new(arg.text()).unwrap())
@@ -1045,7 +1058,7 @@ impl<'a> NodeWalker<'a> {
 			if let NdType::Command { ref argv } = node.nd_type {
 				// If the shellenv is allowing aliases, and the token is not from an expanded alias
 				if !argv.front().unwrap().flags().contains(WdFlags::FROM_ALIAS) {
-					let node = expand::expand_alias(self.shellenv, node.clone())?;
+					let node = expand::expand_alias(&self.shellenv, node.clone())?;
 
 					if !matches!(node.nd_type, NdType::Command {..}) {
 						// If the resulting alias expansion does not return this node
@@ -1054,7 +1067,7 @@ impl<'a> NodeWalker<'a> {
 					}
 				}
 				// Check if autocd is enabled
-				if self.shellenv.shopts.get("autocd").is_some_and(|opt| *opt > 0) && argv.len() == 1 {
+				if self.shellenv.get_shopt("autocd").is_some_and(|opt| *opt > 0) && argv.len() == 1 {
 					// Check if argv[0] looks like a path, and exists at a path
 					let path_candidate = argv.front().unwrap();
 					let is_relative_path = path_candidate.text().starts_with('.');
@@ -1097,6 +1110,8 @@ impl<'a> NodeWalker<'a> {
 				let Err(_) = execvpe(command, &argv, &envp);
 				std::process::exit(127);
 			};
+
+
 			if in_pipe {
 				// We are currently in a child process,
 				// So we will execute the instructions here
@@ -1109,10 +1124,10 @@ impl<'a> NodeWalker<'a> {
 						unreachable!()
 					}
 					Ok(ForkResult::Parent { child }) => {
+						setpgid(child, child).map_err(|_| ShellError::from_io())?;
 						if node.flags.contains(NdFlags::BACKGROUND) {
 							// Background job logic
 							// Set process group id here
-							setpgid(child, child).map_err(|_| ShellError::from_io())?;
 							// Add job to the job table
 							self.shellenv.new_job(vec![child], vec![cmd], child);
 							// Restore saved file descriptors
@@ -1120,22 +1135,21 @@ impl<'a> NodeWalker<'a> {
 							Ok(RshWait::Success { span })
 						} else {
 							// Wait for the child process to complete
-							let status = loop {
-								match waitpid(child, None) {
-									Ok(WaitStatus::Exited(_, code)) => break Ok(match code {
-										0 => RshWait::Success { span },
-										_ => RshWait::Fail { code, cmd: Some(cmd), span },
-									}),
-									Ok(WaitStatus::Signaled(_, signal, _)) => {
-										break Ok(RshWait::Signaled { sig: signal });
-									}
-									Ok(_) => break Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
-									Err(nix::errno::Errno::EINTR) => continue, // Retry on interruption
-									Err(err) => break Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),
+							unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0),child.into()) };
+							let status = match waitpid(child, None) {
+								Ok(WaitStatus::Exited(_, code)) => Ok(match code {
+									0 => RshWait::Success { span },
+									_ => RshWait::Fail { code, cmd: Some(cmd), span },
+								}),
+								Ok(WaitStatus::Signaled(_, signal, _)) => {
+									Ok(RshWait::Signaled { sig: signal })
 								}
+								Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
+								Err(nix::errno::Errno::EINTR) => panic!(), // Retry on interruption
+								Err(err) => Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),
 							};
+							unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0),getpid().into()) };
 							io.restore_fildescs()?;
-
 							// Return wait status
 							status
 						}

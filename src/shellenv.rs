@@ -1,14 +1,14 @@
 use std::borrow::BorrowMut;
 use std::env;
 use std::fmt::Display;
-use nix::sys::signal::{self, Signal};
-use nix::unistd::{gethostname, Pid, User};
+use nix::sys::signal::{self, SigHandler, Signal};
+use nix::unistd::{gethostname, getpgid, getpid, tcgetpgrp, tcsetpgrp, Pid, User};
 use nix::NixPath;
 use std::collections::{HashSet,HashMap};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::RawFd;
+use std::os::fd::{BorrowedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -26,7 +26,7 @@ bitflags! {
 	#[derive(Debug,Copy,Clone)]
 	pub struct JobFlags: i8 {
 		const LONG      = 0b00000001;
-		const PIDS_ONLY = 0b00000010;
+		const PIDS      = 0b00000010;
 		const NEW_ONLY  = 0b00000100;
 		const RUNNING   = 0b00001000;
 		const STOPPED   = 0b00010000;
@@ -41,12 +41,16 @@ pub struct Job {
 	commands: Vec<String>,
 	pgid: Pid,
 	statuses: Vec<RshWait>,
+	active: bool
 }
 
 impl Job {
 	pub fn new(job_id: i32, pids: Vec<Pid>, commands: Vec<String>, pgid: Pid) -> Self {
 		let num_pids = pids.len();
-		Self { job_id, pgid, pids, commands, statuses: vec![RshWait::Running;num_pids] }
+		Self { job_id, pgid, pids, commands, statuses: vec![RshWait::Running;num_pids], active: true }
+	}
+	pub fn is_active(&self) -> bool {
+		self.active
 	}
 	pub fn update_status(&mut self, pid_index: usize, new_stat: RshWait) {
 			if pid_index < self.statuses.len() {
@@ -71,6 +75,9 @@ impl Job {
 	pub fn commands(&self) -> Vec<String> {
 		self.commands.clone()
 	}
+	pub fn deactivate(&mut self) {
+		self.active = false;
+	}
 	pub fn signal_proc(&self, sig: Signal) -> RshResult<()> {
 		if self.pids().len() == 1 {
 			let pid = *self.pids().first().unwrap();
@@ -82,6 +89,7 @@ impl Job {
 	pub fn print(&self, current: Option<i32>, flags: JobFlags) -> String {
 		let long = flags.contains(JobFlags::LONG);
 		let init = flags.contains(JobFlags::INIT);
+		let pids = flags.contains(JobFlags::PIDS);
 		let mut output = String::new();
 
 		const GREEN: &str = "\x1b[32m";
@@ -103,12 +111,26 @@ impl Job {
 
 		// Add commands and PIDs
 		for (i, cmd) in self.commands.iter().enumerate() {
+			let pid = if pids || init {
+				let mut pid = self.pids.get(i).unwrap().to_string();
+				pid.push(' ');
+				pid
+			} else {
+				"".to_string()
+			};
 			let cmd = cmd.clone();
-			let status1 = if init { self.pids().get(i).unwrap().to_string() } else { self.statuses.get(i).unwrap().to_string() };
+			let mut status0 = if init { "".into() } else { self.statuses.get(i).unwrap().to_string() };
+			if status0.len() < 6 && !status0.is_empty() {
+				// Pad out the length so that formatting is uniform
+				let diff = 6 - status0.len();
+				let pad = " ".repeat(diff);
+				status0.push_str(&pad);
+			}
+			let status1 = format!("{}{}",pid,status0);
 			let status2 = format!("{}\t{}",status1,cmd);
-			let mut status_final = if status2.starts_with("done") {
+			let mut status_final = if status0.starts_with("done") {
 				format!("{}{}{}",GREEN,status2,RESET)
-			} else if status2.starts_with("exit") {
+			} else if status0.starts_with("exit") {
 				format!("{}{}{}",RED,status2,RESET)
 			} else {
 				format!("{}{}{}",CYAN,status2,RESET)
@@ -191,31 +213,44 @@ impl PartialEq for ShellEnv {
             && self.shopts == other.shopts
             && self.functions == other.functions
             && self.parameters == other.parameters
-            && self.open_fds == other.open_fds
             && self.last_input == other.last_input
+						&& self.shell_is_fg == other.shell_is_fg
     }
 }
 
 #[derive(Clone,Debug)]
 pub struct JobTable {
+	fg: Option<Job>,
 	jobs: HashMap<i32,Job>,
 	curr_job: Option<i32>,
-	updated_since_check: HashMap<i32,Job>
+	updated_since_check: Vec<i32>,
 }
 
 impl JobTable {
 	fn new() -> Self {
 		Self {
+			fg: None,
 			jobs: HashMap::new(),
 			curr_job: None,
-			updated_since_check: HashMap::new()
+			updated_since_check: Vec::new()
 		}
 	}
 	pub fn curr_job(&self) -> Option<i32> {
 		self.curr_job
 	}
-	pub fn print_jobs(&self, flags: &JobFlags) {
-		let mut jobs = self.jobs.values().collect::<Vec<&Job>>();
+	pub fn mark_updated(&mut self, id: i32) {
+		self.updated_since_check.push(id)
+	}
+	pub fn print_jobs(&mut self, flags: &JobFlags) {
+		let mut jobs = if flags.contains(JobFlags::NEW_ONLY) {
+			self.jobs
+				.values()
+				.filter(|job| self.updated_since_check.contains(&job.job_id))
+				.collect::<Vec<&Job>>()
+		} else {
+			self.jobs.values().collect::<Vec<&Job>>()
+		};
+		self.updated_since_check.clear();
 		jobs.sort_by_key(|job| job.job_id);
 		for job in jobs {
 			let id = job.job_id;
@@ -226,32 +261,25 @@ impl JobTable {
 			if flags.contains(JobFlags::STOPPED) && !matches!(job.statuses.get(id as usize).unwrap(), RshWait::Stopped {..}) {
 				continue;
 			}
-			if flags.contains(JobFlags::PIDS_ONLY) {
-				// Print only PIDs
-				for pid in &job.pids {
-					println!("{}", pid);
-				}
-			} else {
-				// Print the job in the selected format
-				println!("{}", job.print(self.curr_job, *flags));
-			}
+			// Print the job in the selected format
+			println!("{}", job.print(self.curr_job, *flags));
 		}
 	}
 }
 
 #[derive(Debug,Clone)]
 pub struct ShellEnv {
-	pub flags: EnvFlags,
-	pub output_buffer: Arc<Mutex<String>>,
-	pub env_vars: HashMap<String, String>,
-	pub variables: HashMap<String, String>,
-	pub aliases: HashMap<String, String>,
-	pub shopts: HashMap<String,usize>,
-	pub functions: HashMap<String, Box<Node>>,
-	pub parameters: HashMap<String, String>,
-	pub open_fds: HashSet<i32>,
-	pub last_input: Option<String>,
-	pub job_table: JobTable
+	flags: EnvFlags,
+	output_buffer: Arc<Mutex<String>>,
+	env_vars: HashMap<String, String>,
+	variables: HashMap<String, String>,
+	aliases: HashMap<String, String>,
+	shopts: HashMap<String,usize>,
+	functions: HashMap<String, Box<Node>>,
+	parameters: HashMap<String, String>,
+	last_input: Option<String>,
+	pub job_table: JobTable,
+	shell_is_fg: bool,
 }
 
 impl ShellEnv {
@@ -274,9 +302,9 @@ impl ShellEnv {
 			shopts,
 			functions: HashMap::new(),
 			parameters: HashMap::new(),
-			open_fds,
 			last_input: None,
-			job_table: JobTable::new()
+			job_table: JobTable::new(),
+			shell_is_fg: true
 		};
 		if !flags.contains(EnvFlags::NO_RC) {
 			let runtime_commands_path = &expand_var(&shellenv, "${HOME}/.rshrc".into());
@@ -293,16 +321,41 @@ impl ShellEnv {
 		shellenv
 	}
 
-	pub fn new_job(&mut self, pids: Vec<Pid>, commands: Vec<String>, pgid: Pid) {
-		let job_id = self.job_table.jobs.len() + 1;
+	pub fn new_job(&mut self, pids: Vec<Pid>, commands: Vec<String>, pgid: Pid, fg: bool) {
+		let job_id = if fg {
+			0
+		} else {
+			self.job_table.jobs.len() + 1
+		};
 		let job = Job::new(job_id as i32,pids,commands,pgid);
 		println!("{}",job.print(Some(job_id as i32), JobFlags::INIT));
-		self.job_table.jobs.insert(job_id as i32, job);
-		self.set_curr_job(job_id as i32);
+		if job_id >= 1 {
+			self.job_table.jobs.insert(job_id as i32, job);
+			self.set_curr_job(job_id as i32);
+		} else {
+			self.set_fg_job(job);
+		}
 	}
 
 	pub fn borrow_jobs(&mut self) -> &mut HashMap<i32,Job> {
 		&mut self.job_table.jobs
+	}
+
+	pub fn set_fg_job(&mut self, job: Job) {
+		self.job_table.fg = Some(job)
+	}
+
+	pub fn update_curr_job(&mut self) {
+		let jobs = &self.job_table.jobs;
+		let mut jobs = jobs.values().collect::<Vec<&Job>>();
+		jobs.sort_by_key(|job| job.job_id);
+		let mut most_recent_still_running: Option<i32> = None;
+		for job in jobs {
+			if job.is_active() {
+				most_recent_still_running = Some(job.job_id);
+			}
+		}
+		self.job_table.curr_job = most_recent_still_running;
 	}
 
 	pub fn set_curr_job(&mut self, job_id: i32) {
@@ -389,34 +442,49 @@ impl ShellEnv {
 		self.last_input = Some(buffer.clone());
 
 
-		let state = descend(&buffer, self);
-		match state {
-			Ok(parse_state) => {
-				let mut walker = NodeWalker::new(parse_state.ast, self);
-				match walker.start_walk() {
-					Ok(code) => {
-						info!("Last exit status: {:?}", code);
-						if let RshWait::Fail { code, cmd, span } = code {
-							if code == 127 {
-								if let Some(cmd) = cmd {
-									let err = ShellErrorFull::from(self.get_last_input(),ShellError::from_no_cmd(&format!("Command not found: {}",cmd), span));
-									eprintln!("{}", err);
-								}
-							}
-						}
-					}
-					Err(e) => {
-						let err = ShellErrorFull::from(self.get_last_input(), e);
-						eprintln!("{}", err);
-					}
+		let state = descend(&buffer, self)?;
+		let new_env = self.clone();
+		let mut walker = NodeWalker::new(state.ast, new_env);
+		let code = walker.start_walk()?;
+		if let RshWait::Fail { code, cmd, span } = code {
+			if code == 127 {
+				if let Some(cmd) = cmd {
+					let err = ShellErrorFull::from(walker.shellenv.get_last_input(),ShellError::from_no_cmd(&format!("Command not found: {}",cmd), span));
+					eprintln!("{}", err);
 				}
 			}
-			Err(e) => {
-				let err = ShellErrorFull::from(self.get_last_input(), e);
-				eprintln!("Encountered error while sourcing file: {}\n{}",path.display(), err);
-			}
 		}
+		let new_env = walker.deconstruct();
+		self.replace(new_env);
 		Ok(())
+	}
+
+	pub fn replace(&mut self, other: ShellEnv) {
+		let ShellEnv {
+			flags,
+			output_buffer,
+			env_vars,
+			variables,
+			aliases,
+			shopts,
+			functions,
+			parameters,
+			last_input,
+			job_table,
+			shell_is_fg
+		} = other;
+
+		self.flags = flags;
+		self.output_buffer= output_buffer;
+		self.env_vars= env_vars;
+		self.variables= variables;
+		self.aliases= aliases;
+		self.shopts= shopts;
+		self.functions= functions;
+		self.parameters= parameters;
+		self.last_input= last_input;
+		self.job_table = job_table;
+		self.shell_is_fg = shell_is_fg;
 	}
 
 	pub fn change_dir(&mut self, path: &Path, span: Span) -> RshResult<()> {
@@ -473,14 +541,6 @@ impl ShellEnv {
 		self.set_parameter("-".into(), flag_string);
 	}
 
-	pub fn open_fd(&mut self, fd: RawFd) {
-		self.open_fds.insert(fd);
-	}
-
-	pub fn close_fd(&mut self, fd: RawFd) {
-		self.open_fds.remove(&fd);
-	}
-
 	pub fn handle_exit_status(&mut self, wait_status: RshWait) {
 		match wait_status {
 			RshWait::Success { .. } => self.set_parameter("?".into(), "0".into()),
@@ -495,6 +555,26 @@ impl ShellEnv {
 		} else {
 			self.flags &= !EnvFlags::INTERACTIVE
 		}
+	}
+
+	pub fn get_env_vars(&self) -> &HashMap<String,String> {
+		&self.env_vars
+	}
+
+	pub fn get_shopts(&self) -> &HashMap<String,usize> {
+		&self.shopts
+	}
+
+	pub fn get_shopt(&self, shopt: &str) -> Option<&usize> {
+		self.shopts.get(shopt)
+	}
+
+	pub fn get_params(&self) -> &HashMap<String,String> {
+		&self.parameters
+	}
+
+	pub fn set_params(&mut self, new_params: HashMap<String,String>) {
+		self.parameters = new_params;
 	}
 
 	// Getters and Setters for `variables`
@@ -526,10 +606,6 @@ impl ShellEnv {
 		}
 		self.variables.insert(key.clone(), value);
 		trace!("testing variable get: {} = {}", key, self.get_variable(key.as_str()).unwrap())
-	}
-
-	pub fn get_shopt(&self, key: &str) -> usize {
-		self.shopts[key]
 	}
 
 	pub fn set_shopt(&mut self, key: &str, value: usize) {

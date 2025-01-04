@@ -73,18 +73,18 @@ pub fn expand_prompt(shellenv: &ShellEnv) -> String {
 	//\V - rsh release; version + patch level
 	//\! - history number of this command
 	//\# - command number of this command
-	let default_color = if shellenv.env_vars.get("UID").is_some_and(|uid| uid == "0") {
+	let default_color = if shellenv.get_env_vars().get("UID").is_some_and(|uid| uid == "0") {
 		"31" // Red if uid is 0, aka root user
 	} else {
 		"32" // Green if anyone else
 	};
-	let cwd: String = shellenv.env_vars.get("PWD").map_or("", |cwd| cwd).to_string();
+	let cwd: String = shellenv.get_env_vars().get("PWD").map_or("", |cwd| cwd).to_string();
 	let default_path = if cwd.as_str() == "/" {
 		"\\e[36m\\w\\e[0m".to_string()
 	} else {
 		format!("\\e[1;{}m\\w\\e[1;36m/\\e[0m",default_color)
 	};
-	let ps1: String = shellenv.env_vars.get("PS1").map_or(format!("\\n{}\\n\\e[{}mdebug \\$\\e[36m>\\e[0m ",default_path,default_color), |ps1| ps1.clone());
+	let ps1: String = shellenv.get_env_vars().get("PS1").map_or(format!("\\n{}\\n\\e[{}mdebug \\$\\e[36m>\\e[0m ",default_path,default_color), |ps1| ps1.clone());
 	let mut result = String::new();
 	let mut chars = ps1.chars().collect::<VecDeque<char>>();
 	while let Some(c) = chars.pop_front() {
@@ -150,13 +150,13 @@ pub fn expand_prompt(shellenv: &ShellEnv) -> String {
 							// Do nothing, it's just a marker
 						}
 						'w' => {
-							let mut cwd = shellenv.env_vars.get("PWD").map_or(String::new(), |pwd| pwd.to_string());
-							let home = shellenv.env_vars.get("HOME").map_or("", |home| home);
+							let mut cwd = shellenv.get_env_vars().get("PWD").map_or(String::new(), |pwd| pwd.to_string());
+							let home = shellenv.get_env_vars().get("HOME").map_or("", |home| home);
 							if cwd.starts_with(home) {
 								cwd = cwd.replacen(home, "~", 1); // Use `replacen` to replace only the first occurrence
 							}
 							// TODO: unwrap is probably safe here since this option is initialized with the environment but it might still cause issues later if this is left unhandled
-							let trunc_len = shellenv.shopts.get("trunc_prompt_path").unwrap_or(&0);
+							let trunc_len = shellenv.get_shopt("trunc_prompt_path").unwrap_or(&0);
 							if *trunc_len > 0 {
 								let mut path = PathBuf::from(cwd);
 								let mut cwd_components: Vec<_> = path.components().collect();
@@ -169,20 +169,20 @@ pub fn expand_prompt(shellenv: &ShellEnv) -> String {
 							result.push_str(&cwd);
 						}
 						'W' => {
-							let cwd = PathBuf::from(shellenv.env_vars.get("PWD").map_or("", |pwd| pwd));
+							let cwd = PathBuf::from(shellenv.get_env_vars().get("PWD").map_or("", |pwd| pwd));
 							let mut cwd = cwd.components().last().map(|comp| comp.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
-							let home = shellenv.env_vars.get("HOME").map_or("", |home| home);
+							let home = shellenv.get_env_vars().get("HOME").map_or("", |home| home);
 							if cwd.starts_with(home) {
 								cwd = cwd.replacen(home, "~", 1); // Replace HOME with '~'
 							}
 							result.push_str(&cwd);
 						}
 						'H' => {
-							let hostname = shellenv.env_vars.get("HOSTNAME").map_or("unknown host", |host| host);
+							let hostname = shellenv.get_env_vars().get("HOSTNAME").map_or("unknown host", |host| host);
 							result.push_str(hostname);
 						}
 						'h' => {
-							let hostname = shellenv.env_vars.get("HOSTNAME").map_or("unknown host", |host| host);
+							let hostname = shellenv.get_env_vars().get("HOSTNAME").map_or("unknown host", |host| host);
 							if let Some((hostname, _)) = hostname.split_once('.') {
 								result.push_str(hostname);
 							} else {
@@ -190,15 +190,15 @@ pub fn expand_prompt(shellenv: &ShellEnv) -> String {
 							}
 						}
 						's' => {
-							let sh_name = shellenv.env_vars.get("SHELL").map_or("rsh", |sh| sh);
+							let sh_name = shellenv.get_env_vars().get("SHELL").map_or("rsh", |sh| sh);
 							result.push_str(sh_name);
 						}
 						'u' => {
-							let user = shellenv.env_vars.get("USER").map_or("unknown", |user| user);
+							let user = shellenv.get_env_vars().get("USER").map_or("unknown", |user| user);
 							result.push_str(user);
 						}
 						'$' => {
-							let uid = shellenv.env_vars.get("UID").map_or("0", |uid| uid);
+							let uid = shellenv.get_env_vars().get("UID").map_or("0", |uid| uid);
 							match uid {
 								"0" => result.push('#'),
 								_ => result.push('$'),

@@ -1,9 +1,10 @@
 use std::borrow::BorrowMut;
+use std::panic::Location;
 use std::{fmt, io};
 use std::os::fd::BorrowedFd;
 
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::{getpgid, Pid};
+use nix::unistd::{tcgetpgrp, getpgid, Pid};
 use tokio::sync::mpsc;
 use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};
@@ -19,14 +20,16 @@ pub enum ShellError {
 	InvalidSyntax(String, Span),
 	ParsingError(String, Span),
 	ExecFailed(String, i32, Span),
-	IoError(String),
+	IoError(String, u32, String),
 	InternalError(String),
 }
 
 impl ShellError {
 	pub fn from_io() -> Self {
 		let err = io::Error::last_os_error();
-		ShellError::IoError(err.to_string())
+		let loc = Location::caller();
+		eprintln!("{}, {}",loc.line(),loc.file());
+		ShellError::IoError(err.to_string(),loc.line(),loc.file().to_string())
 	}
 	pub fn from_execf(msg: &str, code: i32, span: Span) -> Self {
 		ShellError::ExecFailed(msg.to_string(), code, span)
@@ -48,7 +51,7 @@ impl ShellError {
 	// Of the offending command that is inside of the function
 	pub fn overwrite_span(&self, new_span: Span) -> Self {
 		match self {
-			ShellError::IoError(err) => ShellError::IoError(err.to_string()),
+			ShellError::IoError(err,loc,file) => ShellError::IoError(err.to_string(),*loc,file.to_string()),
 			ShellError::CommandNotFound(msg,_) => ShellError::CommandNotFound(msg.to_string(),new_span),
 			ShellError::InvalidSyntax(msg,_) => ShellError::InvalidSyntax(msg.to_string(),new_span),
 			ShellError::ParsingError(msg,_) => ShellError::ParsingError(msg.to_string(),new_span),
@@ -204,8 +207,8 @@ impl ShellErrorFull {
 impl fmt::Display for ShellErrorFull {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match &self.error {
-			ShellError::IoError(err) => {
-				writeln!(f, "I/O Error: {}", err)?;
+			ShellError::IoError(err, loc, file) => {
+				writeln!(f, "I/O Error: {}; at line: {}, in {}",err,loc,file)?;
 				self.format_error_context(None);
 			}
 			ShellError::ExecFailed(msg, code, span) => {
@@ -242,7 +245,7 @@ impl fmt::Display for ShellErrorFull {
 pub enum ShellEvent {
 	Prompt,
 	Signal(Signals),
-	NewInput(String),
+	UpdateEnv(ShellEnv),
 	NewAST(Node),
 	CatchError(ShellError),
 	Exit(i32)
@@ -263,18 +266,18 @@ pub enum Signals {
 	SIGUSR2
 }
 
-pub struct EventLoop<'a> {
+pub struct EventLoop {
 	sender: mpsc::Sender<ShellEvent>,
 	receiver: mpsc::Receiver<ShellEvent>,
-	shellenv: &'a mut ShellEnv
+	shellenv: ShellEnv
 }
 
-impl<'a> EventLoop<'a> {
+impl EventLoop {
 	/// Creates a new `EventLoop` instance with a message passing channel.
 	///
 	/// # Returns
 	/// A new instance of `EventLoop` with a sender and receiver for inter-task communication.
-	pub fn new(shellenv: &'a mut ShellEnv) -> Self {
+	pub fn new(shellenv: ShellEnv) -> Self {
 		let (sender, receiver) = mpsc::channel(100);
 		Self {
 			sender,
@@ -333,33 +336,45 @@ impl<'a> EventLoop<'a> {
 					// Handle exit events and set the exit code.
 					code = exit_code;
 				}
-				ShellEvent::NewInput(input) => {
-					self.shellenv.set_last_input(&input);
+				ShellEvent::UpdateEnv(new_env) => {
+					self.shellenv = new_env;
 				}
 				ShellEvent::NewAST(tree) => {
 					// Log and process a new AST node.
 					debug!("new tree:\n {:#?}", tree);
 
-					let mut walker = execute::NodeWalker::new(tree,self.shellenv);
-					match walker.start_walk() {
-						Ok(code) => {
-							info!("Last exit status: {:?}",code);
-							if let RshWait::Fail { code, cmd, span } = &code {
-								if *code == 127 {
-									if let Some(cmd) = cmd {
-										let err = ShellErrorFull::from(self.shellenv.get_last_input(),ShellError::from_no_cmd(cmd, *span));
-										eprintln!("{}",err);
-									}
-								};
-							};
+					// Prepare the node walker
+					let env_cloned = self.shellenv.clone();
+					let inbox = self.inbox();
+					let mut walker = execute::NodeWalker::new(tree,env_cloned);
 
-							self.shellenv.handle_exit_status(code);
-						},
-						Err(e) => {
-							let err = ShellErrorFull::from(self.shellenv.get_last_input(),e);
-							eprintln!("{}",err);
+					// Dispatch execution
+					tokio::spawn(async move {
+						match walker.start_walk() {
+							Ok(code) => {
+								info!("Last exit status: {:?}",code);
+								if let RshWait::Fail { code, cmd, span } = &code {
+									if *code == 127 {
+										if let Some(cmd) = cmd {
+											dbg!("throwing error from event loop");
+											let err = ShellErrorFull::from(walker.shellenv.get_last_input(),ShellError::from_no_cmd(cmd, *span));
+											eprintln!("{}",err);
+										}
+									};
+								};
+
+								walker.shellenv.handle_exit_status(code);
+							},
+							Err(e) => {
+								dbg!("throwing error from event loop");
+								let err = ShellErrorFull::from(walker.shellenv.get_last_input(),e);
+								eprintln!("{}",err);
+							}
 						}
-					}
+						let shellenv = walker.deconstruct();
+						inbox.send(ShellEvent::UpdateEnv(shellenv));
+					});
+
 				}
 				ShellEvent::Signal(signal) => {
 					// Handle received signals.
@@ -375,6 +390,7 @@ impl<'a> EventLoop<'a> {
 						eprintln!("Fatal: {}", error_display);
 						std::process::exit(1);
 					} else {
+						dbg!("throwing error from event loop");
 						println!("{}",error_display);
 					}
 				}
@@ -383,6 +399,7 @@ impl<'a> EventLoop<'a> {
 		Ok(code)
 	}
 	async fn handle_signal(&mut self, signal: Signals) -> RshResult<()> {
+		dbg!(&signal);
 		match signal {
 			Signals::SIGQUIT => {
 				std::process::exit(0);
@@ -414,7 +431,6 @@ impl<'a> EventLoop<'a> {
 					Err(_) => { /* No child processes found, so */ return Ok(()) },
 					_ => unimplemented!()
 				};
-				let mut new_curr_job_id = None;
 				let curr_job = self.shellenv.job_table.curr_job();
 				let jobs = self.shellenv.borrow_jobs();
 				for (_, job) in jobs.iter_mut() {
@@ -424,15 +440,13 @@ impl<'a> EventLoop<'a> {
 							if !job.get_proc_statuses().iter().any(|stat| *stat == RshWait::Running) {
 								println!();
 								println!("{}",job.print(curr_job, JobFlags::empty()));
-								new_curr_job_id = Some(job.id());
+								job.deactivate();
 							}
 							break;
 						}
 					}
 				}
-				if let Some(id) = new_curr_job_id {
-					self.shellenv.set_curr_job(id);
-				}
+				self.shellenv.update_curr_job();
 			}
 			_ => { },
 		}

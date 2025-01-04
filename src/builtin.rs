@@ -605,7 +605,7 @@ pub fn jobs(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) 
 		while let Some(ch) = chars.pop_front() {
 			let flag = match ch {
 				'l' => JobFlags::LONG,
-				'p' => JobFlags::PIDS_ONLY,
+				'p' => JobFlags::PIDS,
 				'n' => JobFlags::NEW_ONLY,
 				'r' => JobFlags::RUNNING,
 				's' => JobFlags::STOPPED,

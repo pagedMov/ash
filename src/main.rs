@@ -29,14 +29,13 @@ pub mod interp;
 pub mod builtin;
 pub mod comp;
 
-use std::{env, fs::File, io::Read, os::fd::{AsFd, BorrowedFd}};
+use std::{env, fs::File, io::Read};
 
 use event::{EventLoop, ShellError, ShellErrorFull};
 use execute::{NodeWalker, RshWait};
 use interp::parse::descend;
-use libc::STDERR_FILENO;
 use log::info;
-use nix::unistd::write;
+use nix::sys::signal::{signal, SigHandler, Signal::SIGTTOU};
 use shellenv::EnvFlags;
 
 //use crate::event::EventLoop;
@@ -48,6 +47,9 @@ pub type RshResult<T> = Result<T, ShellError>;
 #[tokio::main]
 async fn main() {
 	let args = env::args().collect::<Vec<String>>();
+
+	// Ignore SIGTTOU
+	unsafe { signal(SIGTTOU, SigHandler::SigIgn).unwrap() };
 
 	let mut shellenv = ShellEnv::new(EnvFlags::empty());
 	if args[0].starts_with('-') {
@@ -68,14 +70,13 @@ async fn main() {
 
 
 async fn main_noninteractive(args: Vec<String>, mut shellenv: ShellEnv) {
-	let stderr = unsafe { BorrowedFd::borrow_raw(STDERR_FILENO) };
 	let mut pos_params: Vec<String> = vec![];
 	let input;
 
 	// Input Handling
 	if args[1] == "-c" {
 		if args.len() < 3 {
-			write(stderr.as_fd(), b"Expected a command after '-c' flag\n").unwrap();
+			eprintln!("Expected a command after '-c' flag");
 			return;
 		}
 		input = args[2].clone(); // Store the command string
@@ -89,13 +90,13 @@ async fn main_noninteractive(args: Vec<String>, mut shellenv: ShellEnv) {
 			Ok(mut script) => {
 				let mut buffer = vec![];
 				if let Err(e) = script.read_to_end(&mut buffer) {
-					write(stderr.as_fd(), format!("Error reading file: {}\n", e).as_bytes()).unwrap();
+					eprintln!("Error reading file: {}\n", e);
 					return;
 				}
 				input = String::from_utf8_lossy(&buffer).to_string(); // Convert file contents to String
 			}
 			Err(e) => {
-				write(stderr.as_fd(), format!("Error opening file: {}\n", e).as_bytes()).unwrap();
+				eprintln!("Error opening file: {}\n", e);
 				return;
 			}
 		}
@@ -110,35 +111,35 @@ async fn main_noninteractive(args: Vec<String>, mut shellenv: ShellEnv) {
 	let state = descend(&input, &shellenv);
 	match state {
 		Ok(parse_state) => {
-			let mut walker = NodeWalker::new(parse_state.ast, &mut shellenv);
+			let mut walker = NodeWalker::new(parse_state.ast, shellenv);
 			match walker.start_walk() {
 				Ok(code) => {
 					info!("Last exit status: {:?}", code);
 					if let RshWait::Fail { code, cmd, span } = code {
 						if code == 127 {
 							if let Some(cmd) = cmd {
-								let err = ShellErrorFull::from(shellenv.get_last_input(),ShellError::from_no_cmd(&cmd, span));
-								write(stderr, format!("{}", err).as_bytes()).unwrap();
+								let err = ShellErrorFull::from(walker.shellenv.get_last_input(),ShellError::from_no_cmd(&cmd, span));
+								eprintln!("{}", err);
 							}
 						}
 					}
 				}
 				Err(e) => {
-					let err = ShellErrorFull::from(shellenv.get_last_input(),e);
-					write(stderr.as_fd(), format!("{}", err).as_bytes()).unwrap();
+					let err = ShellErrorFull::from(walker.shellenv.get_last_input(),e);
+					eprintln!("{}", err);
 				}
 			}
 		}
 		Err(e) => {
 			let err = ShellErrorFull::from(shellenv.get_last_input(),e);
-			write(stderr.as_fd(), format!("{}", err).as_bytes()).unwrap();
+			eprintln!("{}", err);
 		}
 	}
 }
 
-async fn main_interactive(mut shellenv: ShellEnv) {
+async fn main_interactive(shellenv: ShellEnv) {
 	env_logger::init();
-	let mut event_loop = EventLoop::new(&mut shellenv);
+	let mut event_loop = EventLoop::new(shellenv);
 	let _ = event_loop.listen().await;
 }
 
