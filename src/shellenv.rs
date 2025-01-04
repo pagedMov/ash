@@ -38,17 +38,23 @@ pub struct Job {
 	pids: Vec<Pid>,
 	commands: Vec<String>,
 	pgid: Pid,
-	status: RshWaitStatus,
+	statuses: Vec<RshWaitStatus>,
 	current: bool,
 	prev: bool,
 }
 
 impl Job {
 	pub fn new(job_id: i32, pids: Vec<Pid>, commands: Vec<String>, pgid: Pid) -> Self {
-		Self { job_id, pgid, pids, commands, status: RshWaitStatus::Running, current: true, prev: false }
+		let num_pids = pids.len();
+		Self { job_id, pgid, pids, commands, statuses: vec![RshWaitStatus::Running;num_pids], current: true, prev: false }
 	}
-	pub fn status(&mut self, new_stat: RshWaitStatus) {
-		self.status = new_stat;
+	pub fn update_status(&mut self, pid_index: usize, new_stat: RshWaitStatus) {
+			if pid_index < self.statuses.len() {
+					self.statuses[pid_index] = new_stat;
+			} else {
+					eprintln!("Error: Invalid pid_index {} for statuses", pid_index);
+					// Alternatively, return a Result to signal the error.
+			}
 	}
 	pub fn pids(&self) -> &[Pid] {
 		&self.pids
@@ -58,9 +64,6 @@ impl Job {
 	}
 	pub fn commands(&self) -> Vec<String> {
 		self.commands.clone()
-	}
-	pub fn get_status(&self) -> RshWaitStatus {
-		self.status.clone()
 	}
 	pub fn signal_proc(&self, sig: Signal) -> Result<(),ShellError> {
 		if self.pids().len() == 1 {
@@ -75,20 +78,34 @@ impl Job {
 
 		// Add job ID and status
 		let symbol = if self.current { "+" } else if self.prev { "-" } else { " " };
-		output.push_str(&format!("[{}]{}  {}\n", self.job_id, symbol, self.status));
+		output.push_str(&format!("[{}]{} ", self.job_id, symbol));
+		let padding_num = symbol.len() + self.job_id.to_string().len() + 3;
+		let padding: String = " ".repeat(padding_num);
 
 		// Add commands and PIDs
 		for (i, cmd) in self.commands.iter().enumerate() {
+			let mut cmd = cmd.clone();
+			if i != self.commands.len() - 1 {
+				cmd.push_str(" |");
+			}
 			if long {
 				// Long format includes PIDs
 				output.push_str(&format!(
-						"{}  {}\n",
-						if i == 0 { "" } else { "       " },
+						"{}{}{}\t{}\n",
+						if i != 0 { padding.clone() } else { "".into() },
+						self.pids().get(i).unwrap(),
+						self.statuses.get(i).unwrap(),
 						cmd
 				));
 			} else {
 				// Short format only includes commands
-				output.push_str(&format!("{}\n", cmd));
+				output.push_str(&format!(
+						"{}{}\t{}\n",
+						if i != 0 { padding.clone() } else { "".into() },
+						self.statuses.get(i).unwrap(),
+						cmd
+					)
+				);
 			}
 		}
 
@@ -194,11 +211,12 @@ impl JobTable {
 	pub fn print_jobs(&self, flags: &JobFlags) {
 		let jobs = self.jobs.values().collect::<Vec<&Job>>();
 		for job in jobs {
+			let id = job.job_id;
 			// Filter jobs based on flags
-			if flags.contains(JobFlags::RUNNING) && !matches!(job.status, RshWaitStatus::Running) {
+			if flags.contains(JobFlags::RUNNING) && !matches!(job.statuses.get(id as usize).unwrap(), RshWaitStatus::Running) {
 				continue;
 			}
-			if flags.contains(JobFlags::STOPPED) && !matches!(job.status, RshWaitStatus::Stopped {..}) {
+			if flags.contains(JobFlags::STOPPED) && !matches!(job.statuses.get(id as usize).unwrap(), RshWaitStatus::Stopped {..}) {
 				continue;
 			}
 			if flags.contains(JobFlags::PIDS_ONLY) {

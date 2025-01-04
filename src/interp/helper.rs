@@ -1,8 +1,8 @@
-use crate::{interp::token::REGEX, shellenv::ShellEnv};
-use nix::unistd::dup2;
+use crate::{event::ShellError, execute::RshWaitStatus, interp::token::REGEX, shellenv::ShellEnv};
+use nix::{sys::wait::{waitpid, WaitStatus}, unistd::{dup2, fork, setpgid, ForkResult}};
 use std::{collections::VecDeque, env, fs::{self, metadata}, io, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::Path};
 
-use super::parse::{NdType, Node};
+use super::parse::{NdFlags, NdType, Node, Span};
 
 pub trait VecExtension<T> {
 	fn extended(self, vec: Vec<T>) -> Vec<T>;

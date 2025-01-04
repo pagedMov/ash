@@ -1,10 +1,11 @@
-use libc::{memfd_create, MFD_CLOEXEC};
+use libc::{memfd_create, tcsetpgrp, MFD_CLOEXEC, STDIN_FILENO};
 use nix::sys::signal::Signal;
-use nix::unistd::{close, dup, dup2, execve, execvpe, fork, pipe, setpgid, ForkResult, Pid};
+use nix::unistd::{close, dup, dup2, execve, execvpe, fork, getpgid, getpid, isatty, pipe, setpgid, ForkResult, Pid};
 use nix::fcntl::{open,OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::wait::{waitpid, WaitStatus};
 use std::fmt::{self, Display};
+use std::io;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::ffi::CString;
 use std::collections::{HashMap, VecDeque};
@@ -340,15 +341,15 @@ pub enum RshWaitStatus {
 impl Display for RshWaitStatus {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			RshWaitStatus::Success { .. } => write!(f, "Completed: code 0"),
-			RshWaitStatus::Fail { code, .. } => write!(f, "Completed: code {}", code),
-			RshWaitStatus::Signaled { sig } => write!(f, "Signaled: {}", sig),
-			RshWaitStatus::Stopped { sig } => write!(f, "Stopped: {}", sig),
-			RshWaitStatus::Terminated { signal } => write!(f, "Terminated: {}", signal),
-			RshWaitStatus::Continued => write!(f, "Continued"),
-			RshWaitStatus::Running => write!(f, "Running"),
-			RshWaitStatus::Killed { signal } => write!(f, "Killed: {}", signal),
-			RshWaitStatus::TimeOut => write!(f, "Timed out"),
+			RshWaitStatus::Success { .. } => write!(f, "done"),
+			RshWaitStatus::Fail { code, .. } => write!(f, "exit {}", code),
+			RshWaitStatus::Signaled { sig } => write!(f, "exit {}", sig),
+			RshWaitStatus::Stopped { sig } => write!(f, "stopped {}", sig),
+			RshWaitStatus::Terminated { signal } => write!(f, "terminated {}", signal),
+			RshWaitStatus::Continued => write!(f, "continued"),
+			RshWaitStatus::Running => write!(f, "running"),
+			RshWaitStatus::Killed { signal } => write!(f, "killed {}", signal),
+			RshWaitStatus::TimeOut => write!(f, "time out"),
 			_ => write!(f, "{:?}",self)
 		}
 	}
@@ -868,10 +869,16 @@ impl<'a> NodeWalker<'a> {
 			} else {
 				(None, None) // Last command doesn't need a pipe
 			};
-			// Used as the list of commands in the job control
-			// e.g. "echo, cat, sed, awk, grep"
-			let cmd_name = command.get_argv()?.first().unwrap().text().to_string();
-			cmds.push(cmd_name);
+
+
+			let argv = command.get_argv()?;
+			if let NdType::Subshell {..} = command.nd_type {
+				// We are in a subshell
+				cmds.push("subshell".into());
+			} else {
+				let cmd_name = argv.first().unwrap().text().to_string();
+				cmds.push(cmd_name);
+			}
 
 
 			// Set up IO for the current command
@@ -946,17 +953,18 @@ impl<'a> NodeWalker<'a> {
 		last_status
 	}
 
-	fn handle_function(&mut self, node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus,ShellError> {
-		let node_span = node.span();
-		if let NdType::Command { mut argv } | NdType::Builtin { mut argv } = node.nd_type {
+	fn handle_function(&mut self, mut node: Node, io: ProcIO, in_pipe: bool) -> Result<RshWaitStatus,ShellError> {
+		let span = node.span();
+		let background = node.flags.contains(NdFlags::BACKGROUND);
+		if let NdType::Command { ref mut argv } | NdType::Builtin { ref mut argv } = node.nd_type {
 			let func_name = argv.pop_front().unwrap();
 			let mut pos_params = vec![];
 			while let Some(token) = argv.pop_front() {
 				pos_params.push(token.text().to_string())
 			}
 			// Unwrap is safe here because we checked for Some() in self.walk()
-			let mut func = self.shellenv.get_function(func_name.text()).unwrap();
-			for redir in node.redirs {
+			let mut func = *self.shellenv.get_function(func_name.text()).unwrap();
+			for redir in &node.redirs {
 				func.redirs.push_back(redir.clone());
 			}
 			let saved_parameters = self.shellenv.parameters.clone();
@@ -964,16 +972,61 @@ impl<'a> NodeWalker<'a> {
 			for (index,param) in pos_params.into_iter().enumerate() {
 				self.shellenv.set_parameter((index + 1).to_string(), param);
 			}
-			let mut sub_walker = NodeWalker::new(*func.clone(), self.shellenv);
 
-			// Returns exit status or shell error
-			let mut result = sub_walker.walk_root(*func, None, io,in_pipe);
-			if let Err(ref mut e) = result {
-				// Use the span of the function call rather than the stuff inside the function
-				*e = e.overwrite_span(node_span)
+			let child_instruction = || -> Result<(), ShellError> {
+				let mut sub_walker = NodeWalker::new(func.clone(), self.shellenv);
+				// Returns exit status or shell error
+				let mut result = sub_walker.walk_root(func, None, io,in_pipe);
+				if let Err(ref mut e) = result {
+					// Use the span of the function call rather than the stuff inside the function
+					*e = e.overwrite_span(span)
+				}
+				self.shellenv.parameters = saved_parameters;
+				std::process::exit(0);
+			};
+
+			if in_pipe {
+				child_instruction()?;
+				unreachable!()
+			} else {
+				match unsafe { fork() } {
+					Ok(ForkResult::Child) => {
+						child_instruction()?;
+						unreachable!()
+					}
+					Ok(ForkResult::Parent { child }) => {
+						if background {
+							// Background job logic
+							// Set process group id here
+							setpgid(child, child).map_err(|_| ShellError::from_io())?;
+							// Add job to the job table
+							self.shellenv.new_job(vec![child], vec![func_name.text().into()], child);
+							// Restore saved file descriptors
+							Ok(RshWaitStatus::Success { span })
+						} else {
+							// Wait for the child process to complete
+							let status = loop {
+								match waitpid(child, None) {
+									Ok(WaitStatus::Exited(_, code)) => break Ok(match code {
+										0 => RshWaitStatus::Success { span },
+										_ => RshWaitStatus::Fail { code, cmd: Some(func_name.text().into()), span },
+									}),
+									Ok(WaitStatus::Signaled(_, signal, _)) => {
+										break Ok(RshWaitStatus::Signaled { sig: signal });
+									}
+									Ok(_) => break Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
+									Err(nix::errno::Errno::EINTR) => continue, // Retry on interruption
+									Err(err) => break Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),
+								}
+							};
+
+							// Return wait status
+									status
+						}
+					}
+					Err(_) => Err(ShellError::from_io())
+				}
 			}
-			self.shellenv.parameters = saved_parameters;
-			result
 		} else { unreachable!() }
 	}
 
@@ -984,88 +1037,109 @@ impl<'a> NodeWalker<'a> {
 			.iter()
 			.map(|arg| CString::new(arg.text()).unwrap())
 			.collect::<Vec<CString>>();
-		let redirs = node.get_redirs()?;
-		let span = node.span();
-		// Let's expand aliases here
-		if let NdType::Command { ref argv } = node.nd_type {
-			// If the shellenv is allowing aliases, and the token is not from an expanded alias
-			if !argv.front().unwrap().flags().contains(WdFlags::FROM_ALIAS) {
-				let node = expand::expand_alias(self.shellenv, node.clone())?;
+			let redirs = node.get_redirs()?;
+			let span = node.span();
+			// Let's expand aliases here
+			if let NdType::Command { ref argv } = node.nd_type {
+				// If the shellenv is allowing aliases, and the token is not from an expanded alias
+				if !argv.front().unwrap().flags().contains(WdFlags::FROM_ALIAS) {
+					let node = expand::expand_alias(self.shellenv, node.clone())?;
 
-				if !matches!(node.nd_type, NdType::Command {..}) {
-					// If the resulting alias expansion does not return this node
-					// then walk the resulting sub-tree
-					return self.walk_root(node, None, io,in_pipe)
-				}
-			}
-			if self.shellenv.shopts.get("autocd").is_some_and(|opt| *opt > 0) && argv.len() == 1 {
-				let path_candidate = argv.front().unwrap();
-				let is_relative_path = path_candidate.text().starts_with('.');
-				let contains_slash = path_candidate.text().contains('/');
-				let path_exists = Path::new(path_candidate.text()).is_dir();
-
-				if (is_relative_path || contains_slash) && path_exists {
-					let cd_token = Tk::new("cd".into(),span,path_candidate.flags());
-					let mut autocd_argv = argv.clone();
-					autocd_argv.push_front(cd_token);
-					let autocd = Node {
-						nd_type: NdType::Builtin { argv: autocd_argv },
-						span,
-						flags: node.flags,
-						redirs: node.redirs
-					};
-					return self.walk(autocd, io,in_pipe)
-
-				}
-			}
-		}
-		io.backup_fildescs()?; // Save original stin, stdout, and stderr
-		io.do_plumbing()?; // Route pipe logic using fildescs
-
-
-		let cmd = Some(argv[0].clone().into_string().unwrap());
-		let command = &argv[0];
-		let envp = self.shellenv.get_cvars();
-
-		let child_instruction = || -> Result<(),ShellError> {
-			// Handle redirections
-			let mut open_fds: VecDeque<RustFd> = VecDeque::new();
-			if !redirs.is_empty() {
-				open_fds.extend(self.handle_redirs(redirs.clone().into())?);
-			}
-
-			// Execute the command
-			let Err(_) = execvpe(command, &argv, &envp);
-			std::process::exit(127);
-		};
-		if in_pipe {
-			child_instruction()?; // Call the child instruction closure in this process
-														// Because we are already in a forked process
-			unreachable!()
-		} else {
-			match unsafe { fork() } {
-				Ok(ForkResult::Child) => {
-					child_instruction()?;
-					unreachable!()
-				}
-				Ok(ForkResult::Parent { child }) => {
-					io.restore_fildescs()?;
-
-					// Wait for the child process to finish
-					match waitpid(child, None) {
-						Ok(WaitStatus::Exited(_, code)) => match code {
-							0 => Ok(RshWaitStatus::Success { span }),
-							_ => Ok(RshWaitStatus::Fail { code, cmd, span }),
-						},
-						Ok(WaitStatus::Signaled(_,signal,_)) => {
-							Ok(RshWaitStatus::Fail { code: 128 + signal as i32, cmd, span })
-						}
-						Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
-						Err(err) => Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),
+					if !matches!(node.nd_type, NdType::Command {..}) {
+						// If the resulting alias expansion does not return this node
+						// then walk the resulting sub-tree
+						return self.walk_root(node, None, io,in_pipe)
 					}
 				}
-				Err(_) => Err(ShellError::from_execf("Fork failed", 1, span)),
+				// Check if autocd is enabled
+				if self.shellenv.shopts.get("autocd").is_some_and(|opt| *opt > 0) && argv.len() == 1 {
+					// Check if argv[0] looks like a path, and exists at a path
+					let path_candidate = argv.front().unwrap();
+					let is_relative_path = path_candidate.text().starts_with('.');
+					let contains_slash = path_candidate.text().contains('/');
+					let path_exists = Path::new(path_candidate.text()).is_dir();
+
+					if (is_relative_path || contains_slash) && path_exists {
+						// Produce a new Builtin {..} node with cd as the command, and call self.walk() on it
+						let cd_token = Tk::new("cd".into(),span,path_candidate.flags());
+						let mut autocd_argv = argv.clone();
+						autocd_argv.push_front(cd_token);
+						let autocd = Node {
+							nd_type: NdType::Builtin { argv: autocd_argv },
+							span,
+							flags: node.flags,
+							redirs: node.redirs
+						};
+						return self.walk(autocd, io,in_pipe)
+
+					}
+				}
 			}
-		}
+			io.backup_fildescs()?; // Save original stdin, stdout, and stderr
+			io.do_plumbing()?; // Route pipe logic using fildescs
+
+			// Prepare the execvpe arguments
+			let cmd = argv[0].clone().into_string().unwrap();
+			let command = &argv[0];
+			let envp = self.shellenv.get_cvars();
+
+			// Now let's tell the child process what to do
+			let child_instruction = || -> Result<(),ShellError> {
+				// Handle redirections
+				let mut open_fds: VecDeque<RustFd> = VecDeque::new();
+				if !redirs.is_empty() {
+					open_fds.extend(self.handle_redirs(redirs.clone().into())?);
+				}
+
+				// Execute the command
+				let Err(_) = execvpe(command, &argv, &envp);
+				std::process::exit(127);
+			};
+			if in_pipe {
+				// We are currently in a child process,
+				// So we will execute the instructions here
+				child_instruction()?;
+				unreachable!() // If the thread returns, something has gone horribly wrong
+			} else {
+				match unsafe { fork() } {
+					Ok(ForkResult::Child) => {
+						child_instruction()?;
+						unreachable!()
+					}
+					Ok(ForkResult::Parent { child }) => {
+						if node.flags.contains(NdFlags::BACKGROUND) {
+							// Background job logic
+							// Set process group id here
+							setpgid(child, child).map_err(|_| ShellError::from_io())?;
+							// Add job to the job table
+							self.shellenv.new_job(vec![child], vec![cmd], child);
+							// Restore saved file descriptors
+							io.restore_fildescs()?;
+							Ok(RshWaitStatus::Success { span })
+						} else {
+							// Wait for the child process to complete
+							let status = loop {
+								match waitpid(child, None) {
+									Ok(WaitStatus::Exited(_, code)) => break Ok(match code {
+										0 => RshWaitStatus::Success { span },
+										_ => RshWaitStatus::Fail { code, cmd: Some(cmd), span },
+									}),
+									Ok(WaitStatus::Signaled(_, signal, _)) => {
+										break Ok(RshWaitStatus::Signaled { sig: signal });
+									}
+									Ok(_) => break Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
+									Err(nix::errno::Errno::EINTR) => continue, // Retry on interruption
+									Err(err) => break Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),
+								}
+							};
+							io.restore_fildescs()?;
+
+							// Return wait status
+							status
+						}
+					}
+					Err(_) => Err(ShellError::from_io())
+				}
+			}
 	}
 }

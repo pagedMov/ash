@@ -1,8 +1,9 @@
+use std::borrow::BorrowMut;
 use std::{fmt, io};
 use std::os::fd::BorrowedFd;
 
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::Pid;
+use nix::unistd::{getpgid, Pid};
 use tokio::sync::mpsc;
 use log::{error,debug,info};
 use tokio::signal::unix::{signal, Signal, SignalKind};
@@ -10,7 +11,7 @@ use tokio::signal::unix::{signal, Signal, SignalKind};
 use crate::execute::RshWaitStatus;
 use crate::interp::parse::{Node, Span};
 use crate::{execute, prompt};
-use crate::shellenv::ShellEnv;
+use crate::shellenv::{Job, ShellEnv};
 
 #[derive(Debug, PartialEq)]
 pub enum ShellError {
@@ -384,10 +385,12 @@ impl<'a> EventLoop<'a> {
 				std::process::exit(0);
 			}
 			Signals::SIGCHLD => {
-				let job_pid: Pid;
+				let job_pgid: Pid;
+				let child_pid: Pid;
 				let status = match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
 					Ok(WaitStatus::Exited(pid,status)) => {
-						job_pid = pid;
+						child_pid = pid;
+						job_pgid = getpgid(Some(pid)).map_err(|_| ShellError::from_io())?;
 						if status == 0 {
 							RshWaitStatus::Success { span: Span::new() }
 						} else {
@@ -396,24 +399,27 @@ impl<'a> EventLoop<'a> {
 					}
 					Ok(WaitStatus::StillAlive) => return Ok(()),
 					Ok(WaitStatus::Signaled(pid, sig, _)) => {
-						job_pid = pid;
+						child_pid = pid;
+						job_pgid = getpgid(Some(pid)).map_err(|_| ShellError::from_io())?;
 						RshWaitStatus::Signaled { sig }
 					}
 					Ok(WaitStatus::Stopped(pid, sig)) => {
-						job_pid = pid;
+						child_pid = pid;
+						job_pgid = getpgid(Some(pid)).map_err(|_| ShellError::from_io())?;
 						RshWaitStatus::Stopped { sig }
 					}
 					Err(_) => { /* No child processes found, so */ return Ok(()) },
 					_ => unimplemented!()
 				};
 				let jobs = self.shellenv.borrow_jobs();
-				for job in jobs {
-					let job = job.1;
-					if *job.pgid() == job_pid {
-						println!();
-						job.status(status);
-						println!("{}",job);
-						break
+				for (_, job) in jobs.iter_mut() {
+					for i in 0..job.pids().len() {
+						if job.pids().get(i).is_some_and(|pid| *pid == child_pid) {
+							println!();
+							job.update_status(i as usize, status.clone());
+							println!("{}", job);
+							break;
+						}
 					}
 				}
 			}
