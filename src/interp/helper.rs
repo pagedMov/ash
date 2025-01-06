@@ -1,8 +1,8 @@
-use crate::{event::ShellError, execute::RshWait, interp::token::REGEX, shellenv::ShellEnv};
-use nix::{sys::wait::{waitpid, WaitStatus}, unistd::{dup2, fork, setpgid, ForkResult}};
-use std::{collections::VecDeque, env, fs::{self, metadata}, io, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::Path};
+use crate::{interp::token::REGEX, shellenv::read_vars};
+use nix::unistd::dup2;
+use std::{collections::VecDeque, env, fs, io, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::Path};
 
-use super::parse::{NdFlags, NdType, Node, Span};
+use super::parse::{NdType, Node};
 
 pub trait VecExtension<T> {
 	fn extended(self, vec: Vec<T>) -> Vec<T>;
@@ -183,8 +183,8 @@ pub fn suppress_err<F: FnOnce() -> T, T>(f: F) -> T {
 	result
 }
 
-pub fn which(shellenv: &ShellEnv, command: &str) -> Option<String> {
-	if let Some(env_path) = shellenv.get_variable("PATH") {
+pub fn which(command: &str) -> Option<String> {
+	if let Some(env_path) = read_vars(|v| v.get_evar("PATH")).unwrap() {
 		for path in env::split_paths(&env_path) {
 			let full_path = path.join(command);
 			if full_path.is_file() && is_exec(&full_path) {
@@ -203,7 +203,7 @@ pub fn is_exec(path: &Path) -> bool {
 
 pub fn flatten_pipeline(left: Node, right: Node, mut flattened: VecDeque<Node>) -> VecDeque<Node> {
 	flattened.push_front(right);
-	if let NdType::Pipeline { left, right, both: _ } = left.nd_type {
+	if let NdType::PipelineBranch { left, right, both: _ } = left.nd_type {
 		flattened = flatten_pipeline(*left, *right, flattened);
 	} else {
 		flattened.push_front(left);

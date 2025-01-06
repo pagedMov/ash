@@ -1,14 +1,12 @@
 use bitflags::bitflags;
 use once_cell::sync::Lazy;
-use log::trace;
 use regex::Regex;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::io;
 use std::mem::take;
 
 use crate::interp::parse::Span;
-use crate::event::ShellError;
+use crate::event::ShError;
 use crate::RshResult;
 
 use super::helper::StrExtension;
@@ -78,21 +76,13 @@ bitflags! {
 	}
 	}
 
-macro_rules! define_expectations {
-	($($name:expr => $pattern:expr),* $(,)?) => {{
-		use crate::interp::token::TkState::*;
-		let mut m = HashMap::new();
-		$(m.insert($name, $pattern);)*
-			m
-	}};
-}
 
 #[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub struct WordDesc {
 	pub text: String,
 	pub span: Span,
 	pub flags: WdFlags
-}
+	}
 
 impl WordDesc {
 	pub fn empty() -> Self {
@@ -110,12 +100,8 @@ impl WordDesc {
 		}
 	}
 	pub fn add_char(&mut self, ch: char) -> Self {
-		trace!("cloning text: {}",self.text);
 		let mut text = std::mem::take(&mut self.text);
-		trace!("cloned text: {}",text);
-		trace!("pushing char: {}",ch);
 		text.push(ch);
-		trace!("after pushing: {}",text);
 
 		Self {
 			text,
@@ -138,13 +124,11 @@ impl WordDesc {
 	pub fn add_flag(self, flag: WdFlags) -> Self {
 		let mut flags = self.flags;
 		flags |= flag;
-		let new = Self {
+		Self {
 			text: self.text,
 			span: self.span,
 			flags
-		};
-		trace!("added flag: {:?}, new flags {:?}",flag,new.flags);
-		new
+		}
 	}
 
 	pub fn remove_flag(self, flag: WdFlags) -> Self {
@@ -193,11 +177,11 @@ impl WordDesc {
 		};
 		self.add_flag(flag)
 	}
-}
+	}
 
 impl Default for WordDesc {
 	fn default() -> Self {
-	    Self::empty()
+		Self::empty()
 	}
 }
 
@@ -205,7 +189,7 @@ impl Default for WordDesc {
 pub struct Tk {
 	pub tk_type: TkType,
 	pub wd: WordDesc
-	}
+}
 
 #[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub enum TkType {
@@ -260,6 +244,7 @@ pub enum TkType {
 	Whitespace, // Space or tab
 	SOI,
 	EOI,
+	Null, // Default
 
 }
 
@@ -274,7 +259,7 @@ impl Tk {
 			}
 		}
 	}
-	pub fn from(mut wd: WordDesc, context: TkState) -> RshResult<Self> {
+	pub fn from(wd: WordDesc, context: TkState) -> RshResult<Self> {
 		use crate::interp::token::TkState::*;
 		use crate::interp::token::TkType as TkT;
 		match context {
@@ -309,7 +294,7 @@ impl Tk {
 			Redirect => todo!(),
 			CommandSub => Ok(Tk { tk_type: TkT::CommandSub, wd }),
 			Separator => Ok(Tk { tk_type: TkT::Cmdsep, wd }),
-			_ => return Err(ShellError::from_parse(format!("Parse error: {}", wd.text).as_str(), wd.span))
+			_ => Err(ShError::from_parse(format!("Parse error: {}", wd.text).as_str(), wd.span))
 		}
 	}
 	pub fn start_of_input() -> Self {
@@ -330,55 +315,6 @@ impl Tk {
 			wd: WordDesc { text: wd.text.clone(), span: Span::from(pos + 1,pos + 1), flags: WdFlags::empty() }
 		}
 	}
-	fn get_keyword_token(wd: &WordDesc) -> RshResult<TkType> {
-		let text = wd.text.clone();
-		match text.as_str() {
-			"if" => Ok(TkType::If),
-			"elif" => Ok(TkType::Elif),
-			"else" => Ok(TkType::Else),
-			"then" => Ok(TkType::Then),
-			"fi" => Ok(TkType::Fi),
-			"for" => Ok(TkType::For),
-			"while" => Ok(TkType::While),
-			"until" => Ok(TkType::Until),
-			"do" => Ok(TkType::Do),
-			"done" => Ok(TkType::Done),
-			"case" => Ok(TkType::Case),
-			"esac" => Ok(TkType::Esac),
-			"select" => Ok(TkType::Select),
-			"in" => Ok(TkType::In),
-			_ => Err(ShellError::from_parse(format!("Unrecognized keyword: {}",wd.text).as_str(), wd.span))
-		}
-	}
-	fn split_func(wd: &WordDesc) -> RshResult<TkType> {
-		let func_raw = &wd.text;
-		let (mut name,mut body) = func_raw.split_once(' ').unwrap();
-		name = name.trim();
-		body = body.trim();
-		if name.ends_with("()") {
-			name = name.strip_suffix("()").unwrap();
-			name = name.trim();
-		}
-		if body.starts_with('{') && body.ends_with('}') {
-			body = body.strip_prefix('{').unwrap();
-			body = body.strip_suffix('}').unwrap();
-			body = body.trim();
-		} else {
-			return Err(ShellError::from_internal(format!("This body made it to split_func with no surrounding braces: {}",body).as_str()));
-		}
-
-		Ok(TkType::FuncDef)
-	}
-	fn get_operator_type(word_desc: &WordDesc) -> TkType {
-		match word_desc.text.as_str() {
-			"|&" => TkType::PipeBoth,
-			"&" => TkType::Background,
-			"&&" => TkType::LogicAnd,
-			"||" => TkType::LogicOr,
-			"|" => TkType::Pipe,
-			_ => unreachable!()
-		}
-	}
 	pub fn text(&self) -> &str {
 		self.wd.text.as_str()
 	}
@@ -390,6 +326,15 @@ impl Tk {
 	}
 	pub fn flags(&self) -> WdFlags {
 		self.wd.flags
+	}
+}
+
+impl Default for Tk {
+	fn default() -> Self {
+		Self {
+			tk_type: TkType::Null,
+			wd: WordDesc::empty()
+		}
 	}
 }
 
@@ -422,37 +367,37 @@ pub enum TkState {
 	Arg, // Command arguments; only appear after commands
 	Command, // Starting point for the tokenizer
 	FuncDef, // defining a function like() { this }
-	FuncBody, // The stuff { inside braces }
-	Array, // Used in for loops and select statements
-	If, // If statement opener
-	For, // For loop opener
-	Loop, // While/Until opener
-	Case, // Case opener
-	Select, // Select opener
-	In, // Used in for, case, and select statements
-	CaseBlock, // this)kind of thing;;
-	CaseIn, // 'In' context used for case statements, signaling the tokenizer to look for stuff 'like)this;;esac'
-	CasePat, // the left side of this)kind of thing
-	CaseBody, // the right side of this)kind of thing
-	Elif, // Secondary if/then blocks
-	Else, // Else statements
-	Do, // Select, for, and while/until condition/body separator
-	Then, // If statement condition/body separator
-	Done, // Select, for, and while/until closer
-	Fi, // If statement closer
-	Esac, // Case statement closer
-	Subshell, // Subshells, look (like this)
-	SQuote, // 'Single quoted strings'
-	DQuote, // "Double quoted strings"
-	Escaped, // Used to denote an escaped character like \a
-	Redirect, // >, <, <<, <<<, 1>&2, 2>, etc.
-	Comment, // #Comments like this
-	Whitespace, // Space or tabs
-	CommandSub, // $(Command substitution)
-	Operator, // operators
-	Separator, // Semicolon or newline to end an invocation
-	DeadEnd, // Used for closing keywords like 'fi' and 'done' that demand a separator immediately after
-	Invalid // Used when an unexpected state is discovered
+FuncBody, // The stuff { inside braces }
+Array, // Used in for loops and select statements
+If, // If statement opener
+For, // For loop opener
+Loop, // While/Until opener
+Case, // Case opener
+Select, // Select opener
+In, // Used in for, case, and select statements
+CaseBlock, // this)kind of thing;;
+CaseIn, // 'In' context used for case statements, signaling the tokenizer to look for stuff 'like)this;;esac'
+CasePat, // the left side of this)kind of thing
+CaseBody, // the right side of this)kind of thing
+Elif, // Secondary if/then blocks
+Else, // Else statements
+Do, // Select, for, and while/until condition/body separator
+Then, // If statement condition/body separator
+Done, // Select, for, and while/until closer
+Fi, // If statement closer
+Esac, // Case statement closer
+Subshell, // Subshells, look (like this)
+SQuote, // 'Single quoted strings'
+DQuote, // "Double quoted strings"
+Escaped, // Used to denote an escaped character like \a
+Redirect, // >, <, <<, <<<, 1>&2, 2>, etc.
+Comment, // #Comments like this
+Whitespace, // Space or tabs
+CommandSub, // $(Command substitution)
+Operator, // operators
+Separator, // Semicolon or newline to end an invocation
+DeadEnd, // Used for closing keywords like 'fi' and 'done' that demand a separator immediately after
+Invalid // Used when an unexpected state is discovered
 }
 
 impl TkState {
@@ -552,7 +497,7 @@ impl RshTokenizer {
 			self.span.start = self.span.end;
 			wd = wd.set_span(self.span);
 			if self.context == DeadEnd && !matches!(self.char_stream.front().unwrap(),';' | '\n') {
-				return Err(ShellError::from_parse("Expected a semicolon or newline here", self.span))
+				return Err(ShError::from_parse("Expected a semicolon or newline here", self.span))
 			}
 			match self.char_stream.front().unwrap() {
 				'\\' => {
@@ -784,20 +729,20 @@ impl RshTokenizer {
 		loop {
 			let span = wd.span;
 			if self.char_stream.is_empty() {
-				return Err(ShellError::from_parse("Did not find an `in` keyword for this statement", span))
+				return Err(ShError::from_parse("Did not find an `in` keyword for this statement", span))
 			}
 			wd = self.complete_word(wd);
 			match wd.text.as_str() {
 				"in" => {
 					if !found {
-						return Err(ShellError::from_parse("Did not find a variable for this statement", wd.span))
+						return Err(ShError::from_parse("Did not find a variable for this statement", wd.span))
 					}
 					self.tokens.push(Tk { tk_type: TkType::In, wd });
 					break
 				}
 				_ => {
 					if self.context == TkState::SingleVarDec && found {
-						return Err(ShellError::from_parse(format!("Only expected one variable in this statement, found: {}",wd.text).as_str(), wd.span))
+						return Err(ShError::from_parse(format!("Only expected one variable in this statement, found: {}",wd.text).as_str(), wd.span))
 					}
 					found = true;
 					self.tokens.push(Tk { tk_type: TkType::Ident, wd: take(&mut wd) });
@@ -819,7 +764,7 @@ impl RshTokenizer {
 		}
 		if self.char_stream.front().is_some_and(|ch| matches!(ch, ';' | '\n')) {
 			if !found {
-				return Err(ShellError::from_parse("Did not find any array elements for this statement", wd.span))
+				return Err(ShError::from_parse("Did not find any array elements for this statement", wd.span))
 			}
 			self.advance();
 			self.tokens.push(Tk::cmdsep(&wd,self.span.end + 1))
@@ -939,39 +884,39 @@ impl RshTokenizer {
 		Ok(())
 	}
 	fn complete_word(&mut self, mut wd: WordDesc) -> WordDesc {
-			let mut dub_quote = false;
-			let mut sng_quote = false;
-			while let Some(ch) = self.advance() {
-					if matches!(ch, '\'') && !dub_quote {
-							// Single quote handling
-							sng_quote = !sng_quote;
-							wd = wd.add_char(ch);
-					} else if matches!(ch, '"') && !sng_quote {
-							// Double quote handling
-							dub_quote = !dub_quote;
-							wd = wd.add_char(ch);
-					} else if dub_quote || sng_quote {
-							// Inside a quoted string
-							wd = wd.add_char(ch);
-					} else if !matches!(ch, ' ' | '\t' | '\n' | ';') {
-							// Regular character
-							wd = wd.add_char(ch);
-					} else if matches!(ch, '\n' | ';') {
-							// Preserve cmdsep for tokenizing
-							self.char_stream.push_front(ch);
-							self.span.end -= 1;
-							wd.span = self.span;
-							break;
-					} else {
-							// Whitespace handling
-							self.char_stream.push_front(ch);
-							while self.char_stream.front().is_some_and(|c| matches!(c, ' ' | '\t')) {
-									self.advance();
-							}
-							break;
-					}
+		let mut dub_quote = false;
+		let mut sng_quote = false;
+		while let Some(ch) = self.advance() {
+			if matches!(ch, '\'') && !dub_quote {
+				// Single quote handling
+				sng_quote = !sng_quote;
+				wd = wd.add_char(ch);
+			} else if matches!(ch, '"') && !sng_quote {
+				// Double quote handling
+				dub_quote = !dub_quote;
+				wd = wd.add_char(ch);
+			} else if dub_quote || sng_quote {
+				// Inside a quoted string
+				wd = wd.add_char(ch);
+			} else if !matches!(ch, ' ' | '\t' | '\n' | ';') {
+				// Regular character
+				wd = wd.add_char(ch);
+			} else if matches!(ch, '\n' | ';') {
+				// Preserve cmdsep for tokenizing
+				self.char_stream.push_front(ch);
+				self.span.end -= 1;
+				wd.span = self.span;
+				break;
+			} else {
+				// Whitespace handling
+				self.char_stream.push_front(ch);
+				while self.char_stream.front().is_some_and(|c| matches!(c, ' ' | '\t')) {
+					self.advance();
+				}
+				break;
 			}
-			wd
+		}
+		wd
 	}
 	fn clean_tokens(&mut self) {
 		let mut buffer = VecDeque::new();

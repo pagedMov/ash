@@ -28,20 +28,22 @@ pub mod shellenv;
 pub mod interp;
 pub mod builtin;
 pub mod comp;
+pub mod debug;
+pub mod signal;
 
-use std::{env, fs::File, io::Read};
+use std::{env, fs::File, io::Read, path::PathBuf, sync::mpsc, thread};
 
-use event::{EventLoop, ShellError, ShellErrorFull};
-use execute::{NodeWalker, RshWait};
-use interp::parse::descend;
-use log::info;
+use event::{EventLoop, ShError, ShEvent};
+use execute::{traverse_ast, ExecDispatcher, RshWait};
+use interp::parse::{descend, Span};
 use nix::sys::signal::{signal, SigHandler, Signal::SIGTTOU};
-use shellenv::EnvFlags;
+use prompt::PromptDispatcher;
+use shellenv::{read_vars, write_meta, write_vars, EnvFlags};
+use signal::SignalListener;
 
 //use crate::event::EventLoop;
-use crate::shellenv::ShellEnv;
 
-pub type RshResult<T> = Result<T, ShellError>;
+pub type RshResult<T> = Result<T, ShError>;
 
 
 #[tokio::main]
@@ -50,18 +52,73 @@ async fn main() {
 
 	// Ignore SIGTTOU
 	unsafe { signal(SIGTTOU, SigHandler::SigIgn).unwrap() };
+	println!("we new now");
 
-	let mut shellenv = ShellEnv::new(EnvFlags::empty());
 	if args[0].starts_with('-') {
-		shellenv.source_profile().ok();
+		// TODO: handle unwrap
+		let home = read_vars(|vars| vars.get_evar("HOME")).unwrap().unwrap();
+		let path = PathBuf::from(format!("{}/.rsh_profile",home));
+		shellenv::source_file(path).unwrap();
 	}
-	match args.len() {
+	let result = match args.len() {
 		1 => {
-			shellenv.set_flags(EnvFlags::INTERACTIVE);
-			main_interactive(shellenv).await;
+			write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::INTERACTIVE)).unwrap();
+			let (exec_tx,exec_rx) = mpsc::channel();
+			let (prompt_tx,prompt_rx) = mpsc::channel();
+			let event_loop = EventLoop::new(exec_tx,prompt_tx.clone());
+			let event_loop_inbox = event_loop.sender.clone();
+			let prompt_dispatch = PromptDispatcher::new(prompt_rx, event_loop_inbox.clone());
+			let exec_dispatch = ExecDispatcher::new(exec_rx, event_loop_inbox.clone());
+			let signal_listener = SignalListener::new(event_loop_inbox.clone());
+
+			let signal_handle = thread::Builder::new()
+				.name("signal_loop".into())
+				.spawn(move || {
+					signal_listener.signal_listen();
+				})
+				.unwrap();
+
+			let event_loop_handle = thread::Builder::new()
+					.name("event_loop".into())
+					.spawn(move || {
+							event_loop.listen()
+					})
+					.unwrap();
+
+			let prompt_handle = thread::Builder::new()
+					.name("prompt_dispatch".into())
+					.spawn(move || {
+							prompt_dispatch.run()
+					})
+					.unwrap();
+
+			let exec_handle = thread::Builder::new()
+					.name("exec_dispatch".into())
+					.spawn(move || {
+							exec_dispatch.run()
+					})
+					.unwrap();
+
+			prompt_tx.send(ShEvent::Prompt).unwrap();
+			event_loop_handle.join().unwrap()
 		},
 		_ => {
-			main_noninteractive(args,shellenv).await;
+			thread::spawn( move || {
+				main_noninteractive(args)
+			}).join().unwrap()
+		}
+	};
+	match result {
+		Ok(status) => {
+			match status {
+				RshWait::Success {..} => std::process::exit(0),
+				RshWait::Fail { code, cmd: _, } => std::process::exit(code),
+				_ => unreachable!()
+			}
+		}
+		Err(err) => {
+			eprintln!("{:?}",err);
+			std::process::exit(1)
 		}
 	}
 
@@ -69,7 +126,7 @@ async fn main() {
 
 
 
-async fn main_noninteractive(args: Vec<String>, mut shellenv: ShellEnv) {
+fn main_noninteractive(args: Vec<String>) -> RshResult<RshWait> {
 	let mut pos_params: Vec<String> = vec![];
 	let input;
 
@@ -77,7 +134,7 @@ async fn main_noninteractive(args: Vec<String>, mut shellenv: ShellEnv) {
 	if args[1] == "-c" {
 		if args.len() < 3 {
 			eprintln!("Expected a command after '-c' flag");
-			return;
+			return Ok(RshWait::Fail { code: 1, cmd: None, });
 		}
 		input = args[2].clone(); // Store the command string
 	} else {
@@ -91,56 +148,47 @@ async fn main_noninteractive(args: Vec<String>, mut shellenv: ShellEnv) {
 				let mut buffer = vec![];
 				if let Err(e) = script.read_to_end(&mut buffer) {
 					eprintln!("Error reading file: {}\n", e);
-					return;
+					return Ok(RshWait::Fail { code: 1, cmd: None, });
 				}
 				input = String::from_utf8_lossy(&buffer).to_string(); // Convert file contents to String
 			}
 			Err(e) => {
 				eprintln!("Error opening file: {}\n", e);
-				return;
+					return Ok(RshWait::Fail { code: 1, cmd: None, });
 			}
 		}
 	}
 
 	// Code Execution Logic
-	shellenv.set_last_input(&input);
+	write_meta(|m| m.set_last_input(&input))?;
 	for (index,param) in pos_params.into_iter().enumerate() {
 		let key = format!("{}",index + 1);
-		shellenv.set_parameter(key, param);
+		write_vars(|v| v.set_param(key, param))?;
 	}
-	let state = descend(&input, &shellenv);
+	let state = descend(&input);
 	match state {
 		Ok(parse_state) => {
-			let mut walker = NodeWalker::new(parse_state.ast, shellenv);
-			match walker.start_walk() {
+			let (tx,_) = mpsc::channel();
+			let (sender,receiver) = mpsc::channel();
+			let dispatch = ExecDispatcher::new(receiver,tx);
+			let result = traverse_ast(parse_state.ast);
+			match result {
 				Ok(code) => {
-					info!("Last exit status: {:?}", code);
-					if let RshWait::Fail { code, cmd, span } = code {
-						if code == 127 {
-							if let Some(cmd) = cmd {
-								let err = ShellErrorFull::from(walker.shellenv.get_last_input(),ShellError::from_no_cmd(&cmd, span));
-								eprintln!("{}", err);
-							}
-						}
-					}
+					if let RshWait::Fail { code, cmd } = code {
+						panic!()
+					} else { Ok(code) }
 				}
 				Err(e) => {
-					let err = ShellErrorFull::from(walker.shellenv.get_last_input(),e);
-					eprintln!("{}", err);
+					eprintln!("{:?}", e);
+					panic!()
 				}
 			}
 		}
 		Err(e) => {
-			let err = ShellErrorFull::from(shellenv.get_last_input(),e);
-			eprintln!("{}", err);
+			eprintln!("{:?}", e);
+			panic!()
 		}
 	}
-}
-
-async fn main_interactive(shellenv: ShellEnv) {
-	env_logger::init();
-	let mut event_loop = EventLoop::new(shellenv);
-	let _ = event_loop.listen().await;
 }
 
 //#[tokio::main]

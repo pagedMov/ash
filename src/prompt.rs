@@ -1,49 +1,46 @@
-use crate::comp::RshHelper;
-use crate::event::Signals;
-use std::path::{Path, PathBuf};
+use crate::{comp::RshHelper, event::{ShError, ShEvent}, shellenv::{read_meta, read_vars, write_meta}, RshResult};
+use std::{path::{Path, PathBuf}, sync::mpsc::{Receiver, Sender}};
+use signal_hook::consts::signal::*;
 
-use tokio::sync::mpsc;
-use log::info;
 use rustyline::{self, config::Configurer, error::ReadlineError, history::{DefaultHistory, History}, ColorMode, Config, EditMode, Editor};
 
-use crate::{event::ShellEvent, shellenv::ShellEnv};
 use crate::interp::parse::{descend, NdType};
 use crate::interp::expand;
 
 
 
-fn init_prompt(shellenv: &ShellEnv) -> Editor<RshHelper, DefaultHistory> {
+fn init_prompt() -> RshResult<Editor<RshHelper, DefaultHistory>> {
 	let mut config = Config::builder();
 
 	// Read options from ShellEnv
-	let max_size = shellenv.get_shopt("max_hist").unwrap_or(&1000); // Default to 1000
-	let hist_dupes = shellenv.get_shopt("hist_ignore_dupes").is_some_and(|opt| *opt > 0);
-	let comp_limit = shellenv.get_shopt("comp_limit").unwrap_or(&5); // Default to 5
-	let edit_mode = match shellenv.get_shopt("edit_mode").unwrap_or(&1) {
+	let max_size = read_meta(|m| m.get_shopt("max_hist").unwrap_or(1000))?; // Default to 1000
+	let hist_dupes = read_meta(|m| m.get_shopt("hist_ignore_dupes").is_some_and(|opt| opt > 0))?;
+	let comp_limit = read_meta(|m| m.get_shopt("comp_limit").unwrap_or(5))?; // Default to 5
+	let edit_mode = match read_meta(|m| m.get_shopt("edit_mode").unwrap_or(1))? {
 		0 => EditMode::Emacs,
 		_ => EditMode::Vi,
 	};
-	let auto_hist = shellenv.get_shopt("auto_hist").is_some_and(|opt| *opt > 0);
-	let prompt_highlight = match shellenv.get_shopt("prompt_highlight").unwrap_or(&1) {
+	let auto_hist = read_meta(|m| m.get_shopt("auto_hist").is_some_and(|opt| opt > 0))?;
+	let prompt_highlight = match read_meta(|m| m.get_shopt("prompt_highlight").unwrap_or(1))? {
 		0 => ColorMode::Disabled,
 		_ => ColorMode::Enabled,
 	};
-	let tab_stop = shellenv.get_shopt("tab_stop").unwrap_or(&1).max(&1); // Default to at least 1
+	let tab_stop = read_meta(|m| m.get_shopt("tab_stop").unwrap_or(1).max(1))?; // Default to at least 1
 
 	// Build configuration
 	config = config
-		.max_history_size(*max_size)
+		.max_history_size(max_size)
 		.unwrap_or_else(|e| {
 			eprintln!("Invalid max history size: {}", e);
 			std::process::exit(1);
 		})
 	.history_ignore_dups(hist_dupes)
 		.unwrap()
-		.completion_prompt_limit(*comp_limit)
+		.completion_prompt_limit(comp_limit)
 		.edit_mode(edit_mode)
 		.auto_add_history(auto_hist)
 		.color_mode(prompt_highlight)
-		.tab_stop(*tab_stop);
+		.tab_stop(tab_stop);
 
 		let config = config.build();
 
@@ -53,52 +50,74 @@ fn init_prompt(shellenv: &ShellEnv) -> Editor<RshHelper, DefaultHistory> {
 			std::process::exit(1);
 		});
 		rl.set_completion_type(rustyline::CompletionType::List);
-		rl.set_helper(Some(RshHelper::new(shellenv)));
+		rl.set_helper(Some(RshHelper::new()));
 
 		// Load history file
-		let hist_path = expand::expand_var(shellenv, "$HIST_FILE".into());
-		info!("history path in init_prompt(): {}",hist_path);
+		let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE"))?.unwrap_or_else(|| -> String {
+			let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
+			format!("{}/.rsh_hist",home)
+		});
 		let hist_path = PathBuf::from(hist_path);
 		if let Err(e) = rl.load_history(&hist_path) {
 			eprintln!("No previous history found or failed to load history: {}", e);
 		}
 
-		rl
+		Ok(rl)
 }
 
-pub async fn prompt(sender: mpsc::Sender<ShellEvent>, shellenv: &mut ShellEnv) {
-	let mut rl = init_prompt(shellenv);
-	let hist_path = expand::expand_var(shellenv, "$HIST_FILE".into());
-	let prompt = expand::expand_prompt(shellenv);
-	match rl.readline(&prompt) {
-		Ok(line) => {
-			let _ = rl.history_mut().add(&line);
-			let _ = rl.history_mut().save(Path::new(&hist_path));
-			shellenv.set_last_input(&line);
-			let state = descend(&line,shellenv);
-			match state {
-				Ok(parse_state) => {
-					if let NdType::Root { deck } = &parse_state.ast.nd_type {
-						if !deck.is_empty() {
-							let _ = sender.send(ShellEvent::UpdateEnv(shellenv.clone())).await;
-							let _ = sender.send(ShellEvent::NewAST(parse_state.ast)).await;
+pub struct PromptDispatcher {
+	inbox: Receiver<ShEvent>,
+	outbox: Sender<ShEvent>
+}
+
+impl PromptDispatcher {
+	pub fn new(inbox: Receiver<ShEvent>, outbox: Sender<ShEvent>) -> Self {
+		Self { inbox, outbox }
+	}
+	pub fn run(&self) -> RshResult<()> {
+		for message in self.inbox.iter() {
+			if let ShEvent::Prompt = message {
+				let mut rl = init_prompt()?;
+				let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE"))?.unwrap_or_else(|| -> String {
+					let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
+					format!("{}/.rsh_hist",home)
+				});
+				let prompt = expand::expand_prompt()?;
+				match rl.readline(&prompt) {
+					Ok(line) => {
+						rl.history_mut().add(&line).map_err(|_| ShError::from_internal("Failed to write to history file"))?;
+						rl.history_mut().save(Path::new(&hist_path)).map_err(|_| ShError::from_internal("Failed to write to history file"))?;
+						write_meta(|m| m.set_last_input(&line))?;
+						let result = descend(&line);
+						match result {
+							Ok(state) => {
+								let deck = if let NdType::Root { ref deck } = state.ast.nd_type {
+									deck
+								} else { unreachable!() };
+								if !deck.is_empty() {
+									self.outbox.send(ShEvent::NewAST(state.ast)).map_err(|_| ShError::from_internal("failed to send tree to event loop"))?
+								}
+							}
+							Err(e) => {
+								self.outbox.send(ShEvent::Error(e)).map_err(|_| ShError::from_internal("failed to send error to event loop"))?
+							}
 						}
 					}
+					Err(ReadlineError::Interrupted) => {
+						self.outbox.send(ShEvent::Signal(SIGINT)).unwrap();
+						self.outbox.send(ShEvent::Prompt).unwrap();
+
+					}
+					Err(ReadlineError::Eof) => {
+						self.outbox.send(ShEvent::Signal(SIGQUIT)).unwrap();
+						self.outbox.send(ShEvent::Prompt).unwrap();
+					}
+					Err(e) => {
+						eprintln!("{:?}",e);
+					}
 				}
-				Err(e) => {
-					let _ = sender.send(ShellEvent::CatchError(e)).await;
-				}
-			}
+			} else { return Err(ShError::from_internal(format!("Expected Prompt event, got this: {:?}", message).as_str())) }
 		}
-		Err(ReadlineError::Interrupted) => {
-			let _ = sender.send(ShellEvent::Signal(Signals::SIGINT)).await;
-		}
-		Err(ReadlineError::Eof) => {
-			let _ = sender.send(ShellEvent::Signal(Signals::SIGQUIT)).await;
-		}
-		Err(e) => {
-			eprintln!("{:?}",e);
-		}
+		Ok(())
 	}
-	let _ = sender.send(ShellEvent::Prompt).await;
 }

@@ -1,28 +1,80 @@
-use std::borrow::BorrowMut;
-use std::env;
-use std::fmt::Display;
-use nix::sys::signal::{self, SigHandler, Signal};
-use nix::unistd::{gethostname, getpgid, getpid, tcgetpgrp, tcsetpgrp, Pid, User};
-use nix::NixPath;
-use std::collections::{HashSet,HashMap};
-use std::ffi::CString;
-use std::fs::File;
-use std::io::Read;
-use std::os::fd::{BorrowedFd, RawFd};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::{collections::HashMap, env, io::Read, path::PathBuf, sync::{Arc, LazyLock}};
 
 use bitflags::bitflags;
-use log::{debug, info, trace};
+use nix::{sys::signal::{self, Signal}, unistd::{gethostname, Pid, User}};
+use std::{fs::File, sync::RwLock};
 
-use crate::event::{ShellError, ShellErrorFull};
-use crate::execute::{NodeWalker, RshWait};
-use crate::interp::expand::expand_var;
-use crate::interp::helper;
-use crate::interp::parse::{descend, Node, Span};
-use crate::RshResult;
+use crate::{event::ShError, execute::{ExecUnit, RshWait}, interp::parse::{descend, Node}, RshResult};
+
+pub static JOBS: LazyLock<Arc<RwLock<JobTable>>> = LazyLock::new(|| {
+	Arc::new(
+		RwLock::new(
+			JobTable::new()
+		)
+	)
+});
+
+pub static VARS: LazyLock<Arc<RwLock<VarTable>>> = LazyLock::new(|| {
+	Arc::new(
+		RwLock::new(
+			VarTable::new()
+		)
+	)
+});
+
+pub static LOGIC: LazyLock<Arc<RwLock<LogicTable>>> = LazyLock::new(|| {
+	Arc::new(
+		RwLock::new(
+			LogicTable::new()
+		)
+	)
+});
+
+pub static META: LazyLock<Arc<RwLock<EnvMeta>>> = LazyLock::new(|| {
+	Arc::new(
+		RwLock::new(
+			EnvMeta::new(EnvFlags::empty())
+		)
+	)
+});
+
+
 
 bitflags! {
+	#[derive(Debug,Copy,Clone,PartialEq)]
+	pub struct EnvFlags: u32 {
+		// Guard conditions against infinite alias/var/function recursion
+		const NO_ALIAS         = 0b00000000000000000000000000000001;
+		const NO_VAR           = 0b00000000000000000000000000000010;
+		const NO_FUNC          = 0b00000000000000000000000000000100;
+
+		// Context
+		const IN_FUNC          = 0b00000000000000000000000000001000; // Enables the `return` builtin
+		const INTERACTIVE      = 0b00000000000000000000000000010000;
+		const CLEAN            = 0b00000000000000000000000000100000; // Do not inherit env vars from parent
+		const NO_RC            = 0b00000000000000000000000001000000;
+
+		// Options set by 'set' command
+		const EXPORT_ALL_VARS  = 0b00000000000000000000000010000000; // set -a
+		const REPORT_JOBS_ASAP = 0b00000000000000000000000100000000; // set -b
+		const EXIT_ON_ERROR    = 0b00000000000000000000001000000000; // set -e
+		const NO_GLOB          = 0b00000000000000000000010000000000; // set -f
+		const HASH_CMDS        = 0b00000000000000000000100000000000; // set -h
+		const ASSIGN_ANYWHERE  = 0b00000000000000000001000000000000; // set -k
+		const ENABLE_JOB_CTL   = 0b00000000000000000010000000000000; // set -m
+		const NO_EXECUTE       = 0b00000000000000000100000000000000; // set -n
+		const ENABLE_RSHELL    = 0b00000000000000001000000000000000; // set -r
+		const EXIT_AFTER_EXEC  = 0b00000000000000010000000000000000; // set -t
+		const UNSET_IS_ERROR   = 0b00000000000000100000000000000000; // set -u
+		const PRINT_INPUT      = 0b00000000000001000000000000000000; // set -v
+		const STACK_TRACE      = 0b00000000000010000000000000000000; // set -x
+		const EXPAND_BRACES    = 0b00000000000100000000000000000000; // set -B
+		const NO_OVERWRITE     = 0b00000000001000000000000000000000; // set -C
+		const INHERIT_ERR      = 0b00000000010000000000000000000000; // set -E
+		const HIST_SUB         = 0b00000000100000000000000000000000; // set -H
+		const NO_CD_SYMLINKS   = 0b00000001000000000000000000000000; // set -P
+		const INHERIT_RET      = 0b00000010000000000000000000000000; // set -T
+	}
 	#[derive(Debug,Copy,Clone)]
 	pub struct JobFlags: i8 {
 		const LONG      = 0b00000001;
@@ -34,6 +86,28 @@ bitflags! {
 	}
 }
 
+trait RshType {}
+trait RshScalar {}
+trait RshComposite {}
+
+impl RshType for String {}
+impl RshScalar for String {}
+
+impl RshType for i32 {}
+impl RshScalar for i32 {}
+
+impl RshType for f64 {}
+impl RshScalar for f64 {}
+
+impl RshType for bool {}
+impl RshScalar for bool {}
+
+impl<T: RshType> RshType for Vec<T> {}
+impl<T: RshType> RshComposite for Vec<T> {}
+
+impl<K: RshType, V: RshType> RshType for HashMap<K,V> {}
+impl<K: RshType, V: RshType> RshComposite for HashMap<K,V> {}
+
 #[derive(Debug,Clone)]
 pub struct Job {
 	job_id: i32,
@@ -41,7 +115,7 @@ pub struct Job {
 	commands: Vec<String>,
 	pgid: Pid,
 	statuses: Vec<RshWait>,
-	active: bool
+	active: bool,
 }
 
 impl Job {
@@ -51,6 +125,14 @@ impl Job {
 	}
 	pub fn is_active(&self) -> bool {
 		self.active
+	}
+	pub fn update_from_pid(&mut self, pid: Pid, new_stat: RshWait) {
+		for (index,job_pid) in self.pids.iter().enumerate() {
+			if pid == *job_pid {
+				self.update_status(index, new_stat);
+				break
+			}
+		}
 	}
 	pub fn update_status(&mut self, pid_index: usize, new_stat: RshWait) {
 			if pid_index < self.statuses.len() {
@@ -81,9 +163,9 @@ impl Job {
 	pub fn signal_proc(&self, sig: Signal) -> RshResult<()> {
 		if self.pids().len() == 1 {
 			let pid = *self.pids().first().unwrap();
-				signal::kill(pid, sig).map_err(|_| ShellError::from_io())
+				signal::kill(pid, sig).map_err(|_| ShError::from_io())
 		} else {
-			signal::killpg(self.pgid, sig).map_err(|_| ShellError::from_io())
+			signal::killpg(self.pgid, sig).map_err(|_| ShError::from_io())
 		}
 	}
 	pub fn print(&self, current: Option<i32>, flags: JobFlags) -> String {
@@ -162,61 +244,6 @@ impl Job {
 
 }
 
-bitflags! {
-	#[derive(Debug,Copy,Clone,PartialEq)]
-	pub struct EnvFlags: u32 {
-		// Guard conditions against infinite alias/var/function recursion
-		const NO_ALIAS         = 0b00000000000000000000000000000001;
-		const NO_VAR           = 0b00000000000000000000000000000010;
-		const NO_FUNC          = 0b00000000000000000000000000000100;
-
-		// Context
-		const IN_FUNC          = 0b00000000000000000000000000001000; // Enables the `return` builtin
-		const INTERACTIVE      = 0b00000000000000000000000000010000;
-		const CLEAN            = 0b00000000000000000000000000100000; // Do not inherit env vars from parent
-		const NO_RC            = 0b00000000000000000000000001000000;
-
-		// Options set by 'set' command
-		const EXPORT_ALL_VARS  = 0b00000000000000000000000010000000; // set -a
-		const REPORT_JOBS_ASAP = 0b00000000000000000000000100000000; // set -b
-		const EXIT_ON_ERROR    = 0b00000000000000000000001000000000; // set -e
-		const NO_GLOB          = 0b00000000000000000000010000000000; // set -f
-		const HASH_CMDS        = 0b00000000000000000000100000000000; // set -h
-		const ASSIGN_ANYWHERE  = 0b00000000000000000001000000000000; // set -k
-		const ENABLE_JOB_CTL   = 0b00000000000000000010000000000000; // set -m
-		const NO_EXECUTE       = 0b00000000000000000100000000000000; // set -n
-		const ENABLE_RSHELL    = 0b00000000000000001000000000000000; // set -r
-		const EXIT_AFTER_EXEC  = 0b00000000000000010000000000000000; // set -t
-		const UNSET_IS_ERROR   = 0b00000000000000100000000000000000; // set -u
-		const PRINT_INPUT      = 0b00000000000001000000000000000000; // set -v
-		const STACK_TRACE      = 0b00000000000010000000000000000000; // set -x
-		const EXPAND_BRACES    = 0b00000000000100000000000000000000; // set -B
-		const NO_OVERWRITE     = 0b00000000001000000000000000000000; // set -C
-		const INHERIT_ERR      = 0b00000000010000000000000000000000; // set -E
-		const HIST_SUB         = 0b00000000100000000000000000000000; // set -H
-		const NO_CD_SYMLINKS   = 0b00000001000000000000000000000000; // set -P
-		const INHERIT_RET      = 0b00000010000000000000000000000000; // set -T
-	}
-}
-
-impl PartialEq for ShellEnv {
-    fn eq(&self, other: &Self) -> bool {
-        // Compare the inner value of `output_buffer`
-        let self_output = self.output_buffer.lock().unwrap();
-        let other_output = other.output_buffer.lock().unwrap();
-
-        *self_output == *other_output
-            && self.flags == other.flags
-            && self.env_vars == other.env_vars
-            && self.variables == other.variables
-            && self.aliases == other.aliases
-            && self.shopts == other.shopts
-            && self.functions == other.functions
-            && self.parameters == other.parameters
-            && self.last_input == other.last_input
-						&& self.shell_is_fg == other.shell_is_fg
-    }
-}
 
 #[derive(Clone,Debug)]
 pub struct JobTable {
@@ -240,6 +267,24 @@ impl JobTable {
 	}
 	pub fn mark_updated(&mut self, id: i32) {
 		self.updated_since_check.push(id)
+	}
+	pub fn borrow_jobs(&self) -> &HashMap<i32,Job> {
+		&self.jobs
+	}
+	pub fn get_job(&mut self, id: i32) -> Option<&mut Job> {
+		self.jobs.get_mut(&id)
+	}
+	pub fn new_job(&mut self, pids: Vec<Pid>, commands: Vec<String>, pgid: Pid, fg: bool) {
+		let job_id = if fg {
+			0
+		} else {
+			self.jobs.len() + 1
+		};
+		let job = Job::new(job_id as i32,pids,commands,pgid);
+		println!("{}",job.print(Some(job_id as i32), JobFlags::INIT));
+		if job_id >= 1 {
+			self.jobs.insert(job_id as i32, job);
+		}
 	}
 	pub fn print_jobs(&mut self, flags: &JobFlags) {
 		let mut jobs = if flags.contains(JobFlags::NEW_ONLY) {
@@ -268,445 +313,229 @@ impl JobTable {
 }
 
 #[derive(Debug,Clone)]
-pub struct ShellEnv {
-	flags: EnvFlags,
-	output_buffer: Arc<Mutex<String>>,
-	env_vars: HashMap<String, String>,
-	variables: HashMap<String, String>,
-	aliases: HashMap<String, String>,
-	shopts: HashMap<String,usize>,
-	functions: HashMap<String, Box<Node>>,
-	parameters: HashMap<String, String>,
-	last_input: Option<String>,
-	pub job_table: JobTable,
-	shell_is_fg: bool,
+pub enum RshValue {
+	String(String),
+	Bool(bool),
+	Int(i32),
+	Float(f64),
+	Array(Vec<RshValue>),
+	Dict(HashMap<RshValue, RshValue>),
 }
 
-impl ShellEnv {
-	// Constructor
-	pub fn new(flags: EnvFlags) -> Self {
-		let mut open_fds = HashSet::new();
-		let shopts = init_shopts();
-		// TODO: probably need to find a way to initialize env vars that doesnt rely on a parent process
-		let clean_env = flags.contains(EnvFlags::CLEAN);
-		let env_vars = Self::init_env_vars(clean_env);
-		open_fds.insert(0);
-		open_fds.insert(1);
-		open_fds.insert(2);
-		let mut shellenv = Self {
-			flags: EnvFlags::empty(),
-			output_buffer: Arc::new(Mutex::new(String::new())),
-			env_vars,
-			variables: HashMap::new(),
-			aliases: HashMap::new(),
-			shopts,
+#[derive(Debug,Clone)]
+pub struct VarTable {
+	env: HashMap<String,String>,
+	params: HashMap<String,String>,
+	strings: HashMap<String,String>,
+	bools: HashMap<String,bool>,
+	ints: HashMap<String,i32>,
+	floats: HashMap<String,f64>,
+	arrays: HashMap<String,Vec<RshValue>>,
+	dicts: HashMap<String,HashMap<RshValue,RshValue>>
+}
+
+impl VarTable {
+	pub fn new() -> Self {
+		let env = init_env_vars(false);
+		Self {
+			env,
+			params: HashMap::new(),
+			strings: HashMap::new(),
+			bools: HashMap::new(),
+			ints: HashMap::new(),
+			floats: HashMap::new(),
+			arrays: HashMap::new(),
+			dicts: HashMap::new(),
+		}
+	}
+
+	pub fn borrow_evars(&self) -> &HashMap<String,String> {
+		&self.env
+	}
+
+	pub fn export_var(&mut self, key: &str, val: &str) {
+		self.env.insert(key.into(),val.into());
+		std::env::set_var(key, val);
+	}
+
+	// Getters and setters for `env`
+	pub fn get_evar(&self, key: &str) -> Option<String> {
+		self.env.get(key).cloned()
+	}
+	pub fn set_evar(&mut self, key: &str, value: &str) {
+		self.env.insert(key.into(), value.into());
+	}
+
+	// Getters and setters for `params`
+	pub fn get_param(&self, key: &str) -> Option<String> {
+		self.params.get(key).cloned()
+	}
+	pub fn set_param(&mut self, key: String, value: String) {
+		self.params.insert(key, value);
+	}
+
+	// Getters and setters for `strings`
+	pub fn get_string(&self, key: &str) -> Option<String> {
+		self.strings.get(key).cloned()
+	}
+	pub fn set_string(&mut self, key: String, value: String) {
+		self.strings.insert(key, value);
+	}
+
+	// Getters and setters for `bools`
+	pub fn get_bool(&self, key: &str) -> Option<bool> {
+		self.bools.get(key).cloned()
+	}
+	pub fn set_bool(&mut self, key: String, value: bool) {
+		self.bools.insert(key, value);
+	}
+
+	// Getters and setters for `ints`
+	pub fn get_int(&self, key: &str) -> Option<i32> {
+		self.ints.get(key).cloned()
+	}
+	pub fn set_int(&mut self, key: String, value: i32) {
+		self.ints.insert(key, value);
+	}
+
+	// Getters and setters for `floats`
+	pub fn get_float(&self, key: &str) -> Option<f64> {
+		self.floats.get(key).cloned()
+	}
+	pub fn set_float(&mut self, key: String, value: f64) {
+		self.floats.insert(key, value);
+	}
+
+	// Getters and setters for `arrays`
+	pub fn get_array(&self, key: &str) -> Option<Vec<RshValue>> {
+		self.arrays.get(key).cloned()
+	}
+	pub fn set_array(&mut self, key: String, value: Vec<RshValue>) {
+		self.arrays.insert(key, value);
+	}
+
+	// Getters and setters for `dicts`
+	pub fn get_dict(&self, key: &str) -> Option<HashMap<RshValue, RshValue>> {
+		self.dicts.get(key).cloned()
+	}
+	pub fn set_dict(&mut self, key: String, value: HashMap<RshValue, RshValue>) {
+		self.dicts.insert(key, value);
+	}
+}
+
+impl Default for VarTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug,Clone)]
+pub struct LogicTable {
+	functions: HashMap<String,Box<Node>>,
+	aliases: HashMap<String,String>
+}
+
+impl LogicTable {
+	pub fn new() -> Self {
+		Self {
 			functions: HashMap::new(),
-			parameters: HashMap::new(),
-			last_input: None,
-			job_table: JobTable::new(),
-			shell_is_fg: true
-		};
-		if !flags.contains(EnvFlags::NO_RC) {
-			let runtime_commands_path = &expand_var(&shellenv, "${HOME}/.rshrc".into());
-			let runtime_commands_path = Path::new(runtime_commands_path);
-			if runtime_commands_path.exists() {
-				if let Err(e) = shellenv.source_file(runtime_commands_path.to_path_buf()) {
-					let err = ShellErrorFull::from(shellenv.get_last_input(),e);
-					eprintln!("Failed to source ~/.rshrc: {}",err);
-				}
-			} else {
-				eprintln!("Warning: Runtime commands file '{}' not found.", runtime_commands_path.display());
-			}
-		}
-		shellenv
-	}
-
-	pub fn new_job(&mut self, pids: Vec<Pid>, commands: Vec<String>, pgid: Pid, fg: bool) {
-		let job_id = if fg {
-			0
-		} else {
-			self.job_table.jobs.len() + 1
-		};
-		let job = Job::new(job_id as i32,pids,commands,pgid);
-		println!("{}",job.print(Some(job_id as i32), JobFlags::INIT));
-		if job_id >= 1 {
-			self.job_table.jobs.insert(job_id as i32, job);
-			self.set_curr_job(job_id as i32);
-		} else {
-			self.set_fg_job(job);
+			aliases: HashMap::new()
 		}
 	}
-
-	pub fn borrow_jobs(&mut self) -> &mut HashMap<i32,Job> {
-		&mut self.job_table.jobs
+	pub fn new_alias(&mut self, name: &str, value: String) {
+		self.aliases.insert(name.to_string(),value);
 	}
-
-	pub fn set_fg_job(&mut self, job: Job) {
-		self.job_table.fg = Some(job)
+	pub fn get_alias(&self, name: &str) -> Option<String> {
+		self.aliases.get(name).cloned()
 	}
-
-	pub fn update_curr_job(&mut self) {
-		let jobs = &self.job_table.jobs;
-		let mut jobs = jobs.values().collect::<Vec<&Job>>();
-		jobs.sort_by_key(|job| job.job_id);
-		let mut most_recent_still_running: Option<i32> = None;
-		for job in jobs {
-			if job.is_active() {
-				most_recent_still_running = Some(job.job_id);
-			}
-		}
-		self.job_table.curr_job = most_recent_still_running;
+	pub fn new_func(&mut self, name: &str, node: Node) {
+		self.functions.insert(name.to_string(),Box::new(node));
 	}
-
-	pub fn set_curr_job(&mut self, job_id: i32) {
-		if !self.job_table.jobs.is_empty() {
-			self.job_table.curr_job = Some(job_id);
-		}
+	pub fn get_func(&self, name: &str) -> Option<Node> {
+		self.functions.get(name).map(|boxed_node| *boxed_node.clone())
 	}
+}
 
-	fn init_env_vars(clean: bool) -> HashMap<String,String> {
-		let pathbuf_to_string = |pb: Result<PathBuf, std::io::Error>| pb.unwrap_or_default().to_string_lossy().to_string();
-		// First, inherit any env vars from the parent process if clean bit not set
-		let mut env_vars = HashMap::new();
-		if !clean {
-			env_vars = std::env::vars().collect::<HashMap<String,String>>();
-		}
-		let home;
-		let username;
-		let uid;
-		if let Some(user) = User::from_uid(nix::unistd::Uid::current()).ok().flatten() {
-			home = user.dir;
-			username = user.name;
-			uid = user.uid;
-		} else {
-			home = PathBuf::new();
-			username = "unknown".into();
-			uid = 0.into();
-		}
-		let home = pathbuf_to_string(Ok(home));
-		let hostname = gethostname().map(|hname| hname.to_string_lossy().to_string()).unwrap_or_default();
+impl Default for LogicTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-		env_vars.insert("HOSTNAME".into(), hostname.clone());
-		env::set_var("HOSTNAME", hostname);
-		env_vars.insert("UID".into(), uid.to_string());
-		env::set_var("UID", uid.to_string());
-		env_vars.insert("TMPDIR".into(), "/tmp".into());
-		env::set_var("TMPDIR", "/tmp");
-		env_vars.insert("TERM".into(), "xterm-256color".into());
-		env::set_var("TERM", "xterm-256color");
-		env_vars.insert("LANG".into(), "en_US.UTF-8".into());
-		env::set_var("LANG", "en_US.UTF-8");
-		env_vars.insert("USER".into(), username.clone());
-		env::set_var("USER", username.clone());
-		env_vars.insert("LOGNAME".into(), username.clone());
-		env::set_var("LOGNAME", username);
-		env_vars.insert("PWD".into(), pathbuf_to_string(std::env::current_dir()));
-		env::set_var("PWD", pathbuf_to_string(std::env::current_dir()));
-		env_vars.insert("OLDPWD".into(), pathbuf_to_string(std::env::current_dir()));
-		env::set_var("OLDPWD", pathbuf_to_string(std::env::current_dir()));
-		env_vars.insert("HOME".into(), home.clone());
-		env::set_var("HOME", home.clone());
-		env_vars.insert("SHELL".into(), pathbuf_to_string(std::env::current_exe()));
-		env::set_var("SHELL", pathbuf_to_string(std::env::current_exe()));
-		env_vars.insert("HIST_FILE".into(),format!("{}/.rsh_hist",home));
-		env::set_var("HIST_FILE",format!("{}/.rsh_hist",home));
-		env_vars
-	}
+#[derive(Debug,Clone)]
+pub struct EnvMeta {
+	last_input: String,
+	shopts: HashMap<String,usize>,
+	flags: EnvFlags,
+}
 
-	pub fn mod_flags<F>(&mut self, transform: F) where F: FnOnce(&mut EnvFlags) {
-		transform(&mut self.flags)
-	}
-
-	pub fn is_interactive(&self) -> bool {
-		self.flags.contains(EnvFlags::INTERACTIVE)
-	}
-
-	pub fn set_last_input(&mut self, input: &str) {
-		self.last_input = Some(input.to_string())
-	}
-
-	pub fn get_last_input(&mut self) -> String {
-		self.last_input.clone().unwrap_or_default()
-	}
-
-	pub fn source_profile(&mut self) -> RshResult<()> {
-		let home = self.get_variable("HOME").unwrap();
-		let path = PathBuf::from(format!("{}/.rsh_profile",home));
-		self.source_file(path)
-	}
-
-	pub fn source_file(&mut self, path: PathBuf) -> RshResult<()> {
-		let mut file = File::open(&path).map_err(|_| ShellError::from_io())?;
-		let mut buffer = String::new();
-		file.read_to_string(&mut buffer).map_err(|_| ShellError::from_io())?;
-		self.last_input = Some(buffer.clone());
-
-
-		let state = descend(&buffer, self)?;
-		let new_env = self.clone();
-		let mut walker = NodeWalker::new(state.ast, new_env);
-		let code = walker.start_walk()?;
-		if let RshWait::Fail { code, cmd, span } = code {
-			if code == 127 {
-				if let Some(cmd) = cmd {
-					let err = ShellErrorFull::from(walker.shellenv.get_last_input(),ShellError::from_no_cmd(&format!("Command not found: {}",cmd), span));
-					eprintln!("{}", err);
-				}
-			}
-		}
-		let new_env = walker.deconstruct();
-		self.replace(new_env);
-		Ok(())
-	}
-
-	pub fn replace(&mut self, other: ShellEnv) {
-		let ShellEnv {
+impl EnvMeta {
+	pub fn new(flags: EnvFlags) -> Self {
+		Self {
+			last_input: String::new(),
+			shopts: init_shopts(),
 			flags,
-			output_buffer,
-			env_vars,
-			variables,
-			aliases,
-			shopts,
-			functions,
-			parameters,
-			last_input,
-			job_table,
-			shell_is_fg
-		} = other;
-
-		self.flags = flags;
-		self.output_buffer= output_buffer;
-		self.env_vars= env_vars;
-		self.variables= variables;
-		self.aliases= aliases;
-		self.shopts= shopts;
-		self.functions= functions;
-		self.parameters= parameters;
-		self.last_input= last_input;
-		self.job_table = job_table;
-		self.shell_is_fg = shell_is_fg;
-	}
-
-	pub fn change_dir(&mut self, path: &Path, span: Span) -> RshResult<()> {
-		let result = env::set_current_dir(path);
-		match result {
-			Ok(_) => {
-				let old_pwd = self.env_vars.remove("PWD").unwrap_or_default();
-				self.export_variable("OLDPWD".into(), old_pwd);
-				let new_dir = env::current_dir().unwrap().to_string_lossy().to_string();
-				self.export_variable("PWD".into(), new_dir);
-				Ok(())
-			}
-			Err(e) => Err(ShellError::from_execf(&e.to_string(), 1, span))
 		}
 	}
-
-	pub fn set_flags(&mut self, flags: EnvFlags) {
-		self.flags |= flags;
-		self.update_flags_param();
+	pub fn set_last_input(&mut self,input: &str) {
+		self.last_input = input.to_string()
 	}
-
-	pub fn unset_flags(&mut self, flags:EnvFlags) {
-		self.flags &= !flags;
-		self.update_flags_param();
+	pub fn get_last_input(&self) -> String {
+		self.last_input.clone()
 	}
-
-	pub fn update_flags_param(&mut self) {
-		let mut flag_list = "abefhkmnrptuvxBCEHPT".chars();
-		let mut flag_string = String::new();
-		while let Some(ch) = flag_list.next() {
-			match ch {
-				'a' if self.flags.contains(EnvFlags::EXPORT_ALL_VARS) => flag_string.push(ch),
-				'b' if self.flags.contains(EnvFlags::REPORT_JOBS_ASAP) => flag_string.push(ch),
-				'e' if self.flags.contains(EnvFlags::EXIT_ON_ERROR) => flag_string.push(ch),
-				'f' if self.flags.contains(EnvFlags::NO_GLOB) => flag_string.push(ch),
-				'h' if self.flags.contains(EnvFlags::HASH_CMDS) => flag_string.push(ch),
-				'k' if self.flags.contains(EnvFlags::ASSIGN_ANYWHERE) => flag_string.push(ch),
-				'm' if self.flags.contains(EnvFlags::ENABLE_JOB_CTL) => flag_string.push(ch),
-				'n' if self.flags.contains(EnvFlags::NO_EXECUTE) => flag_string.push(ch),
-				'r' if self.flags.contains(EnvFlags::ENABLE_RSHELL) => flag_string.push(ch),
-				't' if self.flags.contains(EnvFlags::EXIT_AFTER_EXEC) => flag_string.push(ch),
-				'u' if self.flags.contains(EnvFlags::UNSET_IS_ERROR) => flag_string.push(ch),
-				'v' if self.flags.contains(EnvFlags::PRINT_INPUT) => flag_string.push(ch),
-				'x' if self.flags.contains(EnvFlags::STACK_TRACE) => flag_string.push(ch),
-				'B' if self.flags.contains(EnvFlags::EXPAND_BRACES) => flag_string.push(ch),
-				'C' if self.flags.contains(EnvFlags::NO_OVERWRITE) => flag_string.push(ch),
-				'E' if self.flags.contains(EnvFlags::INHERIT_ERR) => flag_string.push(ch),
-				'H' if self.flags.contains(EnvFlags::HIST_SUB) => flag_string.push(ch),
-				'P' if self.flags.contains(EnvFlags::NO_CD_SYMLINKS) => flag_string.push(ch),
-				'T' if self.flags.contains(EnvFlags::INHERIT_RET) => flag_string.push(ch),
-				_ => { /* Do nothing */ }
-			}
-		}
-		self.set_parameter("-".into(), flag_string);
+	pub fn set_shopt(&mut self, key: &str, val: usize) {
+		self.shopts.insert(key.into(),val);
 	}
-
-	pub fn handle_exit_status(&mut self, wait_status: RshWait) {
-		match wait_status {
-			RshWait::Success { .. } => self.set_parameter("?".into(), "0".into()),
-			RshWait::Fail { code, cmd: _, span: _ } => self.set_parameter("?".into(), code.to_string()),
-			_ => unimplemented!()
-		}
+	pub fn get_shopt(&self, key: &str) -> Option<usize> {
+		self.shopts.get(&key.to_string()).map(|val| *val)
 	}
-
-	pub fn set_interactive(&mut self, interactive: bool) {
-		if interactive {
-			self.flags |= EnvFlags::INTERACTIVE
-		} else {
-			self.flags &= !EnvFlags::INTERACTIVE
-		}
+	pub fn mod_flags<F>(&mut self, flag_mod: F)
+	where F: FnOnce(&mut EnvFlags) {
+		flag_mod(&mut self.flags)
 	}
+}
 
-	pub fn get_env_vars(&self) -> &HashMap<String,String> {
-		&self.env_vars
-	}
+pub fn read_jobs<F,T>(f: F) -> RshResult<T>
+where F: FnOnce(&JobTable) -> T {
+	let lock = JOBS.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
+	Ok(f(&lock))
+}
 
-	pub fn get_shopts(&self) -> &HashMap<String,usize> {
-		&self.shopts
-	}
+pub fn write_jobs<F,T>(f: F) -> RshResult<T>
+where F: FnOnce(&mut JobTable) -> T {
+	let mut lock = JOBS.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
+	Ok(f(&mut lock))
+}
 
-	pub fn get_shopt(&self, shopt: &str) -> Option<&usize> {
-		self.shopts.get(shopt)
-	}
-
-	pub fn get_params(&self) -> &HashMap<String,String> {
-		&self.parameters
-	}
-
-	pub fn set_params(&mut self, new_params: HashMap<String,String>) {
-		self.parameters = new_params;
-	}
-
-	// Getters and Setters for `variables`
-	pub fn get_variable(&self, key: &str) -> Option<String> {
-		if let Some(value) = self.variables.get(key) {
-			Some(value.to_string())
-		} else if let Some(value) = self.env_vars.get(key) {
-			Some(value.to_string())
-		} else {
-			self.get_parameter(key).map(|val| val.to_string())
-		}
-	}
-
-	/// For C FFI calls
-	pub fn get_cvars(&self) -> Vec<CString> {
-		self.env_vars
-			.iter()
-			.map(|(key, value)| {
-				let env_pair = format!("{}={}", key, value);
-				CString::new(env_pair).unwrap() })
-			.collect::<Vec<CString>>()
-	}
-
-	pub fn set_variable(&mut self, key: String, mut value: String) {
-		debug!("inserted var: {} with value: {}",key,value);
-		if value.starts_with('"') && value.ends_with('"') {
-			value = value.strip_prefix('"').unwrap().into();
-			value = value.strip_suffix('"').unwrap().into();
-		}
-		self.variables.insert(key.clone(), value);
-		trace!("testing variable get: {} = {}", key, self.get_variable(key.as_str()).unwrap())
-	}
-
-	pub fn set_shopt(&mut self, key: &str, value: usize) {
-		self.shopts.insert(key.into(),value);
-	}
-
-	pub fn export_variable(&mut self, key: String, value: String) {
-		let value = value.trim_matches(|ch| ch == '"').to_string();
-		if value.as_str() == "" {
-			self.variables.remove(&key);
-			self.env_vars.remove(&key);
-		} else {
-			self.variables.insert(key.clone(),value.clone());
-			self.env_vars.insert(key,value);
-		}
-	}
-
-	pub fn remove_variable(&mut self, key: &str) -> Option<String> {
-		self.variables.remove(key)
-	}
-
-	// Getters and Setters for `aliases`
-	pub fn get_alias(&self, key: &str) -> Option<&String> {
-		if self.flags.contains(EnvFlags::NO_ALIAS) {
-			return None
-		}
-		self.aliases.get(key)
-	}
-
-	pub fn set_alias(&mut self, key: String, mut value: String) -> Result<(), String> {
-		if self.get_function(key.as_str()).is_some() {
-			return Err(format!("The name `{}` is already being used as a function",key))
-		}
-		if value.starts_with('"') && value.ends_with('"') {
-			value = value.strip_prefix('"').unwrap().into();
-			value = value.strip_suffix('"').unwrap().into();
-		}
-		self.aliases.insert(key, value);
-		Ok(())
-	}
-
-	pub fn remove_alias(&mut self, key: &str) -> Option<String> {
-		self.aliases.remove(key)
-	}
-
-	// Getters and Setters for `functions`
-	pub fn get_function(&self, name: &str) -> Option<Box<Node>> {
-		self.functions.get(name).cloned()
-	}
-
-	pub fn set_function(&mut self, name: String, body: Box<Node>) -> RshResult<()> {
-		if self.get_alias(name.as_str()).is_some() {
-			return Err(ShellError::from_parse(format!("The name `{}` is already being used as an alias",name).as_str(), body.span()))
-		}
-		self.functions.insert(name, body);
-		Ok(())
-	}
-
-	pub fn remove_function(&mut self, name: &str) -> Option<Box<Node>> {
-		self.functions.remove(name)
-	}
-
-	// Getters and Setters for `parameters`
-	pub fn get_parameter(&self, key: &str) -> Option<&String> {
-		if key == "*" {
-			// Return the un-split parameter string
-			return self.parameters.get("@")
-		}
-		self.parameters.get(key)
-	}
-
-	pub fn set_parameter(&mut self, key: String, value: String) {
-		if key.chars().next().unwrap().is_ascii_digit() {
-			let mut pos_params = self.parameters.remove("@").unwrap_or_default();
-			if pos_params.is_empty() {
-				pos_params = value.clone();
-			} else {
-				pos_params = format!("{} {}",pos_params,value);
-			}
-			self.parameters.insert("@".into(),pos_params.clone());
-			let num_params = pos_params.split(' ').count();
-			self.parameters.insert("#".into(),num_params.to_string());
-		}
-		self.parameters.insert(key, value);
-	}
-
-	pub fn clear_pos_parameters(&mut self) {
-		let mut index = 1;
-		while let Some(_value) = self.get_parameter(index.to_string().as_str()) {
-			self.parameters.remove(index.to_string().as_str());
-			index += 1;
-		}
-	}
-
-	// Utility method to clear the environment
-	pub fn clear(&mut self) {
-		self.variables.clear();
-		self.aliases.clear();
-		self.functions.clear();
-		self.parameters.clear();
-	}
+pub fn read_vars<F,T>(f: F) -> RshResult<T>
+where F: FnOnce(&VarTable) -> T {
+	let lock = VARS.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
+	Ok(f(&lock))
+}
+pub fn write_vars<F,T>(f: F) -> RshResult<T>
+where F: FnOnce(&mut VarTable) -> T {
+	let mut lock = VARS.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
+	Ok(f(&mut lock))
+}
+pub fn read_logic<F,T>(f: F) -> RshResult<T>
+where F: FnOnce(&LogicTable) -> T {
+	let lock = LOGIC.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
+	Ok(f(&lock))
+}
+pub fn write_logic<F,T>(f: F) -> RshResult<T>
+where F: FnOnce(&mut LogicTable) -> T {
+	let mut lock = LOGIC.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
+	Ok(f(&mut lock))
+}
+pub fn read_meta<F,T>(f: F) -> RshResult<T>
+where F: FnOnce(&EnvMeta) -> T {
+	let lock = META.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
+	Ok(f(&lock))
+}
+pub fn write_meta<F,T>(f: F) -> RshResult<T>
+where F: FnOnce(&mut EnvMeta) -> T {
+	let mut lock = META.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
+	Ok(f(&mut lock))
 }
 
 fn init_shopts() -> HashMap<String,usize> {
@@ -724,4 +553,84 @@ fn init_shopts() -> HashMap<String,usize> {
 	shopts.insert("tab_stop".into(),4);
 	shopts.insert("bell_style".into(),1);
 	shopts
+}
+
+pub struct SavedEnv {
+	vars: VarTable,
+	logic: LogicTable,
+	meta: EnvMeta
+}
+
+impl SavedEnv {
+	pub fn get_snapshot() -> RshResult<Self> {
+		let vars = read_vars(|vars| vars.clone())?;
+		let logic = read_logic(|log| log.clone())?;
+		let meta = read_meta(|meta| meta.clone())?;
+		Ok(Self { vars, logic, meta })
+	}
+	pub fn restore_snapshot(self) -> RshResult<()> {
+		write_vars(|vars| *vars = self.vars)?;
+		write_logic(|log| *log = self.logic)?;
+		write_meta(|meta| *meta = self.meta)?;
+		Ok(())
+	}
+}
+
+fn init_env_vars(clean: bool) -> HashMap<String,String> {
+	let pathbuf_to_string = |pb: Result<PathBuf, std::io::Error>| pb.unwrap_or_default().to_string_lossy().to_string();
+	// First, inherit any env vars from the parent process if clean bit not set
+	let mut env_vars = HashMap::new();
+	if !clean {
+		env_vars = std::env::vars().collect::<HashMap<String,String>>();
+	}
+	let home;
+	let username;
+	let uid;
+	if let Some(user) = User::from_uid(nix::unistd::Uid::current()).ok().flatten() {
+		home = user.dir;
+		username = user.name;
+		uid = user.uid;
+	} else {
+		home = PathBuf::new();
+		username = "unknown".into();
+		uid = 0.into();
+	}
+	let home = pathbuf_to_string(Ok(home));
+	let hostname = gethostname().map(|hname| hname.to_string_lossy().to_string()).unwrap_or_default();
+
+	env_vars.insert("HOSTNAME".into(), hostname.clone());
+	env::set_var("HOSTNAME", hostname);
+	env_vars.insert("UID".into(), uid.to_string());
+	env::set_var("UID", uid.to_string());
+	env_vars.insert("TMPDIR".into(), "/tmp".into());
+	env::set_var("TMPDIR", "/tmp");
+	env_vars.insert("TERM".into(), "xterm-256color".into());
+	env::set_var("TERM", "xterm-256color");
+	env_vars.insert("LANG".into(), "en_US.UTF-8".into());
+	env::set_var("LANG", "en_US.UTF-8");
+	env_vars.insert("USER".into(), username.clone());
+	env::set_var("USER", username.clone());
+	env_vars.insert("LOGNAME".into(), username.clone());
+	env::set_var("LOGNAME", username);
+	env_vars.insert("PWD".into(), pathbuf_to_string(std::env::current_dir()));
+	env::set_var("PWD", pathbuf_to_string(std::env::current_dir()));
+	env_vars.insert("OLDPWD".into(), pathbuf_to_string(std::env::current_dir()));
+	env::set_var("OLDPWD", pathbuf_to_string(std::env::current_dir()));
+	env_vars.insert("HOME".into(), home.clone());
+	env::set_var("HOME", home.clone());
+	env_vars.insert("SHELL".into(), pathbuf_to_string(std::env::current_exe()));
+	env::set_var("SHELL", pathbuf_to_string(std::env::current_exe()));
+	env_vars.insert("HIST_FILE".into(),format!("{}/.rsh_hist",home));
+	env::set_var("HIST_FILE",format!("{}/.rsh_hist",home));
+	env_vars
+}
+
+pub fn source_file(path: PathBuf) -> RshResult<()> {
+	let mut file = File::open(&path).map_err(|_| ShError::from_io())?;
+	let mut buffer = String::new();
+	file.read_to_string(&mut buffer).map_err(|_| ShError::from_io())?;
+	write_meta(|meta| meta.set_last_input(&buffer.clone()))?;
+
+	let state = descend(&buffer)?;
+	todo!()
 }

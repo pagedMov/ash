@@ -7,7 +7,6 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use bitflags::bitflags;
 use libc::{getegid, geteuid};
-use log::info;
 use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
 use nix::sys::wait::{waitpid, WaitStatus};
@@ -16,9 +15,9 @@ use nix::unistd::{access, fork, isatty, setpgid, AccessFlags, ForkResult};
 use crate::execute::{ProcIO, RshWait, RustFd};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
-use crate::interp::token::{Redir, RedirType, Tk, TkType};
-use crate::shellenv::{EnvFlags, JobFlags, ShellEnv};
-use crate::event::ShellError;
+use crate::interp::token::{Redir, RedirType, Tk};
+use crate::shellenv::{self, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, JobFlags };
+use crate::event::ShError;
 use crate::RshResult;
 
 pub const BUILTINS: [&str; 14] = [
@@ -39,7 +38,6 @@ bitflags! {
 fn open_file_descriptors(redirs: VecDeque<Node>) -> RshResult<Vec<RustFd>> {
 	let mut fd_stack: Vec<RustFd> = Vec::new();
 	let mut fd_dupes: Vec<(i32,i32)> = Vec::new();
-	info!("Handling redirections for builtin: {:?}", redirs);
 
 	for redir_tk in redirs {
 		if let NdType::Redirection { ref redir } = redir_tk.nd_type {
@@ -109,13 +107,13 @@ pub fn catstr(mut c_strings: VecDeque<CString>,newline: bool) -> CString {
 /// # Arguments
 ///
 /// * `args` - A mutable reference to a `VecDeque` of `String` arguments.
-/// * `transform` - A function that takes a `String` and returns a `Result<T, ShellError>`.
+/// * `transform` - A function that takes a `String` and returns a `Result<T, ShError>`.
 /// * `property` - A function that takes a reference to `T` and returns a `bool`.
 ///
 /// # Returns
 ///
 /// * `Ok(bool)` - If the transformation and property check are successful, returns the result of the property check.
-/// * `Err(ShellError)` - If the `VecDeque` is empty or the transformation fails, returns an appropriate `ShellError`.
+/// * `Err(ShError)` - If the `VecDeque` is empty or the transformation fails, returns an appropriate `ShError`.
 ///
 /// # Example
 ///
@@ -144,7 +142,7 @@ where
 		}
 		Ok(property(&transformed.unwrap()))
 	} else {
-		Err(ShellError::from_syntax("Did not find a comparison target for integer in test", span))
+		Err(ShError::from_syntax("Did not find a comparison target for integer in test", span))
 	}
 }
 
@@ -159,13 +157,13 @@ where
 ///
 /// * `arg1` - The first `String` argument to be transformed and compared.
 /// * `args` - A mutable reference to a `VecDeque` of `String` arguments.
-/// * `transform` - A function that takes a `String` and returns a `Result<T, ShellError>`.
+/// * `transform` - A function that takes a `String` and returns a `Result<T, ShError>`.
 /// * `comparison` - A function that takes two references to `T` and returns a `bool`.
 ///
 /// # Returns
 ///
 /// * `Ok(bool)` - If the transformation and comparison are successful, returns the result of the comparison.
-/// * `Err(ShellError)` - If the `VecDeque` is empty or the transformation fails, returns an appropriate `ShellError`.
+/// * `Err(ShError)` - If the `VecDeque` is empty or the transformation fails, returns an appropriate `ShError`.
 ///
 /// # Example
 ///
@@ -195,7 +193,7 @@ where
 		}
 		Ok(comparison(&left.unwrap(), &right.unwrap()))
 	} else {
-		Err(ShellError::from_syntax("Did not find a comparison target for integer in test", arg1.span()))
+		Err(ShError::from_syntax("Did not find a comparison target for integer in test", arg1.span()))
 	}
 }
 
@@ -214,11 +212,11 @@ where
 ///
 /// # Returns
 ///
-/// * `Result<bool, ShellError>` - Returns the combined result of the logical operation.
+/// * `Result<bool, ShError>` - Returns the combined result of the logical operation.
 ///
 /// # Errors
 ///
-/// * Returns `ShellError::from_syntax` if there is a syntax error or missing arguments.
+/// * Returns `ShError::from_syntax` if there is a syntax error or missing arguments.
 fn do_logical_op(
 	args: &mut VecDeque<Tk>,
 	command: Tk,
@@ -226,12 +224,12 @@ fn do_logical_op(
 	operator: Tk
 ) -> RshResult<bool> {
 	args.push_front(command);
-	let result2 = test(std::mem::take(args)).map(|res| matches!(res,RshWait::Success {..}))?;
+	let result2 = test(std::mem::take(args)).map(|res| matches!(res,RshWait::Success ))?;
 	match operator.text() {
 		"!" => { Ok(!result2) },
 		"-a" => { Ok(result1 && result2) },
 		"-o" => { Ok(result1 || result2) },
-		_ => Err(ShellError::from_syntax("Expected a logical operator (-a or -o)", operator.span())),
+		_ => Err(ShError::from_syntax("Expected a logical operator (-a or -o)", operator.span())),
 	}
 }
 
@@ -247,7 +245,7 @@ fn do_logical_op(
 /// # Returns
 ///
 /// * `Ok(RshWait)` - Returns a success or failure status based on the evaluation of the conditional expression.
-/// * `Err(ShellError)` - Returns an appropriate `ShellError` if there is a syntax error or other issues with the arguments.
+/// * `Err(ShError)` - Returns an appropriate `ShError` if there is a syntax error or other issues with the arguments.
 ///
 /// # Examples
 ///
@@ -320,8 +318,8 @@ fn do_logical_op(
 ///
 /// # Errors
 ///
-/// - Returns `ShellError::from_syntax` if there is a syntax error or missing arguments.
-/// - Returns `ShellError::from_syntax` if an expected comparison operator is missing.
+/// - Returns `ShError::from_syntax` if there is a syntax error or missing arguments.
+/// - Returns `ShError::from_syntax` if an expected comparison operator is missing.
 ///
 /// # Safety
 ///
@@ -331,17 +329,16 @@ fn do_logical_op(
 ///
 /// This function does not panic.
 pub fn test(mut argv: VecDeque<Tk>) -> RshResult<RshWait> {
-	info!("Starting builtin test");
 	let span = Span::from(argv.front().unwrap().span().start,argv.back().unwrap().span().end);
-	let is_false = || -> RshResult<RshWait> { Ok(RshWait::Fail { code: 1, cmd: Some("test".into()), span }) };
-	let is_true = || -> RshResult<RshWait> { Ok(RshWait::Success { span }) };
+	let is_false = || -> RshResult<RshWait> { Ok(RshWait::Fail { code: 1, cmd: Some("test".into()), }) };
+	let is_true = || -> RshResult<RshWait> { Ok(RshWait::Success ) };
 	let is_int = |tk: &Tk| -> bool { tk.text().parse::<i32>().is_ok() };
 	let to_int = |tk: Tk| -> RshResult<i32> {
-		tk.text().parse::<i32>().map_err(|_| ShellError::from_syntax("Expected an integer in test", tk.span()))
+		tk.text().parse::<i32>().map_err(|_| ShError::from_syntax("Expected an integer in test", tk.span()))
 	};
 	let is_path = |tk: &Tk| -> bool { PathBuf::from(tk.text()).exists() };
 	let to_meta = |tk: Tk| -> RshResult<fs::Metadata> {
-		fs::metadata(tk.text()).map_err(|_| ShellError::from_syntax(&format!("Test: Path '{}' does not exist", tk.text()), tk.span()))
+		fs::metadata(tk.text()).map_err(|_| ShError::from_syntax(&format!("Test: Path '{}' does not exist", tk.text()), tk.span()))
 	};
 	let string_noop = |tk: Tk| -> RshResult<String> { Ok(tk.text().into()) };
 	let command = argv.pop_front().unwrap();
@@ -354,10 +351,10 @@ pub fn test(mut argv: VecDeque<Tk>) -> RshResult<RshWait> {
 	if is_bracket {
 		if let Some(arg) = argv.back() {
 			if arg.text() != "]" {
-				return Err(ShellError::from_syntax("Test is missing a closing bracket", arg.span()))
+				return Err(ShError::from_syntax("Test is missing a closing bracket", arg.span()))
 			}
 		} else {
-			return Err(ShellError::from_syntax("Found a test with no arguments", command.span()))
+			return Err(ShError::from_syntax("Found a test with no arguments", command.span()))
 		}
 	}
 
@@ -396,11 +393,11 @@ pub fn test(mut argv: VecDeque<Tk>) -> RshResult<RshWait> {
 						"-lt" => do_cmp(arg, &mut argv, to_int, |left, right| left < right)?,
 						"-ne" => do_cmp(arg, &mut argv, to_int, |left, right| left != right)?,
 						_ => {
-							return Err(ShellError::from_syntax("Expected an integer after comparison operator in test", cmp.span()));
+							return Err(ShError::from_syntax("Expected an integer after comparison operator in test", cmp.span()));
 						}
 					}
 				} else {
-					return Err(ShellError::from_syntax("Expected a comparison operator after integer in test", command.span()));
+					return Err(ShError::from_syntax("Expected a comparison operator after integer in test", command.span()));
 				}
 			}
 			_ if is_path(&arg) && argv.front().is_some_and(|arg| matches!(arg.text(), "-ef" | "-nt" | "-ot")) => {
@@ -410,11 +407,11 @@ pub fn test(mut argv: VecDeque<Tk>) -> RshResult<RshWait> {
 						"-nt" => do_cmp(arg, &mut argv, to_meta, |left, right| left.mtime() > right.mtime())?,
 						"-ot" => do_cmp(arg, &mut argv, to_meta, |left, right| left.mtime() < right.mtime())?,
 						_ => {
-							return Err(ShellError::from_syntax("Expected a file name after -b flag", cmp.span()));
+							return Err(ShError::from_syntax("Expected a file name after -b flag", cmp.span()));
 						}
 					}
 				} else {
-					return Err(ShellError::from_syntax("Expected a comparison operator after path name in test", command.span()));
+					return Err(ShError::from_syntax("Expected a comparison operator after path name in test", command.span()));
 				}
 			}
 			_ => {
@@ -426,14 +423,14 @@ pub fn test(mut argv: VecDeque<Tk>) -> RshResult<RshWait> {
 						"!=" => do_cmp(arg, &mut argv, string_noop, |left, right| left != right)?,
 						_ => {
 							if cmp.text() == "==" {
-								return Err(ShellError::from_syntax("`==` is not a valid comparison operator, use `=` instead", cmp.span()));
+								return Err(ShError::from_syntax("`==` is not a valid comparison operator, use `=` instead", cmp.span()));
 							} else {
-								return Err(ShellError::from_syntax("Expected a comparison operator after string in test", cmp.span()));
+								return Err(ShError::from_syntax("Expected a comparison operator after string in test", cmp.span()));
 							}
 						}
 					}
 				} else {
-					return Err(ShellError::from_syntax("Expected a comparison operator after string in test", command.span()));
+					return Err(ShError::from_syntax("Expected a comparison operator after string in test", command.span()));
 				}
 			}
 		};
@@ -448,7 +445,7 @@ pub fn test(mut argv: VecDeque<Tk>) -> RshResult<RshWait> {
 				}
 				"]" => {}
 				_ => {
-					return Err(ShellError::from_syntax("Unexpected extra argument found in test", arg.span()));
+					return Err(ShError::from_syntax("Unexpected extra argument found in test", arg.span()));
 				}
 			}
 		}
@@ -457,26 +454,24 @@ pub fn test(mut argv: VecDeque<Tk>) -> RshResult<RshWait> {
 			false => is_false(),
 		}
 	} else {
-		Err(ShellError::from_syntax("Test called with no arguments", command.span()))
+		Err(ShError::from_syntax("Test called with no arguments", command.span()))
 	}
 }
 
-pub fn alias(shellenv: &mut ShellEnv, node: Node) -> RshResult<RshWait> {
+pub fn alias(node: Node) -> RshResult<RshWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front();
 	while let Some(arg) = argv.pop_front() {
 		if !token::REGEX["assignment"].is_match(arg.text()) {
-			return Err(ShellError::from_syntax(&format!("Expected an assignment pattern in alias args, got {}",arg.text()), arg.span()))
+			return Err(ShError::from_syntax(&format!("Expected an assignment pattern in alias args, got {}",arg.text()), arg.span()))
 		}
 		let (alias,value) = arg.text().split_once('=').unwrap();
-		if let Err(e) = shellenv.set_alias(alias.into(), value.into()) {
-			return Err(ShellError::from_parse(e.as_str(), node.span()))
-		}
+		write_logic(|log| log.new_alias(alias, value.to_string()))?;
 	}
-	Ok(RshWait::Success { span: node.span() })
+	Ok(RshWait::Success )
 }
 
-pub fn cd(shellenv: &mut ShellEnv, node: Node) -> RshResult<RshWait> {
+pub async fn cd(node: Node) -> RshResult<RshWait> {
 	let mut argv = node
 		.get_argv()?
 		.iter()
@@ -486,25 +481,25 @@ pub fn cd(shellenv: &mut ShellEnv, node: Node) -> RshResult<RshWait> {
 	let new_pwd;
 	if let Some(arg) = argv.pop_front() {
 		new_pwd = arg;
-	} else if let Some(home_path) = shellenv.get_variable("HOME") {
+	} else if let Some(home_path) = read_vars(|vars| vars.get_evar("HOME"))? {
 		new_pwd = CString::new(home_path).unwrap();
 	} else {
 		new_pwd = CString::new("/").unwrap();
 	}
 	let path = Path::new(new_pwd.to_str().unwrap());
-	shellenv.change_dir(path, node.span())?;
-	Ok(RshWait::Success { span: node.span() })
+	std::env::set_current_dir(path).map_err(|_| ShError::from_io())?;
+	Ok(RshWait::Success )
 }
 
-pub fn fg(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
-	Ok(RshWait::Success { span: node.span() })
+pub fn fg(node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
+	Ok(RshWait::Success )
 }
 
-pub fn bg(shellenv: &mut ShellEnv, node: Node) -> RshResult<RshWait> {
+pub fn bg(node: Node) -> RshResult<RshWait> {
 	todo!()
 }
 
-pub fn source(shellenv: &mut ShellEnv, node: Node) -> RshResult<RshWait> {
+pub fn source(node: Node) -> RshResult<RshWait> {
 	let mut argv = node
 		.get_argv()?
 		.iter()
@@ -513,9 +508,9 @@ pub fn source(shellenv: &mut ShellEnv, node: Node) -> RshResult<RshWait> {
 	argv.pop_front();
 	for path in argv {
 		let file_path = Path::new(OsStr::from_bytes(path.as_bytes()));
-		shellenv.source_file(file_path.to_path_buf())?
+		shellenv::source_file(file_path.to_path_buf())?
 	}
-	Ok(RshWait::Success { span: node.span() })
+	Ok(RshWait::Success )
 }
 
 fn flags_from_chars(chars: &str) -> EnvFlags {
@@ -548,58 +543,58 @@ fn flags_from_chars(chars: &str) -> EnvFlags {
 	env_flags
 }
 
-pub fn set_or_unset(shellenv: &mut ShellEnv, node: Node, set: bool) -> RshResult<RshWait> {
+pub fn set_or_unset(node: Node, set: bool) -> RshResult<RshWait> {
 	let span = node.span();
 	if let NdType::Builtin { mut argv } = node.nd_type {
 		argv.pop_front(); // Ignore 'set'
 		if argv.front().is_none_or(|arg| !arg.text().starts_with('-')) {
-			return Err(ShellError::from_execf("Invalid 'set' invocation", 1, span))
+			return Err(ShError::from_execf("Invalid 'set' invocation", 1, span))
 		}
 		let flag_arg = argv.pop_front().unwrap();
 		let set_flags = flag_arg.text();
 		let set_flags = set_flags.strip_prefix('-').unwrap();
 		let env_flags = flags_from_chars(set_flags);
 		match set {
-			true => shellenv.set_flags(env_flags),
-			false => shellenv.unset_flags(env_flags),
+			true => write_meta(|m| m.mod_flags(|f| *f |= env_flags))?,
+			false => write_meta(|m| m.mod_flags(|f| *f &= !env_flags))?,
 		}
 		Ok(RshWait::new())
 	} else { unreachable!() }
 }
 
-pub fn pwd(shellenv: &ShellEnv, span: Span) -> RshResult<RshWait> {
-	if let Some(pwd) = shellenv.get_variable("PWD") {
+pub fn pwd(span: Span) -> RshResult<RshWait> {
+	if let Some(pwd) = read_vars(|v| v.get_evar("PWD"))? {
 		let stdout = RustFd::from_stdout()?;
 		stdout.write(pwd.as_bytes())?;
-		Ok(RshWait::Success { span })
+		Ok(RshWait::Success )
 	} else {
-		Err(ShellError::from_execf("PWD environment variable is unset", 1, span))
+		Err(ShError::from_execf("PWD environment variable is unset", 1, span))
 	}
 }
 
-pub fn export(shellenv: &mut ShellEnv, node: Node) -> RshResult<RshWait> {
-	let last_status = RshWait::Success { span: node.span() };
+pub fn export(node: Node) -> RshResult<RshWait> {
+	let last_status = RshWait::Success ;
 	if let NdType::Builtin { mut argv } = node.nd_type {
 		argv.pop_front(); // Ignore "export"
 		while let Some(ass) = argv.pop_front() {
 			if let Some((key,value)) = ass.text().split_once('=') {
-				shellenv.export_variable(key.to_string(), value.to_string());
+				write_vars(|v| v.export_var(key, value))?;
 			} else {
-				return Err(ShellError::from_execf(format!("Expected a variable assignment in export, got this: {}", ass.text()).as_str(), 1, ass.span()))
+				return Err(ShError::from_execf(format!("Expected a variable assignment in export, got this: {}", ass.text()).as_str(), 1, ass.span()))
 			}
 		}
 		Ok(last_status)
 	} else { unreachable!() }
 }
 
-pub fn jobs(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
+pub fn jobs(node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
 	argv.pop_front();
 	let mut flags = JobFlags::empty();
 	while let Some(arg) = argv.pop_front() {
 		let mut chars = arg.text().chars().collect::<VecDeque<char>>();
 		if chars.front().is_none_or(|ch| *ch != '-') {
-			return Err(ShellError::from_execf("Invalid flag in `jobs` invocation", 1, node.span()))
+			return Err(ShError::from_execf("Invalid flag in `jobs` invocation", 1, node.span()))
 		}
 		chars.pop_front(); // Ignore the leading hyphen
 		while let Some(ch) = chars.pop_front() {
@@ -609,17 +604,17 @@ pub fn jobs(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) 
 				'n' => JobFlags::NEW_ONLY,
 				'r' => JobFlags::RUNNING,
 				's' => JobFlags::STOPPED,
-				_ => return Err(ShellError::from_execf("Invalid flag in `jobs` invocation", 1, node.span()))
+				_ => return Err(ShError::from_execf("Invalid flag in `jobs` invocation", 1, node.span()))
 			};
 			flags |= flag;
 		}
 	}
-	shellenv.job_table.print_jobs(&flags);
+	write_jobs(|j| j.print_jobs(&flags))?;
 
-	Ok(RshWait::Success { span: node.span() })
+	Ok(RshWait::Success )
 }
 
-pub fn echo(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
+pub fn echo(node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
 	let mut flags = EchoFlags::empty();
 	let span = node.span();
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
@@ -661,7 +656,6 @@ pub fn echo(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) 
 	}).collect::<VecDeque<CString>>();
 
 	let redirs = node.get_redirs()?;
-	info!("Executing echo with argv: {:?}, and redirs: {:?}", argv,node.redirs);
 
 	io.backup_fildescs()?;
 	let newline_opt = !flags.contains(EchoFlags::NO_NEWLINE);
@@ -703,23 +697,23 @@ pub fn echo(shellenv: &mut ShellEnv, node: Node, mut io: ProcIO, in_pipe: bool) 
 			}
 			io.restore_fildescs()?;
 			if node.flags.contains(NdFlags::BACKGROUND) {
-				setpgid(child, child).map_err(|_| ShellError::from_io())?;
-				shellenv.new_job(vec![child], vec!["echo".into()], child);
-				Ok(RshWait::Success { span })
+				setpgid(child, child).map_err(|_| ShError::from_io())?;
+				write_jobs(|j| j.new_job(vec![child], vec!["echo".into()], child, false))?;
+				Ok(RshWait::Success )
 			} else {
 				match waitpid(child, None) {
 					Ok(WaitStatus::Exited(_, code)) => match code {
-						0 => Ok(RshWait::Success { span }),
-						_ => Ok(RshWait::Fail { code, cmd: Some("echo".into()), span }),
+						0 => Ok(RshWait::Success ),
+						_ => Ok(RshWait::Fail { code, cmd: Some("echo".into()), }),
 					},
 					Ok(WaitStatus::Signaled(_,signal,_)) => {
-						Ok(RshWait::Fail { code: 128 + signal as i32, cmd: Some("echo".into()), span })
+						Ok(RshWait::Fail { code: 128 + signal as i32, cmd: Some("echo".into()), })
 					}
-					Ok(_) => Err(ShellError::from_execf("Unexpected waitpid result", 1, span)),
-					Err(err) => Err(ShellError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),
+					Ok(_) => Err(ShError::from_execf("Unexpected waitpid result", 1, span)),
+					Err(err) => Err(ShError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),
 				}
 			}
 		}
-		Err(_) => Err(ShellError::from_execf("Fork failed", 1, span)),
+		Err(_) => Err(ShError::from_execf("Fork failed", 1, span)),
 	}
 }

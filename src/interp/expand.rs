@@ -1,13 +1,12 @@
 use chrono::Local;
 use glob::glob;
-use log::{debug, info, trace};
 use std::collections::VecDeque;
 use std::mem::take;
 use std::path::PathBuf;
-use crate::event::ShellError;
+use crate::event::ShError;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
 use crate::interp::helper::{self,StrExtension, VecDequeExtension};
-use crate::shellenv::{EnvFlags, ShellEnv};
+use crate::shellenv::{read_logic, read_meta, read_vars, write_meta, EnvFlags, SavedEnv};
 use crate::RshResult;
 
 use super::parse::{self, NdType, Node, ParseState};
@@ -18,11 +17,11 @@ pub fn check_globs(string: String) -> bool {
 		string.has_unescaped("*")
 }
 
-pub fn expand_arguments(shellenv: &ShellEnv, node: &mut Node) -> RshResult<Vec<Tk>> {
+pub fn expand_arguments(node: &mut Node) -> RshResult<Vec<Tk>> {
 	let argv = node.get_argv()?;
 	let mut expand_buffer = Vec::new();
 	for arg in &argv {
-		let mut expanded = expand_token(shellenv, arg.clone());
+		let mut expanded = expand_token(arg.clone())?;
 		while let Some(token) = expanded.pop_front() {
 			if !token.text().is_empty() {
 				// Do not return empty tokens
@@ -43,7 +42,7 @@ pub fn expand_arguments(shellenv: &ShellEnv, node: &mut Node) -> RshResult<Vec<T
 			node.nd_type = NdType::Subshell { body: body.to_string(), argv: expand_buffer.clone().into() };
 			Ok(expand_buffer)
 		}
-		_ => Err(ShellError::from_internal("Called expand arguments on a non-command node"))
+		_ => Err(ShError::from_internal("Called expand arguments on a non-command node"))
 	}
 }
 
@@ -65,7 +64,7 @@ pub fn expand_time(fmt: &str) -> String {
 	right_here_right_now.format(fmt).to_string()
 }
 
-pub fn expand_prompt(shellenv: &ShellEnv) -> String {
+pub fn expand_prompt() -> RshResult<String> {
 	// TODO:
 	//\j - number of managed jobs
 	//\l - shell's terminal device name
@@ -73,18 +72,18 @@ pub fn expand_prompt(shellenv: &ShellEnv) -> String {
 	//\V - rsh release; version + patch level
 	//\! - history number of this command
 	//\# - command number of this command
-	let default_color = if shellenv.get_env_vars().get("UID").is_some_and(|uid| uid == "0") {
+	let default_color = if read_vars(|vars| vars.get_evar("UID").is_some_and(|uid| uid == "0"))? {
 		"31" // Red if uid is 0, aka root user
 	} else {
 		"32" // Green if anyone else
 	};
-	let cwd: String = shellenv.get_env_vars().get("PWD").map_or("", |cwd| cwd).to_string();
+	let cwd: String = read_vars(|vars| vars.get_evar("PWD").map_or("".into(), |cwd| cwd).to_string())?;
 	let default_path = if cwd.as_str() == "/" {
 		"\\e[36m\\w\\e[0m".to_string()
 	} else {
 		format!("\\e[1;{}m\\w\\e[1;36m/\\e[0m",default_color)
 	};
-	let ps1: String = shellenv.get_env_vars().get("PS1").map_or(format!("\\n{}\\n\\e[{}mdebug \\$\\e[36m>\\e[0m ",default_path,default_color), |ps1| ps1.clone());
+	let ps1: String = read_vars(|vars| vars.get_evar("PS1").map_or(format!("\\n{}\\n\\e[{}mdebug \\$\\e[36m>\\e[0m ",default_path,default_color), |ps1| ps1.clone()))?;
 	let mut result = String::new();
 	let mut chars = ps1.chars().collect::<VecDeque<char>>();
 	while let Some(c) = chars.pop_front() {
@@ -150,18 +149,18 @@ pub fn expand_prompt(shellenv: &ShellEnv) -> String {
 							// Do nothing, it's just a marker
 						}
 						'w' => {
-							let mut cwd = shellenv.get_env_vars().get("PWD").map_or(String::new(), |pwd| pwd.to_string());
-							let home = shellenv.get_env_vars().get("HOME").map_or("", |home| home);
-							if cwd.starts_with(home) {
-								cwd = cwd.replacen(home, "~", 1); // Use `replacen` to replace only the first occurrence
+							let mut cwd = read_vars(|vars| vars.get_evar("PWD").map_or(String::new(), |pwd| pwd.to_string()))?;
+							let home = read_vars(|vars| vars.get_evar("HOME").map_or("".into(), |home| home))?;
+							if cwd.starts_with(&home) {
+								cwd = cwd.replacen(&home, "~", 1); // Use `replacen` to replace only the first occurrence
 							}
 							// TODO: unwrap is probably safe here since this option is initialized with the environment but it might still cause issues later if this is left unhandled
-							let trunc_len = shellenv.get_shopt("trunc_prompt_path").unwrap_or(&0);
-							if *trunc_len > 0 {
+							let trunc_len = read_meta(|meta| meta.get_shopt("trunc_prompt_path").unwrap_or(0))?;
+							if trunc_len > 0 {
 								let mut path = PathBuf::from(cwd);
 								let mut cwd_components: Vec<_> = path.components().collect();
-								if cwd_components.len() > *trunc_len {
-									cwd_components = cwd_components.split_off(cwd_components.len() - *trunc_len);
+								if cwd_components.len() > trunc_len {
+									cwd_components = cwd_components.split_off(cwd_components.len() - trunc_len);
 									path = cwd_components.iter().collect(); // Rebuild the PathBuf
 								}
 								cwd = path.to_string_lossy().to_string();
@@ -169,37 +168,37 @@ pub fn expand_prompt(shellenv: &ShellEnv) -> String {
 							result.push_str(&cwd);
 						}
 						'W' => {
-							let cwd = PathBuf::from(shellenv.get_env_vars().get("PWD").map_or("", |pwd| pwd));
+							let cwd = PathBuf::from(read_vars(|vars| vars.get_evar("PWD").map_or("".to_string(), |pwd| pwd.to_string()))?);
 							let mut cwd = cwd.components().last().map(|comp| comp.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
-							let home = shellenv.get_env_vars().get("HOME").map_or("", |home| home);
-							if cwd.starts_with(home) {
-								cwd = cwd.replacen(home, "~", 1); // Replace HOME with '~'
+							let home = read_vars(|vars| vars.get_evar("HOME").map_or("".into(), |home| home))?;
+							if cwd.starts_with(&home) {
+								cwd = cwd.replacen(&home, "~", 1); // Replace HOME with '~'
 							}
 							result.push_str(&cwd);
 						}
 						'H' => {
-							let hostname = shellenv.get_env_vars().get("HOSTNAME").map_or("unknown host", |host| host);
-							result.push_str(hostname);
+							let hostname: String = read_vars(|vars| vars.get_evar("HOSTNAME").map_or("unknown host".into(), |host| host))?;
+							result.push_str(&hostname);
 						}
 						'h' => {
-							let hostname = shellenv.get_env_vars().get("HOSTNAME").map_or("unknown host", |host| host);
+							let hostname = read_vars(|vars| vars.get_evar("HOSTNAME").map_or("unknown host".into(), |host| host))?;
 							if let Some((hostname, _)) = hostname.split_once('.') {
 								result.push_str(hostname);
 							} else {
-								result.push_str(hostname); // No '.' found, use the full hostname
+								result.push_str(&hostname); // No '.' found, use the full hostname
 							}
 						}
 						's' => {
-							let sh_name = shellenv.get_env_vars().get("SHELL").map_or("rsh", |sh| sh);
-							result.push_str(sh_name);
+							let sh_name = read_vars(|vars| vars.get_evar("SHELL").map_or("rsh".into(), |sh| sh))?;
+							result.push_str(&sh_name);
 						}
 						'u' => {
-							let user = shellenv.get_env_vars().get("USER").map_or("unknown", |user| user);
-							result.push_str(user);
+							let user = read_vars(|vars| vars.get_evar("USER").map_or("unknown".into(), |user| user))?;
+							result.push_str(&user);
 						}
 						'$' => {
-							let uid = shellenv.get_env_vars().get("UID").map_or("0", |uid| uid);
-							match uid {
+							let uid = read_vars(|vars| vars.get_evar("UID").map_or("0".into(), |uid| uid))?;
+							match uid.as_str() {
 								"0" => result.push('#'),
 								_ => result.push('$'),
 							}
@@ -216,7 +215,7 @@ pub fn expand_prompt(shellenv: &ShellEnv) -> String {
 			_ => result.push(c)
 		}
 	}
-	result
+	Ok(result)
 }
 
 pub fn process_ansi_escapes(input: &str) -> String {
@@ -284,23 +283,22 @@ pub fn process_ansi_escapes(input: &str) -> String {
 	result
 }
 
-pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> RshResult<Node> {
+pub fn expand_alias(mut node: Node) -> RshResult<Node> {
 	match node.nd_type {
 		NdType::Command { ref mut argv } | NdType::Builtin { ref mut argv } => {
 			if let Some(cmd_tk) = argv.pop_front() {
-				if let Some(alias_content) = shellenv.get_alias(cmd_tk.text()) {
+				if let Some(alias_content) = read_logic(|log| log.get_alias(cmd_tk.text()))? {
 					let new_argv = take(argv);
-					let mut child_shellenv = shellenv.clone();
-					child_shellenv.mod_flags(|f| *f |= EnvFlags::NO_ALIAS);
+					let env_snap = SavedEnv::get_snapshot()?;
+					write_meta(|meta| meta.mod_flags(|f| *f |= EnvFlags::NO_ALIAS))?;
 					let mut state = ParseState {
-						input: alias_content,
-						shellenv: &child_shellenv,
+						input: alias_content.clone(),
 						tokens: VecDeque::new(),
 						ast: Node::new(),
 					};
 
-					let mut tokenizer = RshTokenizer::new(alias_content);
-					tokenizer.tokenize();
+					let mut tokenizer = RshTokenizer::new(&alias_content);
+					tokenizer.tokenize()?;
 					state.tokens = tokenizer.tokens.into();
 					let mut alias_tokens = state.tokens;
 					// Trim `SOI` and `EOI` tokens
@@ -323,6 +321,7 @@ pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> RshResult<Node> {
 					for redir in node.redirs {
 						state.ast.redirs.push_back(redir.clone())
 					}
+					env_snap.restore_snapshot()?;
 					Ok(state.ast)
 				} else {
 					argv.push_front(cmd_tk);
@@ -336,8 +335,7 @@ pub fn expand_alias(shellenv: &ShellEnv, mut node: Node) -> RshResult<Node> {
 	}
 }
 
-pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
-	trace!("expand(): Starting expansion with token: {:?}", token);
+pub fn expand_token(token: Tk) -> RshResult<VecDeque<Tk>> {
 	let mut working_buffer: VecDeque<Tk> = VecDeque::new();
 	let mut product_buffer: VecDeque<Tk> = VecDeque::new();
 
@@ -352,22 +350,20 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 		let expand_home = token.text().has_unescaped("~");
 		if expand_home {
 			// If this unwrap fails, god help you
-			let home = shellenv.get_variable("HOME").unwrap();
+			let home = read_vars(|vars| vars.get_evar("HOME").unwrap())?;
 			token.wd.text = token.wd.text.replace("~",&home);
 		}
 
 		if !is_glob && !is_brace_expansion {
-			debug!("expanding var for {}",token.text());
 			if token.text().has_unescaped("$") && !token.wd.flags.intersects(WdFlags::FROM_VAR | WdFlags::SNG_QUOTED) {
-				info!("found unescaped dollar in: {}",token.text());
 				if token.text().has_unescaped("$@") {
-					let mut param_tokens = expand_params(shellenv,token);
+					let mut param_tokens = expand_params(token)?;
 					while let Some(param) = param_tokens.pop_back() {
 						working_buffer.push_front(param);
 					}
 					continue
 				}
-				token.wd.text = expand_var(shellenv, token.text().into());
+				token.wd.text = expand_var(token.text().into())?;
 			}
 			if helper::is_brace_expansion(token.text()) || token.text().has_unescaped("$") {
 				working_buffer.push_front(token);
@@ -375,7 +371,7 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 				let expand_home = token.text().has_unescaped("~");
 				if expand_home {
 					// If this unwrap fails, god help you
-					let home = shellenv.get_variable("HOME").unwrap();
+					let home = read_vars(|vars| vars.get_evar("HOME").unwrap())?;
 					token.wd.text = token.wd.text.replace("~",&home);
 				}
 				product_buffer.push_back(token)
@@ -385,7 +381,7 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 			// Perform brace expansion
 			let expanded = expand_braces(token.text().to_string(), VecDeque::new());
 			for mut expanded_token in expanded {
-				expanded_token = expand_var(shellenv, expanded_token);
+				expanded_token = expand_var(expanded_token)?;
 				working_buffer.push_back(
 					Tk {
 						tk_type: TkType::Expanded,
@@ -411,8 +407,8 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 					}
 				);
 			}
-		} else if shellenv.get_alias(token.text()).is_some() {
-			let alias_content = shellenv.get_alias(token.text()).unwrap().split(' ');
+		} else if let Some(alias_content) = read_logic(|log| log.get_alias(token.text()))? {
+			let alias_content = alias_content.split(' ');
 			for word in alias_content {
 				working_buffer.push_back(
 					Tk {
@@ -429,7 +425,7 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 			let expand_home = token.text().has_unescaped("~");
 			if expand_home {
 				// If this unwrap fails, god help you
-				let home = shellenv.get_variable("HOME").unwrap();
+				let home = read_vars(|vars| vars.get_evar("HOME").unwrap())?;
 				token.wd.text = token.wd.text.replace("~",&home);
 			}
 			product_buffer.push_back(token);
@@ -442,7 +438,7 @@ pub fn expand_token(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 		temp_buffer.push_back(elem);
 	});
 	product_buffer.extend(temp_buffer.drain(..));
-	product_buffer
+	Ok(product_buffer)
 }
 
 pub fn clean_escape_chars(token_buffer: &mut VecDeque<Tk>) {
@@ -558,63 +554,73 @@ pub fn expand_amble(amble: String) -> VecDeque<String> {
 	result
 }
 
-pub fn expand_var(shellenv: &ShellEnv, string: String) -> String {
-	let mut left = String::new();
-	let mut right = String::new();
-	let mut chars = string.chars().collect::<VecDeque<char>>();
-	while let Some(ch) = chars.pop_front() {
-		match ch {
-			'\\' => {
-				left.push(ch);
-				left.push(if let Some(ch) = chars.pop_front() { ch } else { break })
-			}
-			'$' => {
-				right.extend(chars.drain(..));
-				break
-			},
-			_ => left.push(ch)
-		}
-	}
-	if right.is_empty() {
-		return string.to_string()
-	}
-	let mut right_chars = right.chars().collect::<VecDeque<char>>();
-	let mut var_name = String::new();
-	while let Some(ch) = right_chars.pop_front() {
-		match ch {
-			_ if ch.is_alphanumeric() => {
-				var_name.push(ch);
-			}
-			'_' => {
-				var_name.push(ch);
-			}
-			'-' | '*' | '?' | '$' | '#' => {
-				var_name.push(ch);
-				break
-			}
-			'{' => continue,
-			'}' => break,
-			_ => {
-				right_chars.push_front(ch);
-				break
-			}
-		}
-	}
-	let right = right_chars.iter().collect::<String>();
+pub fn expand_var(mut string: String) -> RshResult<String> {
+	loop {
+		let mut left = String::new();
+		let mut right = String::new();
+		let mut chars = string.chars().collect::<VecDeque<char>>();
 
-	let value = shellenv.get_variable(&var_name).unwrap_or_default();
-	let expanded = format!("{}{}{}",left,value,right);
-	if expanded.has_unescaped("$") {
-		expand_var(shellenv,expanded)
-	} else {
-		expanded
+		while let Some(ch) = chars.pop_front() {
+			match ch {
+				'\\' => {
+					left.push(ch);
+					if let Some(next_ch) = chars.pop_front() {
+						left.push(next_ch);
+					} else {
+						break;
+					}
+				}
+				'$' => {
+					right.extend(chars.drain(..));
+					break;
+				}
+				_ => left.push(ch),
+			}
+		}
+
+		if right.is_empty() {
+			return Ok(string); // No more variables to expand
+		}
+
+		let mut right_chars = right.chars().collect::<VecDeque<char>>();
+		let mut var_name = String::new();
+		while let Some(ch) = right_chars.pop_front() {
+			match ch {
+				_ if ch.is_alphanumeric() => {
+					var_name.push(ch);
+				}
+				'_' => {
+					var_name.push(ch);
+				}
+				'-' | '*' | '?' | '$' | '#' => {
+					var_name.push(ch);
+					break;
+				}
+				'{' => continue,
+				'}' => break,
+				_ => {
+					right_chars.push_front(ch);
+					break;
+				}
+			}
+		}
+		let right = right_chars.iter().collect::<String>();
+
+		let value = read_vars(|vars| vars.get_string(&var_name).unwrap_or_default())?;
+		let expanded = format!("{}{}{}", left, value, right);
+
+		if expanded.has_unescaped("$") {
+			string = expanded; // Update string and continue the loop for further expansion
+		} else {
+			return Ok(expanded); // All variables expanded
+		}
 	}
 }
 
-fn expand_params(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
+fn expand_params(token: Tk) -> RshResult<VecDeque<Tk>> {
 	let mut expanded_tokens = VecDeque::new();
 	// Get the positional parameter string from shellenv and split it
-	let arg_string = shellenv.get_variable("@").unwrap_or_default();
+	let arg_string = read_vars(|vars| vars.get_param("@").unwrap_or_default())?;
 	let arg_split = arg_string.split(' ');
 
 	// Split the token's text at the first instance of '$@' and make two new tokens
@@ -636,5 +642,5 @@ fn expand_params(shellenv: &ShellEnv, token: Tk) -> VecDeque<Tk> {
 	if !right_token.text().is_empty() {
 		expanded_tokens.push_back(right_token);
 	}
-	expanded_tokens
+	Ok(expanded_tokens)
 }

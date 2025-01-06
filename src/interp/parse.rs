@@ -1,24 +1,24 @@
 use std::collections::{HashMap, VecDeque};
 use bitflags::bitflags;
 use once_cell::sync::Lazy;
-use log::{error,debug,info,trace};
 use std::mem::take;
 
-use crate::event::ShellError;
-use crate::shellenv::{EnvFlags, ShellEnv};
+use crate::event::ShError;
 use crate::interp::token::{RedirType, RshTokenizer, Tk, TkType};
 use crate::RshResult;
 
+use super::helper;
 use super::token::{Redir, WdFlags};
 
 bitflags! {
-	#[derive(Debug,Clone,PartialEq)]
+	#[derive(Debug,Copy,Clone,PartialEq)]
 	pub struct NdFlags: u32 {
 		// General Contexts
-		const VALID_OPERAND      = 0b00000000000000000000000000000001; // Can be a target for redirection
+		const VALID_OPERAND      = 0b00000000000000000000000000000001; // Can be a target for redirection, chains, or pipes
 		const IS_OP              = 0b00000000000000000000000000000010; // Is an operator
-		const COMBINE_OUT        = 0b00000000000000000000000000000100; // Combine stderr and stdout
-		const BACKGROUND         = 0b00000000000000000000000000001000; // Combine stderr and stdout
+		const COMBINE_OUT        = 0b00000000000000000000000000000100;
+		const BACKGROUND         = 0b00000000000000000000000000001000;
+		const IN_PIPE            = 0b00000000000000000000000000010000;
 	}
 }
 
@@ -97,6 +97,7 @@ pub struct Conditional {
 
 #[derive(Debug,Clone,PartialEq)]
 pub struct Node {
+	pub command: Option<Tk>,
 	pub nd_type: NdType,
 	pub span: Span,
 	pub flags: NdFlags,
@@ -106,6 +107,7 @@ pub struct Node {
 impl Node {
 	pub fn new() -> Self {
 		Self {
+			command: None,
 			nd_type: NdType::NullNode,
 			span: Span::new(),
 			flags: NdFlags::empty(),
@@ -114,6 +116,7 @@ impl Node {
 	}
 	pub fn from(deck: VecDeque<Node>,span: Span) -> Self {
 		Self {
+			command: None,
 			nd_type: NdType::Root { deck },
 			span,
 			flags: NdFlags::empty(),
@@ -124,12 +127,13 @@ impl Node {
 	fn boxed(self) -> Box<Self> {
 		Box::new(self)
 	}
-	fn with_flags(&mut self,flags: NdFlags) -> Self {
+	fn with_flags(self,flags: NdFlags) -> Self {
 		Self {
-			nd_type: self.nd_type.clone(),
+			command: self.command,
+			nd_type: self.nd_type,
 			span: self.span,
 			flags,
-			redirs: take(&mut self.redirs)
+			redirs: self.redirs
 		}
 	}
 	pub fn span(&self) -> Span {
@@ -150,12 +154,12 @@ impl Node {
 				}
 				Ok(arg_vec)
 			}
-			_ => Err(ShellError::from_internal("Attempt to call `get_argv()` on a non-command node")),
+			_ => Err(ShError::from_internal("Attempt to call `get_argv()` on a non-command node")),
 		}
 	}
 	pub fn get_redirs(&self) -> RshResult<Vec<Node>> {
 		if !self.flags.contains(NdFlags::VALID_OPERAND) {
-			return Err(ShellError::from_internal("Called get_redirs with an invalid operand"))
+			return Err(ShError::from_internal("Called get_redirs with an invalid operand"))
 		}
 		let mut redir_vec = vec![];
 		for redir in &self.redirs {
@@ -178,7 +182,8 @@ pub enum NdType {
 	Loop { condition: bool, logic: Conditional },
 	Case { input_var: Tk, cases: HashMap<String,Node> },
 	Select { select_var: Tk, opts: VecDeque<Tk>, body: Box<Node> },
-	Pipeline { left: Box<Node>, right: Box<Node>, both: bool },
+	PipelineBranch { left: Box<Node>, right: Box<Node>, both: bool }, // Intermediate value
+	Pipeline { commands: VecDeque<Node>, both: bool }, // After being flattened
 	Chain { left: Box<Node>, right: Box<Node>, op: Box<Node> },
 	BraceGroup { body: Box<Node> },
 	Subshell { body: String, argv: VecDeque<Tk> }, // It's a string because we're going to parse it in a subshell later
@@ -196,9 +201,8 @@ pub enum NdType {
 }
 
 #[derive(Debug,PartialEq,Clone)]
-pub struct ParseState<'a> {
-	pub input: &'a str,
-	pub shellenv: &'a ShellEnv,
+pub struct ParseState {
+	pub input: String,
 	pub tokens: VecDeque<Tk>,
 	pub ast: Node
 }
@@ -279,14 +283,13 @@ impl DescentContext {
 	}
 }
 
-pub fn descend<'a>(input: &'a str, shellenv: &'a ShellEnv) -> RshResult<ParseState<'a>> {
-	info!("Starting descent into parsing with input: {:?}", input);
+pub fn descend(input: &str) -> RshResult<ParseState> {
 	let mut tokenizer = RshTokenizer::new(input);
 	let mut state = ParseState {
-		input,
-		shellenv,
+		input: input.to_string(),
 		tokens: VecDeque::new(),
 		ast: Node {
+			command: None,
 			nd_type: NdType::Root { deck: VecDeque::new() },
 			span: Span::from(0,input.len()),
 			flags: NdFlags::empty(),
@@ -303,18 +306,16 @@ pub fn descend<'a>(input: &'a str, shellenv: &'a ShellEnv) -> RshResult<ParseSta
 }
 
 /// The purpose of this function is mainly just to be an entry point for the parsing logic
-/// It is the only part of this logic that has access to the full input context. ShellError's are
-/// propagated up here and then converted to a complete ShellErrorFull using the context of
+/// It is the only part of this logic that has access to the full input context. ShError's are
+/// propagated up here and then converted to a complete ShErrorFull using the context of
 /// ParseState. This is done because propagating errors upwards is probably
 /// cheaper (and definitely easier) than propagating the raw input text downwards.
 pub fn parse(state: ParseState) -> RshResult<ParseState> {
 	let ctx = DescentContext::new(state.tokens.clone());
 
 	get_tree(ctx).map(|ast| {
-		debug!("Generated AST: {:#?}", ast);
 		ParseState {
 			input: state.input,
-			shellenv: state.shellenv,
 			tokens: state.tokens,
 			ast
 		}
@@ -322,10 +323,10 @@ pub fn parse(state: ParseState) -> RshResult<ParseState> {
 }
 
 pub fn get_tree(ctx: DescentContext) -> RshResult<Node> {
-	trace!("Building AST from tokens: {:?}",ctx.tokens);
 	let span = compute_span(&ctx.tokens.clone());
 	let ctx = parse_linear(ctx,false)?;
 	let tree = Node {
+		command: None,
 		nd_type: NdType::Root { deck: ctx.root },
 		span,
 		flags: NdFlags::empty(),
@@ -338,14 +339,10 @@ pub fn get_tree(ctx: DescentContext) -> RshResult<Node> {
 
 pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentContext> {
 	// First pass just makes nodes without joining at operators
-	info!("Starting linear parsing of tokens...");
 	while let Some(tk) = ctx.next_tk() {
-		trace!("Current tokens: {:?}", ctx.tokens);
 		use crate::interp::token::TkType::*;
 		match tk.class() {
 			If => {
-				info!("Found 'if' token, processing...");
-				info!("tokens: {:?}",ctx.get_tk_texts());
 				ctx = build_if(ctx)?;
 				if once {
 					break
@@ -354,7 +351,6 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 				}
 			}
 			While => {
-				info!("Found 'while' token, processing...");
 				ctx = build_loop(true,ctx)?;
 				if once {
 					break
@@ -363,7 +359,6 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 				}
 			}
 			Until => {
-				info!("Found 'until' token, processing...");
 				ctx = build_loop(false,ctx)?;
 				if once {
 					break
@@ -372,7 +367,6 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 				}
 			}
 			For => {
-				info!("Found 'for' token, processing...");
 				ctx = build_for(ctx)?;
 				if once {
 					break
@@ -381,7 +375,6 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 				}
 			}
 			Case => {
-				info!("Found 'case' token, processing...");
 				ctx = build_case(ctx)?;
 				if once {
 					break
@@ -390,7 +383,6 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 				}
 			}
 			Select => {
-				info!("Found 'select' token, processing...");
 				ctx = build_select(ctx)?;
 				if once {
 					break
@@ -399,13 +391,11 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 				}
 			}
 			Ident | String => {
-				info!("Found command or string token, processing...");
 				ctx.tokens.push_front(tk);
 				ctx = build_command(ctx)?;
 				// Fall through
 			}
 			Subshell => {
-				info!("Found subshell");
 				ctx.tokens.push_front(tk);
 				ctx = build_command(ctx)?;
 			}
@@ -418,21 +408,19 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 				ctx = build_assignment(ctx)?;
 			}
 			SOI => {
-				trace!("Skipping Start of Input token");
 				continue
 			}
 			EOI => {
-				info!("End of Input token encountered, stopping parsing");
 				break;
 			}
 			Do | Done => {
-				return Err(ShellError::from_parse(format!("Found `{}` outside of loop context",tk.text()).as_str(), tk.span()))
+				return Err(ShError::from_parse(format!("Found `{}` outside of loop context",tk.text()).as_str(), tk.span()))
 			}
 			Else | Elif | Then | Fi => {
-				return Err(ShellError::from_parse(format!("Found `{}` outside of `if` context",tk.text()).as_str(), tk.span()))
+				return Err(ShError::from_parse(format!("Found `{}` outside of `if` context",tk.text()).as_str(), tk.span()))
 			}
 			Esac => {
-				return Err(ShellError::from_parse("Found `esac` outside of `case` context", tk.span()))
+				return Err(ShError::from_parse("Found `esac` outside of `case` context", tk.span()))
 			}
 			Redirection { .. } => {
 				ctx.tokens.push_front(tk);
@@ -440,6 +428,7 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 			}
 			Cmdsep => ctx.attach_node(
 				Node {
+					command: None,
 					nd_type: NdType::Cmdsep,
 					span: tk.span(),
 					flags: NdFlags::empty(),
@@ -448,6 +437,7 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 			),
 			LogicAnd => ctx.attach_node(
 				Node {
+					command: None,
 					nd_type: NdType::And,
 					span: tk.span(),
 					flags: NdFlags::IS_OP,
@@ -456,6 +446,7 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 			),
 			LogicOr => ctx.attach_node(
 				Node {
+					command: None,
 					nd_type: NdType::Or,
 					span: tk.span(),
 					flags: NdFlags::IS_OP,
@@ -464,6 +455,7 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 			),
 			Pipe => ctx.attach_node(
 				Node {
+					command: None,
 					nd_type: NdType::Pipe,
 					span: tk.span(),
 					flags: NdFlags::IS_OP,
@@ -472,6 +464,7 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 			),
 			PipeBoth => ctx.attach_node(
 				Node {
+					command: None,
 					nd_type: NdType::PipeBoth,
 					span: tk.span(),
 					flags: NdFlags::IS_OP,
@@ -484,11 +477,9 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 				);
 			}
 		}
-		trace!("Current nodes: {:?}", &ctx.root);
 	}
 
 	ctx = join_at_operators(ctx)?;
-	trace!("Completed linear parsing, nodes: {:?}", &ctx.root);
 	Ok(ctx)
 }
 
@@ -508,7 +499,7 @@ pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
 					target_node.redirs.push_back(node);
 					buffer.push_back(target_node);
 				} else {
-					return Err(ShellError::from_parse("Found this orphaned redirection operator", node.span()))
+					return Err(ShError::from_parse("Found this orphaned redirection operator", node.span()))
 				}
 			}
 			_ => buffer.push_back(node),
@@ -517,71 +508,85 @@ pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	ctx.root.extend(buffer.drain(..));
 
 	// Second pass: Pipeline operators
-	let mut found_one = false;
 	while let Some(node) = ctx.next_node() {
 		match node.nd_type {
 			NdType::Pipe | NdType::PipeBoth => {
-				found_one = true;
 				let both = match node.nd_type {
 					NdType::PipeBoth => true,
 					NdType::Pipe => false,
 					_ => unreachable!()
 				};
-				if let Some(left) = buffer.pop_back() {
-					if let Some(right) = ctx.next_node() {
+				if let Some(mut left) = buffer.pop_back() {
+					if let Some(mut right) = ctx.next_node() {
 						if !check_valid_operand(&left) {
-							return Err(ShellError::from_parse("The left side of this pipeline is invalid", node.span))
+							return Err(ShError::from_parse("The left side of this pipeline is invalid", node.span))
 						}
 						if !check_valid_operand(&right) {
-							return Err(ShellError::from_parse("The right side of this pipeline is invalid", node.span))
+							return Err(ShError::from_parse("The right side of this pipeline is invalid", node.span))
 						}
+						left.flags |= NdFlags::IN_PIPE;
+						right.flags |= NdFlags::IN_PIPE;
 						let left = left.boxed();
 						let right = right.boxed();
 						let pipeline = Node {
-							nd_type: NdType::Pipeline { left, right, both },
+							command: None,
+							nd_type: NdType::PipelineBranch { left, right, both },
 							span: Span::from(0,0),
 							flags: NdFlags::empty(),
 							redirs: VecDeque::new()
 						};
 						buffer.push_back(pipeline);
 					} else {
-						return Err(ShellError::from_parse("This pipeline is missing a right operand", node.span))
+						return Err(ShError::from_parse("This pipeline is missing a right operand", node.span))
 					}
 				} else {
-					return Err(ShellError::from_parse("This pipeline is missing a left operand", node.span))
+					return Err(ShError::from_parse("This pipeline is missing a left operand", node.span))
 				}
 			}
 			NdType::Cmdsep => {
-				if found_one {
-					while !buffer.is_empty() {
-						ctx.root.push_front(buffer.pop_back().unwrap());
-					}
-					break
-				}
+				continue
 			}
 			_ => buffer.push_back(node)
 		}
 	}
+	// Now we will flatten the pipelines from a tree structure into a straight line sequence
+	take(&mut buffer).into_iter().for_each(|node| {
+		let flags = node.flags;
+		let redirs = node.redirs.clone();
+		let span = node.span();
+		if let NdType::PipelineBranch { left, right, both } = node.nd_type {
+			let commands = helper::flatten_pipeline(*left, *right, VecDeque::new());
+			let flattened_pipeline = Node {
+				command: None,
+				nd_type: NdType::Pipeline { commands, both },
+				span,
+				flags,
+				redirs
+			};
+			buffer.push_back(flattened_pipeline);
+		} else {
+			buffer.push_back(node);
+		}
+	});
 	ctx.root.extend(buffer.drain(..));
 
 	// Third pass: Chain operators
-	found_one = false;
 	while let Some(node) = ctx.next_node() {
 		match node.nd_type {
 			NdType::And | NdType::Or => {
-				found_one = true;
 				if let Some(left) = buffer.pop_back() {
 					if let Some(right) = ctx.next_node() {
 						if !check_valid_operand(&left) {
-							return Err(ShellError::from_parse("The left side of this chain is invalid", node.span))
+							return Err(ShError::from_parse("The left side of this chain is invalid", node.span))
 						}
 						if !check_valid_operand(&right) {
-							return Err(ShellError::from_parse("The right side of this chain is invalid", node.span))
+							return Err(ShError::from_parse("The right side of this chain is invalid", node.span))
 						}
 						let left = left.boxed();
 						let right = right.boxed();
 						let op = node.boxed();
 						let chain = Node {
+							command: None,
 							nd_type: NdType::Chain { left, right, op },
 							span: Span::from(0,0),
 							flags: NdFlags::empty(),
@@ -589,19 +594,14 @@ pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
 						};
 						buffer.push_back(chain);
 					} else {
-						return Err(ShellError::from_parse("This chain is missing a right operand", node.span))
+						return Err(ShError::from_parse("This chain is missing a right operand", node.span))
 					}
 				} else {
-					return Err(ShellError::from_parse("This chain is missing a left operand", node.span))
+					return Err(ShError::from_parse("This chain is missing a left operand", node.span))
 				}
 			}
 			NdType::Cmdsep => {
-				if found_one {
-					while !buffer.is_empty() {
-						ctx.root.push_front(buffer.pop_back().unwrap());
-					}
-					break
-				}
+				continue
 			}
 			_ => buffer.push_back(node)
 		}
@@ -659,6 +659,7 @@ pub fn propagate_redirections(mut node: Node) -> RshResult<Node> {
 				else_block = Some(Box::new(propagate_redirections(*else_body)?));
 			}
 			node = Node {
+				command: None,
 				nd_type: NdType::If { cond_blocks: new_cond_blocks, else_block },
 				flags: node.flags,
 				redirs: VecDeque::new(),
@@ -682,6 +683,7 @@ pub fn propagate_redirections(mut node: Node) -> RshResult<Node> {
 			body = Box::new(propagate_redirections(*body)?);
 			let logic = Conditional { condition: cond, body };
 			node = Node {
+				command: None,
 				nd_type: NdType::Loop { condition, logic },
 				flags: node.flags,
 				redirs: VecDeque::new(),
@@ -697,6 +699,7 @@ pub fn propagate_redirections(mut node: Node) -> RshResult<Node> {
 
 			let loop_body = Box::new(propagate_redirections(*loop_body)?);
 			node = Node {
+				command: None,
 				nd_type: NdType::For { loop_vars, loop_arr, loop_body },
 				flags: node.flags,
 				redirs: VecDeque::new(),
@@ -722,6 +725,7 @@ pub fn propagate_redirections(mut node: Node) -> RshResult<Node> {
 			}
 			let cases = new_cases;
 			node = Node {
+				command: None,
 				nd_type: NdType::Case { input_var, cases },
 				flags: node.flags,
 				redirs: VecDeque::new(),
@@ -737,6 +741,7 @@ pub fn propagate_redirections(mut node: Node) -> RshResult<Node> {
 
 			body = Box::new(propagate_redirections(*body)?);
 			node = Node {
+				command: None,
 				nd_type: NdType::Select { select_var, opts, body },
 				flags: node.flags,
 				redirs: VecDeque::new(),
@@ -786,36 +791,48 @@ fn parse_and_attach(mut tokens: VecDeque<Tk>, mut root: VecDeque<Node>) -> RshRe
 }
 
 fn get_conditional(cond_root: VecDeque<Node>, cond_span: Span, body_root: VecDeque<Node>, body_span: Span) -> Conditional {
-	let condition = Node { nd_type: NdType::Root { deck: cond_root }, span: cond_span, flags: NdFlags::empty(), redirs: VecDeque::new() }.boxed();
-	let body = Node { nd_type: NdType::Root { deck: body_root }, span: body_span, flags: NdFlags::empty(), redirs: VecDeque::new() }.boxed();
+	let condition = Node {
+		command: None,
+		nd_type: NdType::Root { deck: cond_root },
+		span: cond_span,
+		flags: NdFlags::empty(),
+		redirs: VecDeque::new()
+	}.boxed();
+	let body = Node {
+		command: None,
+		nd_type: NdType::Root { deck: body_root },
+		span: body_span,
+		flags: NdFlags::empty(),
+		redirs: VecDeque::new()
+	}.boxed();
 	Conditional { condition, body }
 }
 
 pub fn build_redirection(mut ctx: DescentContext) -> RshResult<DescentContext> {
-	let span_start = ctx.mark_start();
 	let redir_tk = ctx.next_tk()
-		.ok_or_else(|| ShellError::from_internal("Called build_redirection with an empty token queue"))?;
+		.ok_or_else(|| ShError::from_internal("Called build_redirection with an empty token queue"))?;
 
 		let span = redir_tk.span();
 
 		let mut redir = if let TkType::Redirection { redir } = redir_tk.class() {
 			redir
 		} else {
-			return Err(ShellError::from_internal(format!("Called build_redirection() with a non-redirection token: {:?}",redir_tk).as_str()))
+			return Err(ShError::from_internal(format!("Called build_redirection() with a non-redirection token: {:?}",redir_tk).as_str()))
 		};
 
 		if redir.fd_target.is_none() && redir.file_target.is_none() {
 			let target = ctx.next_tk()
-				.ok_or_else(|| ShellError::from_parse("Did not find an output for this redirection operator", span))?;
+				.ok_or_else(|| ShError::from_parse("Did not find an output for this redirection operator", span))?;
 
 				if !matches!(target.class(), TkType::Ident | TkType::String) {
-					return Err(ShellError::from_parse(format!("Expected identifier after redirection operator, found this: {}",target.text()).as_str(), span))
+					return Err(ShError::from_parse(format!("Expected identifier after redirection operator, found this: {}",target.text()).as_str(), span))
 				}
 
 				redir.file_target = Some(Box::new(target));
 		}
 
 		let node = Node {
+			command: None,
 			nd_type: NdType::Redirection { redir },
 			span,
 			flags: NdFlags::IS_OP,
@@ -839,16 +856,9 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let mut closed = false;
 
 	let span_start = ctx.mark_start();
-	debug!("Starting build_if, initial tokens: {:?}", ctx.get_tk_texts());
 
 	while let Some(tk) = ctx.next_tk() {
 		let err_span = ctx.mark_start();
-		debug!(
-			"build_if: processing token {:?}, current phase: {:?}, context: {:?}",
-			tk.text(),
-			phase,
-			if_context
-		);
 
 		match tk.class() {
 			_ if OPENERS.contains(&tk.class()) => {
@@ -876,7 +886,6 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				}
 			}
 			TkType::Elif if if_context != TkType::Else => {
-				debug!("build_if: processing 'elif', switching context...");
 				if_context = TkType::Elif;
 				let cond_span = compute_span(&cond_tokens);
 				cond_root = parse_and_attach(take(&mut cond_tokens), cond_root)?;
@@ -887,33 +896,26 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				let logic = get_conditional(take(&mut cond_root), cond_span, take(&mut body_root), body_span);
 				logic_blocks.push_back(logic);
 				phase = Phase::Condition;
-				debug!(
-					"build_if: added logic block, logic_blocks: {:?}, remaining tokens: {:?}",
-					logic_blocks.len(),
-					ctx.get_tk_texts()
-				);
 			}
 			TkType::Then => {
 				if if_context == TkType::Then {
-					return Err(ShellError::from_parse(
+					return Err(ShError::from_parse(
 							"Did not find a condition for this `then` block",
 							Span::from(err_span,ctx.mark_end()))
 					)
 				}
 				if if_context == TkType::Else {
-					return Err(ShellError::from_parse(
+					return Err(ShError::from_parse(
 							"Else blocks do not get a `then` statement; give the body directly after the else keyword",
 							Span::from(err_span,ctx.mark_end()))
 					)
 				}
 				if_context = TkType::Then;
-				debug!("build_if: processing 'then', switching to Body phase");
 				phase = Phase::Body;
 			}
 			TkType::Else => {
-				debug!("build_if: processing 'else', switching context...");
 				if if_context != TkType::Then {
-					return Err(ShellError::from_parse("Was expecting a `then` block, get an else block instead", Span::from(err_span,ctx.mark_end())))
+					return Err(ShError::from_parse("Was expecting a `then` block, get an else block instead", Span::from(err_span,ctx.mark_end())))
 				}
 				if_context = TkType::Else;
 				let cond_span = compute_span(&cond_tokens);
@@ -925,26 +927,16 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				let logic = get_conditional(take(&mut cond_root), cond_span, take(&mut body_root), body_span);
 				logic_blocks.push_back(logic);
 				phase = Phase::Body;
-				debug!(
-					"build_if: added logic block, logic_blocks: {:?}, remaining tokens: {:?}",
-					logic_blocks.len(),
-					ctx.get_tk_texts()
-				);
 			}
 			TkType::Fi => {
 				closed = true;
 				if !matches!(if_context,TkType::Then | TkType::Else) {
-					return Err(ShellError::from_parse("Was expecting a `then` block, get an else block instead", Span::from(err_span,ctx.mark_end())))
+					return Err(ShError::from_parse("Was expecting a `then` block, get an else block instead", Span::from(err_span,ctx.mark_end())))
 				}
-				debug!("build_if: processing 'fi', finalizing if block");
-				debug!("cond tokens: {:?}",cond_tokens);
-				debug!("body tokens: {:?}",body_tokens);
 				if if_context == TkType::Else {
-					debug!("build_if: processing else block...");
 					let else_ctx = DescentContext::new(take(&mut body_tokens));
 					let else_node = get_tree(else_ctx)?.boxed();
 					else_block = Some(else_node);
-					debug!("build_if: else block node created");
 				}
 				if !body_tokens.is_empty() && !cond_tokens.is_empty() {
 					let cond_span = compute_span(&cond_tokens);
@@ -959,11 +951,9 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				break;
 			}
 			_ if phase == Phase::Condition => {
-				debug!("build_if: adding token {:?} to cond_tokens", tk.text());
 				cond_tokens.push_back(tk);
 			}
 			_ if phase == Phase::Body => {
-				debug!("build_if: adding token {:?} to body_tokens", tk.text());
 				body_tokens.push_back(tk);
 			}
 			_ => unreachable!("Unexpected token in build_if: {:?}", tk),
@@ -974,19 +964,17 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let span = Span::from(span_start, span_end);
 
 	if !closed {
-		return Err(ShellError::from_parse("This if statement didn't get an `fi`", span))
+		return Err(ShError::from_parse("This if statement didn't get an `fi`", span))
 	}
 
-	debug!("build_if: constructing final node...");
 	let node = Node {
+		command: None,
 		nd_type: NdType::If { cond_blocks: logic_blocks, else_block },
 		span,
 		flags: NdFlags::VALID_OPERAND,
 		redirs: VecDeque::new()
 	};
-	debug!("created node: {:#?}",node);
 	ctx.attach_node(node);
-	debug!("build_if: node attached, final remaining tokens: {:?}", ctx.get_tk_texts());
 
 	Ok(ctx)
 }
@@ -1006,7 +994,7 @@ pub fn build_for(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		match tk.class() {
 			TkType::In => {
 				if loop_vars.is_empty() {
-					return Err(ShellError::from_parse(
+					return Err(ShError::from_parse(
 							"This for loop didn't get any loop variables",
 							Span::from(span_start,ctx.mark_end()))
 					)
@@ -1018,7 +1006,7 @@ pub fn build_for(mut ctx: DescentContext) -> RshResult<DescentContext> {
 					loop_arr.pop_back();
 				}
 				if loop_arr.is_empty() {
-					return Err(ShellError::from_parse(
+					return Err(ShError::from_parse(
 							"This for loop got an empty array",
 							Span::from(span_start,ctx.mark_end()))
 					)
@@ -1028,13 +1016,13 @@ pub fn build_for(mut ctx: DescentContext) -> RshResult<DescentContext> {
 			}
 			TkType::Done => {
 				if phase == Phase::Vars {
-					return Err(ShellError::from_parse(
+					return Err(ShError::from_parse(
 							"This for loop has an unterminated variable definition",
 							Span::from(span_start,ctx.mark_end()))
 					)
 				}
 				if phase == Phase::Array {
-					return Err(ShellError::from_parse(
+					return Err(ShError::from_parse(
 							"This for loop has an unterminated array definition",
 							Span::from(span_start,ctx.mark_end()))
 					)
@@ -1073,7 +1061,7 @@ pub fn build_for(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let span = Span::from(span_start,span_end);
 
 	if !closed {
-		return Err(ShellError::from_parse(
+		return Err(ShError::from_parse(
 				"This loop is missing a `done`.",
 				span)
 		)
@@ -1086,6 +1074,7 @@ pub fn build_for(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let body_span = Span::from(body_start,body_end);
 	let loop_body = Node::from(body_root,body_span).boxed();
 	let node = Node {
+		command: None,
 		nd_type: NdType::For { loop_vars, loop_arr, loop_body },
 		span,
 		flags: NdFlags::VALID_OPERAND,
@@ -1110,13 +1099,13 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> RshResult<Descent
 		match tk.class() {
 			TkType::Do => {
 				if cond_tokens.is_empty() {
-					return Err(ShellError::from_parse("Did not find a condition for this loop", tk.span()))
+					return Err(ShError::from_parse("Did not find a condition for this loop", tk.span()))
 				}
 				phase = Phase::Body
 			}
 			TkType::Done => {
 				if body_tokens.is_empty() {
-					return Err(ShellError::from_parse("Did not find a body for this loop", tk.span()))
+					return Err(ShError::from_parse("Did not find a body for this loop", tk.span()))
 				}
 				closed = true;
 				break
@@ -1160,7 +1149,7 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> RshResult<Descent
 	let span = Span::from(span_start,span_end);
 
 	if !closed {
-		return Err(ShellError::from_parse(
+		return Err(ShError::from_parse(
 				"This loop is missing a `done`",
 				span)
 		)
@@ -1177,6 +1166,7 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> RshResult<Descent
 	let logic = get_conditional(cond_root, cond_span, body_root, body_span);
 
 	let node = Node {
+		command: None,
 		nd_type: NdType::Loop { condition: loop_condition, logic },
 		span,
 		flags: NdFlags::VALID_OPERAND,
@@ -1201,7 +1191,6 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let span_start = ctx.mark_start();
 
 	while let Some(tk) = ctx.next_tk() {
-		debug!("found token in build_case: {:?}",tk);
 		match tk.class() {
 			TkType::In => {
 				if input_var.is_some() {
@@ -1210,7 +1199,7 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 					}
 					phase = Phase::Condition;
 				} else {
-					return Err(ShellError::from_parse(
+					return Err(ShError::from_parse(
 							"Did not find a variable for this case statement",
 							tk.span(),
 					));
@@ -1225,7 +1214,7 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 					cases.insert(block_string.clone(), block_node);
 				}
 				if cases.is_empty() {
-					return Err(ShellError::from_parse(
+					return Err(ShError::from_parse(
 							"Did not find any cases for this case statement",
 							tk.span(),
 					));
@@ -1238,7 +1227,7 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				if block_string.is_empty() {
 					block_string = tk.text().trim().to_string();
 				} else {
-					return Err(ShellError::from_parse(
+					return Err(ShError::from_parse(
 							"Expected only one variable in case statement",
 							tk.span(),
 					));
@@ -1253,7 +1242,7 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 			}
 			_ if phase == Phase::Body => {
 				if block_string.is_empty() {
-					return Err(ShellError::from_parse(
+					return Err(ShError::from_parse(
 							format!("Did not find a pattern for this case block: {}",tk.text()).as_str(),
 							tk.span(),
 					));
@@ -1273,7 +1262,7 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				}
 			}
 			_ => {
-				return Err(ShellError::from_parse("Something weird happened in this case statement", tk.span()))
+				return Err(ShError::from_parse("Something weird happened in this case statement", tk.span()))
 			}
 		}
 	}
@@ -1282,14 +1271,14 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let span = Span::from(span_start, span_end);
 
 	if !closed {
-		return Err(ShellError::from_parse(
+		return Err(ShError::from_parse(
 				"This case statement is missing an `esac`",
 				span)
 		)
 	}
 
 	if input_var.is_none() {
-		return Err(ShellError::from_parse(
+		return Err(ShError::from_parse(
 				"Did not find a variable for this case statement",
 				span,
 		));
@@ -1297,6 +1286,7 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 
 	let input_var = input_var.unwrap();
 	let node = Node {
+		command: None,
 		nd_type: NdType::Case { input_var, cases },
 		span,
 		flags: NdFlags::empty(),
@@ -1310,7 +1300,6 @@ pub fn build_select(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	// TODO: figure out a way to get 'in' to actually be a keyword
 	// Fix the logic in general so this code doesn't have to use awkward work arounds
 	let mut phase = Phase::Condition;
-	trace!("entered build_select with these tokens: {:?}",ctx.tokens);
 
 	let mut select_var: Option<Tk> = None;
 	let mut opts: VecDeque<Tk> = VecDeque::new();
@@ -1333,13 +1322,13 @@ pub fn build_select(mut ctx: DescentContext) -> RshResult<DescentContext> {
 			}
 			TkType::Done => {
 				if select_var.is_none() {
-					return Err(ShellError::from_parse("Did not find a variable for this select statement", tk.span()))
+					return Err(ShError::from_parse("Did not find a variable for this select statement", tk.span()))
 				}
 				if opts.is_empty() {
-					return Err(ShellError::from_parse("Did not find any options for this select statement", tk.span()))
+					return Err(ShError::from_parse("Did not find any options for this select statement", tk.span()))
 				}
 				if body_tokens.is_empty() {
-					return Err(ShellError::from_parse("This select statement has an empty body", tk.span()))
+					return Err(ShError::from_parse("This select statement has an empty body", tk.span()))
 				}
 				body_root = parse_and_attach(take(&mut body_tokens), body_root)?;
 				closed = true;
@@ -1377,7 +1366,7 @@ pub fn build_select(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let span = Span::from(span_start,span_end);
 
 	if !closed {
-		return Err(ShellError::from_parse(
+		return Err(ShError::from_parse(
 				"This select statement is missing a `done`",
 				span)
 		)
@@ -1387,13 +1376,14 @@ pub fn build_select(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		body_root = parse_and_attach(take(&mut body_tokens), body_root)?;
 	}
 	if select_var.is_none() {
-		return Err(ShellError::from_parse("Did not find a variable for this select statement", span))
+		return Err(ShError::from_parse("Did not find a variable for this select statement", span))
 	}
 	let select_var = select_var.unwrap();
 	let body_end = ctx.mark_end();
 	let body_span = Span::from(body_start,body_end);
 	let body = Node::from(body_root,body_span).boxed();
 	let node = Node {
+		command: None,
 		nd_type: NdType::Select { select_var, opts, body },
 		span,
 		flags: NdFlags::VALID_OPERAND,
@@ -1414,16 +1404,17 @@ pub fn build_func_def(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		let body = body_tk.text();
 		let mut tokenizer = RshTokenizer::new(body);
 		let mut state = ParseState {
-			input: body,
-			shellenv: &ShellEnv::new(EnvFlags::NO_RC),
+			input: body.into(),
 			tokens: VecDeque::new(),
 			ast: Node::new()
 		};
+
 		tokenizer.tokenize();
 		state.tokens = tokenizer.tokens.into();
 		let state = parse(state)?;
 		let func_tree = state.ast.boxed();
 		let node = Node {
+			command: Some(def.clone()),
 			nd_type: NdType::FuncDef { name: name.to_string(), body: func_tree },
 			span: def.span(),
 			flags: NdFlags::empty(),
@@ -1441,6 +1432,7 @@ pub fn build_assignment(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		let (var, val) = ass.text().split_once('=').unwrap();
 		let span = ass.span();
 		let node = Node {
+			command: None,
 			nd_type: NdType::Assignment {
 				name: var.to_string(),
 				value: Some(val.to_string()),
@@ -1474,11 +1466,9 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	};
 
 	while let Some(mut tk) = ctx.next_tk() {
-		info!("found potential arg: {}",tk.text());
 
 		match tk.class() {
 			TkType:: PipeBoth | TkType::Cmdsep | TkType::LogicAnd | TkType::LogicOr | TkType::Pipe => {
-				info!("build_command breaking on: {:?}", tk);
 				ctx.tokens.push_front(tk);
 				while let Some(redir) = held_redirs.pop_back() {
 					// Push redirections back onto the queue, at the front
@@ -1520,8 +1510,7 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				break
 			}
 			_ => {
-				error!("ran into EOI while building command, with these tokens: {:?}",ctx.get_tk_texts());
-				return Err(ShellError::from_parse(
+				return Err(ShError::from_parse(
 						format!("Unexpected token: {:?}", tk).as_str(),
 						tk.span(),
 				));
@@ -1529,12 +1518,13 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		}
 	}
 
-	debug!("returning from build_command with tokens: {:?}", ctx.tokens);
 
+	let command = argv.front().cloned();
 	let span = compute_span(&argv);
 	let mut node = match cmd_type {
 		CmdType::Command => {
 			Node {
+				command,
 				nd_type: NdType::Command { argv },
 				span,
 				flags: NdFlags::VALID_OPERAND,
@@ -1543,6 +1533,7 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		}
 		CmdType::Builtin => {
 			Node {
+				command,
 				nd_type: NdType::Builtin { argv },
 				span,
 				flags: NdFlags::VALID_OPERAND,
@@ -1551,6 +1542,7 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		}
 		CmdType::Subshell => {
 			Node {
+				command: None,
 				nd_type: NdType::Subshell { body: cmd.text().into(), argv },
 				span,
 				flags: NdFlags::VALID_OPERAND,
@@ -1561,8 +1553,6 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	if background {
 		node.flags |= NdFlags::BACKGROUND
 	}
-	debug!("attaching node: {:?}",node);
 	ctx.attach_node(node);
-	debug!("ast state: {:?}",ctx.root);
 	Ok(ctx)
 }
