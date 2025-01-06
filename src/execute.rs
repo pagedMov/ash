@@ -1,10 +1,18 @@
 use std::{collections::{HashMap, VecDeque}, ffi::CString, fmt::{self, Display}, mem::take, os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd}, path::Path, sync::{mpsc::{Receiver, Sender}, Arc}};
 
 use libc::{memfd_create, MFD_CLOEXEC};
-use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode}, unistd::{close, dup, dup2, execvpe, pipe, tcsetpgrp, Pid}, NixPath};
+use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode}, unistd::{close, dup, dup2, execve, execvpe, pipe, tcsetpgrp, Pid}, NixPath};
 use std::sync::Mutex;
 
-use crate::{event::{ShError, ShEvent}, interp::{expand, parse::{self, NdFlags, NdType, Node, Span}, token::{Redir, RedirType, Tk, WdFlags}}, shellenv::{read_logic, read_meta, read_vars}, RshResult};
+use crate::{builtin, event::{ShError, ShEvent}, interp::{expand, helper::{self, VecDequeExtension}, parse::{self, NdFlags, NdType, Node, Span}, token::{Redir, RedirType, Tk, WdFlags}}, shellenv::{read_logic, read_meta, read_vars, write_logic, write_vars, SavedEnv}, RshResult};
+
+macro_rules! node_operation {
+    ($node_type:path { $($field:tt)* }, $node:expr, $node_op:block) => {
+			if let $node_type { $($field)* } = $node.nd_type {
+				$node_op
+			} else { unreachable!() }
+    };
+}
 
 macro_rules! fork_instruction {
 	(
@@ -562,6 +570,230 @@ fn traverse_root(mut node: Node, break_condition: Option<bool>, io: ProcIO) -> R
 	Ok(last_status)
 }
 
+fn handle_func_def(node: Node) -> RshResult<RshWait> {
+	let last_status = RshWait::new();
+	node_operation!(NdType::FuncDef { name, body }, node, {
+		write_logic(|l| l.new_func(&name, *body.clone()))?;
+		Ok(last_status)
+	})
+}
+
+fn handle_case(node: Node, io: ProcIO) -> RshResult<RshWait> {
+	let span = node.span();
+	node_operation!(NdType::Case { input_var, cases }, node, {
+		for case in cases {
+			let (pat, body) = case;
+			if pat == input_var.text() {
+				return traverse_root(body.clone(), None, io)
+			}
+		}
+		Ok(RshWait::Fail { code: 1, cmd: Some("case".into()) })
+	})
+}
+
+fn handle_for(node: Node,io: ProcIO) -> RshResult<RshWait> {
+	let mut last_status = RshWait::new();
+	let body_io = ProcIO::from(None, io.stdout, io.stderr);
+	let redirs = node.get_redirs()?;
+	handle_redirs(redirs.into())?;
+
+	node_operation!(NdType::For { loop_vars, mut loop_arr, loop_body}, node, {
+		let var_count = loop_vars.len();
+		let mut var_index = 0;
+		let mut iteration_count = 0;
+
+		let mut arr_buffer = VecDeque::new();
+		while let Some(token) = loop_arr.pop_front() {
+			let mut expanded = expand::expand_token(token)?;
+			while let Some(exp_token) = expanded.pop_front() {
+				arr_buffer.push_back(exp_token);
+			}
+		}
+		loop_arr.extend(arr_buffer.drain(..));
+
+		while !loop_arr.is_empty() {
+			let current_val = loop_arr.pop_front().unwrap().text().to_string();
+
+			let current_var = loop_vars[var_index].text().to_string();
+			write_vars(|v| v.set_string(current_var, current_val))?;
+
+			iteration_count += 1;
+			var_index = iteration_count % var_count;
+
+			last_status = traverse_root(*loop_body.clone(), None, body_io.clone())?;
+		}
+	});
+
+	Ok(last_status)
+}
+
+fn handle_loop(node: Node, io: ProcIO) -> RshResult<RshWait> {
+	let mut last_status = RshWait::new();
+	let cond_io = ProcIO::from(io.stdin, None, None);
+	let body_io = ProcIO::from(None, io.stdout, io.stderr);
+
+	node_operation!(NdType::Loop { condition, logic }, node, {
+		// Idea: try turning cond and body into Mutexes or RwLocks to avoid excessive cloning in the loop
+		// ProcIO already uses Arc<Mutex> so cloning should be pretty cheap
+		let cond = *logic.condition;
+		let body = *logic.body;
+		loop {
+			let condition_status = traverse_root(cond.clone(), Some(condition),cond_io.clone())?;
+
+			match condition {
+				true => {
+					if !matches!(condition_status,RshWait::Success) {
+						break
+					}
+				}
+				false => {
+					if matches!(condition_status,RshWait::Success) {
+						break
+					}
+				}
+			}
+
+			last_status = traverse_root(body.clone(), None, body_io.clone())?;
+		}
+	});
+
+	Ok(last_status)
+}
+
+fn handle_if(node: Node, io: ProcIO) -> RshResult<RshWait> {
+	let mut last_status = RshWait::new();
+	let cond_io = ProcIO::from(io.stdin,None,None);
+	let body_io = ProcIO::from(None,io.stdout,io.stderr);
+
+	node_operation!(NdType::If { mut cond_blocks, else_block }, node, {
+		while let Some(block) = cond_blocks.pop_front() {
+			let cond = *block.condition;
+			let body = *block.body;
+			last_status = traverse_root(cond, Some(false), cond_io.clone())?;
+			if let RshWait::Success = last_status {
+				return traverse_root(body, None, body_io.clone())
+			}
+		}
+		if let Some(block) = else_block {
+			return traverse_root(*block, None, body_io)
+		}
+	});
+	Ok(last_status)
+}
+
+fn handle_chain(node: Node) -> RshResult<RshWait> {
+	let mut last_status = RshWait::new();
+
+	node_operation!(NdType::Chain { left, right, op }, node, {
+		last_status = traverse(*left, ProcIO::new())?;
+		if last_status == RshWait::Success {
+			if let NdType::And = op.nd_type {
+				last_status = traverse(*right,ProcIO::new())?;
+			}
+		} else if let NdType::Or = op.nd_type {
+			last_status = traverse(*right,ProcIO::new())?;
+		}
+	});
+	Ok(last_status)
+}
+
+fn handle_assignment(node: Node) -> RshResult<RshWait> {
+	node_operation!(NdType::Assignment { name, value }, node, {
+		let value = value.unwrap_or_default();
+		write_vars(|v| v.set_string(name, value))?;
+	});
+	Ok(RshWait::Success)
+}
+
+fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
+	let argv = expand::expand_arguments(&mut node)?;
+	match argv.first().unwrap().text() {
+		"echo" => builtin::echo(node, io),
+		"set" => builtin::set_or_unset(node, true),
+		"jobs" => builtin::jobs(node, io),
+		"fg" => builtin::fg(node, io),
+		"unset" => builtin::set_or_unset(node, false),
+		"source" => builtin::source(node),
+		"cd" => builtin::cd(node),
+		"pwd" => builtin::pwd(node.span()),
+		"alias" => builtin::alias(node),
+		"export" => builtin::export(node),
+		"[" | "test" => builtin::test(node.get_argv()?.into()),
+		"builtin" => {
+			// This one allows you to safely wrap builtins in aliases/functions
+			if let NdType::Builtin { mut argv } = node.nd_type {
+				argv.pop_front();
+				node.nd_type = NdType::Builtin { argv };
+				handle_builtin(node, io)
+			} else { unreachable!() }
+		}
+		_ => unimplemented!("found this builtin: {}",argv[0].text())
+	}
+}
+
+fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
+	expand::expand_arguments(&mut node)?;
+	let redirs = node.redirs;
+	let snapshot = SavedEnv::get_snapshot()?;
+	write_vars(|v| v.reset_params())?;
+	node_operation!(NdType::Subshell { mut body, mut argv }, node, {
+		body = body.trim().to_string();
+		let mut c_argv = vec![CString::new("anonymous_subshell").unwrap()];
+		while let Some(tk) = argv.pop_front() {
+			let c_arg = CString::new(tk.text()).unwrap();
+			c_argv.push(c_arg);
+		}
+		if !body.starts_with("#!") {
+			let interpreter = std::env::current_exe().unwrap();
+			let mut shebang = "#!".to_string();
+			shebang.push_str(interpreter.to_str().unwrap());
+			shebang.push('\n');
+			shebang.push_str(&body);
+			body = shebang;
+		} else if body.starts_with("#!") && !body.contains('/') {
+			let mut command = String::new();
+			let mut body_chars = body.chars().collect::<VecDeque<char>>();
+			body_chars.pop_front(); body_chars.pop_front();
+
+			while let Some(ch) = body_chars.pop_front() {
+				if matches!(ch, ' ' | '\t' | '\n' | ';') {
+					while body_chars.front().is_some_and(|ch| matches!(ch, ' ' | '\t' | '\n' | ';')) {
+						body_chars.pop_front();
+					}
+					body = body_chars.iter().collect::<String>();
+					break
+				}
+			}
+			if let Some(path) = helper::which(&command) {
+				let path = format!("{}{}{}","#!",path,'\n');
+				body = format!("{}{}",path,body);
+			}
+		}
+		// Subshell step 1: Create a memfd
+		let memfd = RustFd::new_memfd("anonymous_subshell", true)?;
+		memfd.write(body.as_bytes())?;
+		io.backup_fildescs()?;
+		io.do_plumbing()?;
+
+		fork_instruction!(io,node,
+			child => {
+				let mut open_fds: VecDeque<RustFd> = VecDeque::new();
+				if !redirs.is_empty() {
+					open_fds.extend(handle_redirs(redirs)?);
+				}
+				let fd_path = format!("/proc/self/fd/{}", memfd);
+				let fd_path = CString::new(fd_path).unwrap();
+				let env = read_vars(|v| v.borrow_evars().clone())?;
+				let env = env.iter().map(|(k,v)| CString::new(format!("{}={}",k,v).as_str()).unwrap()).collect::<Vec<CString>>();
+				execve(&fd_path, &c_argv, &env);
+			},
+			parent => { /* Do nothing */ }
+		);
+	});
+
+	Ok(RshWait::Success)
+}
+
 fn handle_command(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 	let argv = expand::expand_arguments(&mut node)?;
 	let argv = argv.iter().map(|arg| CString::new(arg.text()).unwrap()).collect::<Vec<CString>>();
@@ -592,7 +824,7 @@ fn handle_command(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 			let Err(_) = execvpe(&command,&argv,&envp);
 			std::process::exit(127);
 		},
-		parent => { println!("parent process") }
+		parent => { /* Do Nothing */ }
 	)
 }
 

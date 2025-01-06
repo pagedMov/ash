@@ -471,7 +471,7 @@ pub fn alias(node: Node) -> RshResult<RshWait> {
 	Ok(RshWait::Success )
 }
 
-pub async fn cd(node: Node) -> RshResult<RshWait> {
+pub fn cd(node: Node) -> RshResult<RshWait> {
 	let mut argv = node
 		.get_argv()?
 		.iter()
@@ -491,7 +491,7 @@ pub async fn cd(node: Node) -> RshResult<RshWait> {
 	Ok(RshWait::Success )
 }
 
-pub fn fg(node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
+pub fn fg(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 	Ok(RshWait::Success )
 }
 
@@ -587,7 +587,7 @@ pub fn export(node: Node) -> RshResult<RshWait> {
 	} else { unreachable!() }
 }
 
-pub fn jobs(node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
+pub fn jobs(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
 	argv.pop_front();
 	let mut flags = JobFlags::empty();
@@ -614,7 +614,7 @@ pub fn jobs(node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
 	Ok(RshWait::Success )
 }
 
-pub fn echo(node: Node, mut io: ProcIO, in_pipe: bool) -> RshResult<RshWait> {
+pub fn echo(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 	let mut flags = EchoFlags::empty();
 	let span = node.span();
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();

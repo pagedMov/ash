@@ -10,37 +10,11 @@ use crate::{event::{ShError, ShEvent}, execute::RshWait, shellenv::{read_jobs, w
 
 pub struct SignalListener {
 	outbox: mpsc::Sender<ShEvent>,
-	sigint: Signal,
-	sigio: Signal,
-	sigpipe: Signal,
-	sigtstp: Signal,
-	sigquit: Signal,
-	sigterm: Signal,
-	sigchild: Signal,
-	sighup: Signal,
-	sigwinch: Signal,
-	sigusr1: Signal,
-	sigusr2: Signal,
 }
 
 impl SignalListener {
 	pub fn new(outbox: mpsc::Sender<ShEvent>) -> Self {
-		Self {
-			// Signal listeners
-			// TODO: figure out what to do instead of unwrapping
-			outbox,
-			sigint: tokio::signal::unix::signal(SignalKind::interrupt()).unwrap(),
-			sigio: tokio::signal::unix::signal(SignalKind::io()).unwrap(),
-			sigpipe: tokio::signal::unix::signal(SignalKind::pipe()).unwrap(),
-			sigtstp: tokio::signal::unix::signal(SignalKind::from_raw(20)).unwrap(),
-			sigquit: tokio::signal::unix::signal(SignalKind::quit()).unwrap(),
-			sigterm: tokio::signal::unix::signal(SignalKind::terminate()).unwrap(),
-			sigchild: tokio::signal::unix::signal(SignalKind::child()).unwrap(),
-			sighup: tokio::signal::unix::signal(SignalKind::hangup()).unwrap(),
-			sigwinch: tokio::signal::unix::signal(SignalKind::window_change()).unwrap(),
-			sigusr1: tokio::signal::unix::signal(SignalKind::user_defined1()).unwrap(),
-			sigusr2: tokio::signal::unix::signal(SignalKind::user_defined2()).unwrap(),
-		}
+		Self { outbox, }
 	}
 
 pub fn signal_listen(&self) -> std::io::Result<()> {

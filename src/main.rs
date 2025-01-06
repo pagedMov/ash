@@ -28,7 +28,6 @@ pub mod shellenv;
 pub mod interp;
 pub mod builtin;
 pub mod comp;
-pub mod debug;
 pub mod signal;
 
 use std::{env, fs::File, io::Read, path::PathBuf, sync::mpsc, thread};
@@ -70,13 +69,7 @@ async fn main() {
 			let prompt_dispatch = PromptDispatcher::new(prompt_rx, event_loop_inbox.clone());
 			let exec_dispatch = ExecDispatcher::new(exec_rx, event_loop_inbox.clone());
 			let signal_listener = SignalListener::new(event_loop_inbox.clone());
-
-			let signal_handle = thread::Builder::new()
-				.name("signal_loop".into())
-				.spawn(move || {
-					signal_listener.signal_listen();
-				})
-				.unwrap();
+			signal_listener.signal_listen().unwrap();
 
 			let event_loop_handle = thread::Builder::new()
 					.name("event_loop".into())

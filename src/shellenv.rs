@@ -373,6 +373,9 @@ impl VarTable {
 	pub fn set_param(&mut self, key: String, value: String) {
 		self.params.insert(key, value);
 	}
+	pub fn reset_params(&mut self) {
+		self.params.clear();
+	}
 
 	// Getters and setters for `strings`
 	pub fn get_string(&self, key: &str) -> Option<String> {
