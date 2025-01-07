@@ -16,13 +16,12 @@ use crate::execute::{ProcIO, RshWait, RustFd};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk};
-use crate::shellenv::{self, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, JobFlags };
+use crate::shellenv::{self, read_logic, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, JobFlags };
 use crate::event::ShError;
 use crate::RshResult;
 
-pub const BUILTINS: [&str; 14] = [
-	"echo", "set", "shift", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node",
-	"exec", "source", "wait",
+pub const BUILTINS: [&str; 23] = [
+	"echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "wait",
 ];
 
 bitflags! {
@@ -459,7 +458,6 @@ pub fn test(mut argv: VecDeque<Tk>) -> RshResult<RshWait> {
 }
 
 pub fn alias(node: Node) -> RshResult<RshWait> {
-	dbg!("arrived in alias()");
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front();
 	while let Some(arg) = argv.pop_front() {
@@ -467,10 +465,24 @@ pub fn alias(node: Node) -> RshResult<RshWait> {
 			return Err(ShError::from_syntax(&format!("Expected an assignment pattern in alias args, got {}",arg.text()), arg.span()))
 		}
 		let (alias,value) = arg.text().split_once('=').unwrap();
-		write_logic(|log| log.new_alias(alias, value.to_string()))?;
+		let value = value.trim_matches(['"','\'']);
+		write_logic(|l| l.new_alias(alias, value.to_string()))?;
 	}
-	dbg!("exiting alias");
 	Ok(RshWait::Success )
+}
+
+pub fn unalias(node: Node) -> RshResult<RshWait> {
+	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
+	argv.pop_front();
+	while let Some(arg) = argv.pop_front() {
+		let alias = arg.text();
+		if read_logic(|l| l.get_alias(alias))?.is_some() {
+			write_logic(|l| l.remove_alias(alias))?;
+		} else {
+			eprintln!("Alias not found for `{}`",alias)
+		}
+	}
+	Ok(RshWait::Success)
 }
 
 pub fn cd(node: Node) -> RshResult<RshWait> {

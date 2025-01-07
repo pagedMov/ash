@@ -35,7 +35,7 @@ use std::{env, fs::File, io::Read, path::PathBuf, sync::mpsc::{self, Receiver, S
 use event::{EventLoop, ShError, ShEvent};
 use execute::{traverse_ast, ExecDispatcher, RshWait};
 use interp::parse::{descend, Span};
-use nix::sys::signal::{signal, SigHandler, Signal::SIGTTOU};
+use nix::sys::signal::{signal, SigHandler, Signal::{SIGTTIN, SIGTTOU}};
 use once_cell::sync::{Lazy, OnceCell};
 use prompt::PromptDispatcher;
 use shellenv::{read_vars, write_meta, write_vars, EnvFlags};
@@ -54,7 +54,15 @@ async fn main() {
 
 	// Ignore SIGTTOU
 	unsafe { signal(SIGTTOU, SigHandler::SigIgn).unwrap() };
-	println!("we new now");
+	unsafe { signal(SIGTTIN, SigHandler::SigIgn).unwrap() };
+
+	let (exec_tx,exec_rx) = mpsc::channel();
+	let (prompt_tx,prompt_rx) = mpsc::channel();
+	let event_loop = EventLoop::new(exec_tx,prompt_tx.clone());
+	GLOBAL_EVENT_CHANNEL.set(event_loop.sender.clone()).unwrap();
+	let prompt_dispatch = PromptDispatcher::new(prompt_rx);
+	let exec_dispatch = ExecDispatcher::new(exec_rx);
+	let signal_listener = SignalListener::new();
 
 	if args[0].starts_with('-') {
 		// TODO: handle unwrap
@@ -62,16 +70,16 @@ async fn main() {
 		let path = PathBuf::from(format!("{}/.rsh_profile",home));
 		shellenv::source_file(path).unwrap();
 	}
+	if !args.contains(&"--no-rc".into()) {
+		let home = read_vars(|vars| vars.get_evar("HOME")).unwrap().unwrap();
+		let path = PathBuf::from(format!("{}/.rshrc",home));
+		if let Err(e) = shellenv::source_file(path) {
+			eprintln!("Failed to source rc file: {:?}",e);
+		}
+	}
 	let result = match args.len() {
-		1 => {
+		1 => { // interactive
 			write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::INTERACTIVE)).unwrap();
-			let (exec_tx,exec_rx) = mpsc::channel();
-			let (prompt_tx,prompt_rx) = mpsc::channel();
-			let event_loop = EventLoop::new(exec_tx,prompt_tx.clone());
-			GLOBAL_EVENT_CHANNEL.set(event_loop.sender.clone().into()).unwrap();
-			let prompt_dispatch = PromptDispatcher::new(prompt_rx);
-			let exec_dispatch = ExecDispatcher::new(exec_rx);
-			let signal_listener = SignalListener::new();
 			signal_listener.signal_listen().unwrap();
 
 			let event_loop_handle = thread::Builder::new()

@@ -1,14 +1,14 @@
 use std::{collections::{HashMap, VecDeque}, ffi::CString, fmt::{self, Display}, mem::take, os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd}, path::Path, sync::{mpsc::{Receiver, Sender}, Arc}};
 
 use libc::{memfd_create, MFD_CLOEXEC};
-use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode}, unistd::{close, dup, dup2, execve, execvpe, pipe, tcsetpgrp, Pid}, NixPath};
+use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, pipe, tcsetpgrp, Pid}, NixPath};
 use std::sync::Mutex;
 
 use crate::{builtin, event::{self, ShError, ShEvent}, interp::{expand, helper::{self, VecDequeExtension}, parse::{self, NdFlags, NdType, Node, Span}, token::{Redir, RedirType, Tk, WdFlags}}, shellenv::{self, read_logic, read_meta, read_vars, write_logic, write_vars, SavedEnv}, RshResult, GLOBAL_EVENT_CHANNEL};
 
 macro_rules! node_operation {
 	($node_type:path { $($field:tt)* }, $node:expr, $node_op:block) => {
-		if let $node_type { $($field)* } = $node.nd_type {
+		if let $node_type { $($field)* } = $node.nd_type.clone() {
 			$node_op
 		} else { unreachable!() }
 	};
@@ -21,29 +21,40 @@ macro_rules! fork_instruction {
 		child => $child_instr:block,
 		parent => $parent_instr:block
 	) => {{
-		use nix::unistd::{fork, ForkResult, setpgid, tcsetpgrp};
+		#![allow(unreachable_code)]
+		use nix::unistd::{getpid, fork, ForkResult, setpgid};
+		use nix::sys::wait::{waitpid, WaitStatus};
 		use shellenv::write_meta;
+
+		let mut status = RshWait::new();
 
 		// Perform initial setup for I/O redirection and plumbing
 		$io.backup_fildescs()?;
 		$io.do_plumbing()?;
 
+		let cmd = if let NdType::Command { argv } = &$node.nd_type {
+			if $node.flags.contains(NdFlags::FUNCTION) {
+				None
+			} else {
+				Some(argv.front().unwrap().text().to_string())
+			}
+		} else { None };
+
 		if $node.flags.contains(NdFlags::IN_PIPE) {
 			$child_instr;
-			std::process::exit(0);
 		}
 
 		// Handle background process flag
 		if $node.flags.contains(NdFlags::BACKGROUND) {
+			write_meta(|m| m.add_child())?;
 			match unsafe { fork() } {
 				Ok(ForkResult::Child) => {
 					$child_instr;
-					std::process::exit(127);
 				}
-				Ok(ForkResult::Parent { child }) => {
+				Ok(ForkResult::Parent { child: _ }) => {
+					write_meta(|m| m.add_child())?;
 					// Don't wait for background processes in the parent
-					setpgid(child, child).map_err(|_| ShError::from_io())?;
-					unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0),child) }.unwrap();
+					$parent_instr;
 				}
 				Err(_) => Err(ShError::from_io())?,
 			}
@@ -52,13 +63,28 @@ macro_rules! fork_instruction {
 			match unsafe { fork() } {
 				Ok(ForkResult::Child) => {
 					$child_instr;
+					std::process::exit(127);
 				}
 				Ok(ForkResult::Parent { child }) => {
-					write_meta(|m| m.add_child())?;
-					setpgid(child, child).map_err(|_| ShError::from_io())?;
+					setpgid(child, child).unwrap();
 					// Set terminal control to the new process group
 					unsafe { nix::unistd::tcsetpgrp(BorrowedFd::borrow_raw(0), child.into()) }.map_err(|_| ShError::from_io())?;
 					$parent_instr;
+					status = loop {
+						match waitpid(child, None) {
+							Ok(WaitStatus::Exited(_, code)) => break match code {
+								0 => RshWait::Success,
+								_ => RshWait::Fail { code, cmd }
+							},
+							Ok(WaitStatus::Signaled(_, sig, _)) => {
+								break RshWait::Signaled { sig }
+							}
+							Ok(_) => unimplemented!(),
+							Err(nix::errno::Errno::EINTR) => continue,
+							Err(err) => panic!("panicked while waiting for child process in fork_instruction: {}",err)
+						}
+					};
+					unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), getpid()) }.unwrap();
 				}
 				Err(_) => Err(ShError::from_io())?,
 			}
@@ -66,7 +92,8 @@ macro_rules! fork_instruction {
 
 		// Restore file descriptors
 		$io.restore_fildescs()?;
-		Ok::<_, ShError>(RshWait::new())
+		event::global_send(ShEvent::LastStatus(status.clone()))?;
+		Ok::<_, ShError>(status)
 	}};
 }
 
@@ -261,6 +288,19 @@ pub enum RshWait {
 	SIGRSHEXIT // Internal call to exit early
 }
 
+impl RshWait {
+	pub fn new() -> Self {
+		RshWait::Success
+	}
+	pub fn raw(&self) -> i32 {
+		match *self {
+			RshWait::Success => 0,
+			RshWait::Fail { code, cmd: _ } => code,
+			_ => unimplemented!("unimplemented signal type: {:?}", self)
+		}
+	}
+}
+
 impl Display for RshWait {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
@@ -278,17 +318,6 @@ impl Display for RshWait {
 	}
 }
 
-impl RshWait {
-	pub fn new() -> Self {
-		RshWait::Success
-	}
-	pub fn s(span: Span) -> Self {
-		RshWait::Success
-	}
-	pub fn f(code: i32, cmd: Option<String>, span: Span) -> Self {
-		RshWait::Fail { code, cmd, }
-	}
-}
 
 impl Default for RshWait {
 	fn default() -> Self {
@@ -400,49 +429,6 @@ impl Default for ProcIO {
 	}
 }
 
-#[derive(Debug,Clone)]
-pub struct ExecUnit {
-	name: Option<String>,
-	tokens: Vec<Tk>,
-	node: Box<Node>,
-	io: Option<ProcIO>,
-	env_overrides: Option<HashMap<String,String>>,
-	flags: ExecFlags,
-}
-
-impl ExecUnit {
-	pub fn new(node: Node, io: Option<ProcIO>, env_overrides: Option<HashMap<String,String>>) -> Self {
-		let node = Box::new(node);
-		let mut name = if node.command.is_some() {
-			node.command.as_ref().unwrap().text().to_string()
-		} else {
-			String::new()
-		};
-		let tokens = if !name.is_empty() {
-			if let NdType::Command { ref argv } | NdType::Builtin { ref argv } = node.nd_type {
-				argv.iter().cloned().collect::<Vec<Tk>>()
-			} else { unreachable!() }
-		} else if let NdType::Subshell { body: _, ref argv } = node.nd_type {
-			name = "Anonymous subshell".to_string();
-			argv.iter().cloned().collect::<Vec<Tk>>()
-		} else {
-			vec![]
-		};
-		let mut flags = ExecFlags::empty();
-		if node.flags.contains(NdFlags::BACKGROUND) { flags |= ExecFlags::BACKGROUND };
-		if node.flags.contains(NdFlags::IN_PIPE) { flags |= ExecFlags::IN_PIPE };
-		let name = if name.is_empty() { None } else { Some(take(&mut name)) };
-		Self {
-			name,
-			tokens,
-			node,
-			io,
-			env_overrides,
-			flags
-		}
-	}
-}
-
 pub struct ExecDispatcher {
 	inbox: Receiver<Node>,
 }
@@ -485,7 +471,7 @@ fn traverse(node: Node, io: ProcIO) -> RshResult<RshWait> {
 			}
 			if let Some(_func) = read_logic(|log| log.get_func(command_name.text()))? {
 				//last_status = handle_function(node, io)?;
-				todo!()
+				last_status = handle_function(node, io)?;
 			} else if !matches!(node.nd_type, NdType::Command {..} | NdType::Builtin {..}) {
 				// If the resulting alias expansion returns a root node
 				// then traverse the resulting sub-tree
@@ -508,39 +494,31 @@ fn traverse(node: Node, io: ProcIO) -> RshResult<RshWait> {
 			todo!()
 		}
 		NdType::Chain {..} => {
-			//last_status = handle_chain(node)?;
-			todo!()
+			last_status = handle_chain(node)?;
 		}
 		NdType::If {..} => {
-			//last_status = handle_if(node,io)?;
-			todo!()
+			last_status = handle_if(node,io)?;
 		}
 		NdType::For {..} => {
-			//last_status = handle_for(node,io)?;
-			todo!()
+			last_status = handle_for(node,io)?;
 		}
 		NdType::Loop {..} => {
-			//last_status = handle_loop(node,io)?;
-			todo!()
+			last_status = handle_loop(node,io)?;
 		}
 		NdType::Case {..} => {
-			//last_status = handle_case(node,io)?;
-			todo!()
+			last_status = handle_case(node,io)?;
 		}
 		NdType::Select {..} => {
 			todo!("handle select")
 		}
 		NdType::Subshell {..} => {
-			//last_status = handle_subshell(node,io)?;
-			todo!()
+			last_status = handle_subshell(node,io)?;
 		}
 		NdType::FuncDef {..} => {
-			//last_status = handle_func_def(node)?;
-			todo!()
+			last_status = handle_func_def(node)?;
 		}
 		NdType::Assignment {..} => {
-			//last_status = handle_assignment(node)?;
-			todo!()
+			last_status = handle_assignment(node)?;
 		}
 		NdType::Cmdsep => {
 			last_status = RshWait::new();
@@ -586,7 +564,6 @@ fn handle_func_def(node: Node) -> RshResult<RshWait> {
 }
 
 fn handle_case(node: Node, io: ProcIO) -> RshResult<RshWait> {
-	let span = node.span();
 	node_operation!(NdType::Case { input_var, cases }, node, {
 		for case in cases {
 			let (pat, body) = case;
@@ -689,7 +666,7 @@ fn handle_if(node: Node, io: ProcIO) -> RshResult<RshWait> {
 }
 
 fn handle_chain(node: Node) -> RshResult<RshWait> {
-	let mut last_status = RshWait::new();
+	let mut last_status;
 
 	node_operation!(NdType::Chain { left, right, op }, node, {
 		last_status = traverse(*left, ProcIO::new())?;
@@ -724,6 +701,7 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 		"cd" => builtin::cd(node),
 		"pwd" => builtin::pwd(node.span()),
 		"alias" => builtin::alias(node),
+		"unalias" => builtin::unalias(node),
 		"export" => builtin::export(node),
 		"[" | "test" => builtin::test(node.get_argv()?.into()),
 		"builtin" => {
@@ -774,6 +752,8 @@ fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 					}
 					body = body_chars.iter().collect::<String>();
 					break
+				} else {
+					command.push(ch);
 				}
 			}
 			if let Some(path) = helper::which(&command) {
@@ -798,13 +778,17 @@ fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 				let env = read_vars(|v| v.borrow_evars().clone())?;
 				let env = env.iter().map(|(k,v)| CString::new(format!("{}={}",k,v).as_str()).unwrap()).collect::<Vec<CString>>();
 				let _ = execve(&fd_path, &c_argv, &env);
+				std::process::exit(127);
 			},
-			parent => { /* Do nothing */ }
+			parent => {
+				snapshot.restore_snapshot()?;
+			}
 		)
 	})
 }
 
 fn handle_function(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
+	node.flags |= NdFlags::FUNCTION;
 	let span = node.span();
 	if let NdType::Command { ref mut argv } | NdType::Builtin { ref mut argv } = node.nd_type {
 		let func_name = argv.pop_front().unwrap();
@@ -828,13 +812,15 @@ fn handle_function(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 
 		fork_instruction!(io,node,
 			child => {
-				let mut result = traverse_root(node.clone(), None, io.clone());
+				let mut result = traverse_root(func, None, io.clone());
 				if let Err(ref mut e) = result {
 					*e = e.overwrite_span(span)
 				}
-				env_snapshot.restore_snapshot();
+				std::process::exit(0);
 			},
-			parent => { /* Do nothing */ }
+			parent => {
+				env_snapshot.restore_snapshot()?;
+			}
 		)
 	} else { unreachable!() }
 }

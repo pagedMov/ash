@@ -72,7 +72,7 @@ pub enum ShEvent {
 	Exit(i32),
 	Signal(c_int),
 	Error(ShError),
-	LastStatus(i32),
+	LastStatus(RshWait),
 	Prompt
 }
 
@@ -102,6 +102,7 @@ impl EventLoop {
 					write_meta(|m| m.set_last_input(&text))?
 				}
 				NewAST(node) => {
+					// Forward to execution thread
 					self.exec_tx.send(node).unwrap();
 				}
 				Prompt => {
@@ -109,16 +110,27 @@ impl EventLoop {
 					self.prompt_tx.send(ShEvent::Prompt).map_err(|_| ShError::from_internal("failed to send signal to prompt thread"))?
 				}
 				Exit(code) => {
-					// Implement more cleanup logic later
+					// TODO: Implement more cleanup logic later
 					std::process::exit(code);
 				}
-				LastStatus(code) => {
+				LastStatus(status) => {
+					match status {
+						RshWait::Success => { /* Do nothing */ },
+						RshWait::Fail { code, cmd } => {
+							dbg!(code);
+							if code == 127 && cmd.is_some() {
+								eprintln!("Command not found: {}",cmd.unwrap())
+							}
+						}
+						_ => { /* Do Nothing */ }
+					}
 				}
 				Error(err) => {
 					// TODO: re-implement proper error handling
 					eprintln!("{:?}",err);
 				}
-				Signal(sig) => {
+				Signal(_) => {
+					// Forward to signal thread
 					if let Err(e) = signal::handle_signal(event) {
 						self.sender.send(ShEvent::Error(e)).unwrap();
 					}

@@ -4,7 +4,7 @@ use bitflags::bitflags;
 use nix::{sys::signal::{self, Signal}, unistd::{gethostname, Pid, User}};
 use std::{fs::File, sync::RwLock};
 
-use crate::{event::ShError, execute::{ExecUnit, RshWait}, interp::parse::{descend, Node}, RshResult};
+use crate::{event::ShError, execute::{self, RshWait}, interp::parse::{descend, Node}, RshResult};
 
 pub static JOBS: LazyLock<Arc<RwLock<JobTable>>> = LazyLock::new(|| {
 	Arc::new(
@@ -135,12 +135,12 @@ impl Job {
 		}
 	}
 	pub fn update_status(&mut self, pid_index: usize, new_stat: RshWait) {
-			if pid_index < self.statuses.len() {
-					self.statuses[pid_index] = new_stat;
-			} else {
-					eprintln!("Error: Invalid pid_index {} for statuses", pid_index);
-					// Alternatively, return a Result to signal the error.
-			}
+		if pid_index < self.statuses.len() {
+			self.statuses[pid_index] = new_stat;
+		} else {
+			eprintln!("Error: Invalid pid_index {} for statuses", pid_index);
+			// Alternatively, return a Result to signal the error.
+		}
 	}
 	pub fn pids(&self) -> &[Pid] {
 		&self.pids
@@ -163,7 +163,7 @@ impl Job {
 	pub fn signal_proc(&self, sig: Signal) -> RshResult<()> {
 		if self.pids().len() == 1 {
 			let pid = *self.pids().first().unwrap();
-				signal::kill(pid, sig).map_err(|_| ShError::from_io())
+			signal::kill(pid, sig).map_err(|_| ShError::from_io())
 		} else {
 			signal::killpg(self.pgid, sig).map_err(|_| ShError::from_io())
 		}
@@ -224,16 +224,16 @@ impl Job {
 			let status_line = if long {
 				// Long format includes PIDs
 				format!(
-						"{}{} {}",
-						if i != 0 { padding.clone() } else { "".into() },
-						self.pids().get(i).unwrap(),
-						status_final
+					"{}{} {}",
+					if i != 0 { padding.clone() } else { "".into() },
+					self.pids().get(i).unwrap(),
+					status_final
 				)
 			} else {
 				format!(
-						"{}{}",
-						if i != 0 { padding.clone() } else { "".into() },
-						status_final
+					"{}{}",
+					if i != 0 { padding.clone() } else { "".into() },
+					status_final
 				)
 			};
 			output.push_str(&status_line);
@@ -353,17 +353,15 @@ impl VarTable {
 		&self.env
 	}
 
-	pub fn export_var(&mut self, key: &str, val: &str) {
-		self.env.insert(key.into(),val.into());
-		std::env::set_var(key, val);
-	}
 
 	// Getters and setters for `env`
 	pub fn get_evar(&self, key: &str) -> Option<String> {
 		self.env.get(key).cloned()
 	}
-	pub fn set_evar(&mut self, key: &str, value: &str) {
-		self.env.insert(key.into(), value.into());
+	pub fn export_var(&mut self, key: &str, val: &str) {
+		let value = val.trim_matches(['"','\'']).to_string();
+		self.env.insert(key.into(),value);
+		std::env::set_var(key, val);
 	}
 
 	// Getters and setters for `params`
@@ -379,9 +377,12 @@ impl VarTable {
 
 	// Getters and setters for `strings`
 	pub fn get_string(&self, key: &str) -> Option<String> {
-		self.strings.get(key).cloned()
+		if let Some(var) = self.strings.get(key).cloned() {
+			Some(var)
+		} else { self.env.get(key).cloned() }
 	}
 	pub fn set_string(&mut self, key: String, value: String) {
+		let value = value.trim_matches(['"','\'']).to_string();
 		self.strings.insert(key, value);
 	}
 
@@ -427,9 +428,9 @@ impl VarTable {
 }
 
 impl Default for VarTable {
-    fn default() -> Self {
-        Self::new()
-    }
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 #[derive(Debug,Clone)]
@@ -448,6 +449,9 @@ impl LogicTable {
 	pub fn new_alias(&mut self, name: &str, value: String) {
 		self.aliases.insert(name.to_string(),value);
 	}
+	pub fn remove_alias(&mut self, name: &str) {
+		self.aliases.remove(name);
+	}
 	pub fn get_alias(&self, name: &str) -> Option<String> {
 		self.aliases.get(name).cloned()
 	}
@@ -460,9 +464,9 @@ impl LogicTable {
 }
 
 impl Default for LogicTable {
-    fn default() -> Self {
-        Self::new()
-    }
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 #[derive(Debug,Clone)]
@@ -501,11 +505,11 @@ impl EnvMeta {
 		self.shopts.insert(key.into(),val);
 	}
 	pub fn get_shopt(&self, key: &str) -> Option<usize> {
-		self.shopts.get(&key.to_string()).map(|val| *val)
+		self.shopts.get(key).copied()
 	}
 	pub fn mod_flags<F>(&mut self, flag_mod: F)
-	where F: FnOnce(&mut EnvFlags) {
-		flag_mod(&mut self.flags)
+		where F: FnOnce(&mut EnvFlags) {
+			flag_mod(&mut self.flags)
 	}
 }
 
@@ -650,5 +654,13 @@ pub fn source_file(path: PathBuf) -> RshResult<()> {
 	write_meta(|meta| meta.set_last_input(&buffer.clone()))?;
 
 	let state = descend(&buffer)?;
-	todo!()
+	let result = execute::traverse_ast(state.ast)?;
+	if let RshWait::Fail { code, cmd } = result {
+		if code == 127 {
+			if let Some(cmd) = cmd {
+				eprintln!("Command not found: {}",cmd);
+			}
+		}
+	}
+	Ok(())
 }

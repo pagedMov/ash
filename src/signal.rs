@@ -6,7 +6,7 @@ use tokio::signal::unix::{Signal, SignalKind};
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
 
-use crate::{event::{self, ShError, ShEvent}, execute::RshWait, shellenv::{read_jobs, write_jobs, write_meta}, RshResult};
+use crate::{event::{self, ShError, ShEvent}, execute::RshWait, shellenv::{read_jobs, read_meta, write_jobs, write_meta}, RshResult};
 
 pub struct SignalListener { }
 
@@ -51,6 +51,12 @@ pub fn signal_listen(&self) -> std::io::Result<()> {
 }
 }
 
+impl Default for SignalListener {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn extract_pid(status: &WaitStatus) -> Option<Pid> {
     match status {
         WaitStatus::Exited(pid, _)
@@ -68,6 +74,14 @@ pub fn handle_signal(sig: ShEvent) -> RshResult<()> {
 	match sig {
 		ShEvent::Signal(SIGINT) => { println!("sigint") },
 		ShEvent::Signal(SIGCHLD) => {
+			let num_children = read_meta(|m| m.children())?;
+			if num_children == 0 {
+				// This pid has already been waited on
+				event::global_send(ShEvent::Prompt)?;
+				return Ok(());
+			}
+			write_meta(|m| m.reap_child())?;
+
 			match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
 				Ok(status) => {
 					let child = extract_pid(&status);
@@ -83,10 +97,11 @@ pub fn handle_signal(sig: ShEvent) -> RshResult<()> {
 
 					match status {
 						WaitStatus::Exited(_, status) => {
-							event::global_send(ShEvent::LastStatus(status))?;
 							let wait = if status == 0 {
+								event::global_send(ShEvent::LastStatus(RshWait::Success))?;
 								RshWait::Success
 							} else {
+								event::global_send(ShEvent::LastStatus(RshWait::Fail { code: status, cmd: None }))?;
 								RshWait::Fail { code: status, cmd: None }
 							};
 							if job == 0 { // Foreground task just finished

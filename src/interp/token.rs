@@ -8,6 +8,7 @@ use std::mem::take;
 use crate::interp::parse::Span;
 use crate::event::ShError;
 use crate::RshResult;
+use crate::builtin::BUILTINS;
 
 use super::helper::StrExtension;
 
@@ -39,9 +40,6 @@ pub const KEYWORDS: [&str;14] = [
 ];
 pub const OPENERS: [&str;6] = [
 	"if", "while", "until", "for", "case", "select",
-];
-pub const BUILTINS: [&str; 22] = [
-	"echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "wait",
 ];
 pub const CMDSEP: [char;2] = [
 	';', '\n'
