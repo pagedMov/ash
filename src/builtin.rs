@@ -459,6 +459,7 @@ pub fn test(mut argv: VecDeque<Tk>) -> RshResult<RshWait> {
 }
 
 pub fn alias(node: Node) -> RshResult<RshWait> {
+	dbg!("arrived in alias()");
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front();
 	while let Some(arg) = argv.pop_front() {
@@ -468,6 +469,7 @@ pub fn alias(node: Node) -> RshResult<RshWait> {
 		let (alias,value) = arg.text().split_once('=').unwrap();
 		write_logic(|log| log.new_alias(alias, value.to_string()))?;
 	}
+	dbg!("exiting alias");
 	Ok(RshWait::Success )
 }
 
@@ -682,7 +684,7 @@ pub fn echo(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 		}
 	}
 
-	if in_pipe {
+	if node.flags.contains(NdFlags::IN_PIPE) {
 		output_fd.write(output_str.as_bytes())?;
 		std::process::exit(0);
 	}

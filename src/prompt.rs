@@ -1,4 +1,4 @@
-use crate::{comp::RshHelper, event::{ShError, ShEvent}, shellenv::{read_meta, read_vars, write_meta}, RshResult};
+use crate::{comp::RshHelper, event::{self, ShError, ShEvent}, shellenv::{read_meta, read_vars, write_meta}, RshResult, GLOBAL_EVENT_CHANNEL};
 use std::{path::{Path, PathBuf}, sync::mpsc::{Receiver, Sender}};
 use signal_hook::consts::signal::*;
 
@@ -67,12 +67,11 @@ fn init_prompt() -> RshResult<Editor<RshHelper, DefaultHistory>> {
 
 pub struct PromptDispatcher {
 	inbox: Receiver<ShEvent>,
-	outbox: Sender<ShEvent>
 }
 
 impl PromptDispatcher {
-	pub fn new(inbox: Receiver<ShEvent>, outbox: Sender<ShEvent>) -> Self {
-		Self { inbox, outbox }
+	pub fn new(inbox: Receiver<ShEvent>) -> Self {
+		Self { inbox }
 	}
 	pub fn run(&self) -> RshResult<()> {
 		for message in self.inbox.iter() {
@@ -95,22 +94,21 @@ impl PromptDispatcher {
 									deck
 								} else { unreachable!() };
 								if !deck.is_empty() {
-									self.outbox.send(ShEvent::NewAST(state.ast)).map_err(|_| ShError::from_internal("failed to send tree to event loop"))?
+									event::global_send(ShEvent::NewAST(state.ast))?
 								}
 							}
 							Err(e) => {
-								self.outbox.send(ShEvent::Error(e)).map_err(|_| ShError::from_internal("failed to send error to event loop"))?
+								event::global_send(ShEvent::Error(e))?
 							}
 						}
 					}
 					Err(ReadlineError::Interrupted) => {
-						self.outbox.send(ShEvent::Signal(SIGINT)).unwrap();
-						self.outbox.send(ShEvent::Prompt).unwrap();
-
+						event::global_send(ShEvent::Signal(SIGINT))?;
+						event::global_send(ShEvent::Prompt)?;
 					}
 					Err(ReadlineError::Eof) => {
-						self.outbox.send(ShEvent::Signal(SIGQUIT)).unwrap();
-						self.outbox.send(ShEvent::Prompt).unwrap();
+						event::global_send(ShEvent::Signal(SIGQUIT))?;
+						event::global_send(ShEvent::Prompt)?;
 					}
 					Err(e) => {
 						eprintln!("{:?}",e);

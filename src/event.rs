@@ -2,7 +2,11 @@ use std::{ffi::c_int, io, panic::Location, sync::mpsc::{self, Receiver, Sender}}
 use signal_hook::iterator::Signals;
 
 
-use crate::{execute::RshWait, interp::parse::{Node, Span}, shellenv::{read_meta, write_meta}, signal::{self, }, RshResult};
+use crate::{execute::RshWait, interp::parse::{Node, Span}, shellenv::{read_meta, write_meta}, signal::{self, }, RshResult, GLOBAL_EVENT_CHANNEL};
+
+pub fn global_send(shell_event: ShEvent) -> RshResult<()> {
+	GLOBAL_EVENT_CHANNEL.get().unwrap().send(shell_event).map_err(|_| ShError::from_internal("Failed to send shell event over global channel"))
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShError {
@@ -115,7 +119,7 @@ impl EventLoop {
 					eprintln!("{:?}",err);
 				}
 				Signal(sig) => {
-					if let Err(e) = signal::handle_signal(event, self.sender.clone()) {
+					if let Err(e) = signal::handle_signal(event) {
 						self.sender.send(ShEvent::Error(e)).unwrap();
 					}
 				}

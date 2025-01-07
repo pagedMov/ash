@@ -1,20 +1,18 @@
 use std::{os::fd::BorrowedFd, sync::mpsc::{self, SendError, Sender}, thread};
 
-use nix::{sys::{signal::{sigprocmask, SigSet, SigmaskHow, }, wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{getpgid, getpgrp, getpid, tcgetpgrp, tcsetpgrp, Pid}};
+use nix::{sys::{signal::{signal, sigprocmask, SaFlags, SigAction, SigHandler, SigSet, SigmaskHow, Signal::SIGTTOU }, wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{getpgid, getpgrp, getpid, tcgetpgrp, tcsetpgrp, Pid}};
 use tokio::signal::unix::{Signal, SignalKind};
 
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
 
-use crate::{event::{ShError, ShEvent}, execute::RshWait, shellenv::{read_jobs, write_jobs}, RshResult};
+use crate::{event::{self, ShError, ShEvent}, execute::RshWait, shellenv::{read_jobs, write_jobs, write_meta}, RshResult};
 
-pub struct SignalListener {
-	outbox: mpsc::Sender<ShEvent>,
-}
+pub struct SignalListener { }
 
 impl SignalListener {
-	pub fn new(outbox: mpsc::Sender<ShEvent>) -> Self {
-		Self { outbox, }
+	pub fn new() -> Self {
+		Self { }
 	}
 
 pub fn signal_listen(&self) -> std::io::Result<()> {
@@ -22,7 +20,6 @@ pub fn signal_listen(&self) -> std::io::Result<()> {
     let mut signals = Signals::new([
         SIGINT, SIGIO, SIGPIPE, SIGTSTP, SIGQUIT, SIGTERM, SIGCHLD, SIGHUP, SIGWINCH, SIGUSR1, SIGUSR2,
     ])?;
-		let outbox = self.outbox.clone();
 
     // Spawn a thread to listen for signals
     thread::spawn(move || {
@@ -43,8 +40,8 @@ pub fn signal_listen(&self) -> std::io::Result<()> {
             };
 
             // Send the event to the outbox
-            if let Err(err) = outbox.send(event) {
-                eprintln!("Failed to send signal event: {}", err);
+            if let Err(err) = event::global_send(event) {
+                eprintln!("Failed to send signal event: {:?}", err);
                 break;
             }
         }
@@ -65,7 +62,9 @@ fn extract_pid(status: &WaitStatus) -> Option<Pid> {
     }
 }
 
-pub fn handle_signal(sig: ShEvent, tx: Sender<ShEvent>) -> RshResult<()> {
+pub fn handle_signal(sig: ShEvent) -> RshResult<()> {
+	let sig_ignore = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
+	unsafe { nix::sys::signal::sigaction(SIGTTOU, &sig_ignore).unwrap() };
 	match sig {
 		ShEvent::Signal(SIGINT) => { println!("sigint") },
 		ShEvent::Signal(SIGCHLD) => {
@@ -84,15 +83,17 @@ pub fn handle_signal(sig: ShEvent, tx: Sender<ShEvent>) -> RshResult<()> {
 
 					match status {
 						WaitStatus::Exited(_, status) => {
-							tx.send(ShEvent::LastStatus(status)).map_err(|_| ShError::from_internal("Failed to send status to event loop"))?;
+							event::global_send(ShEvent::LastStatus(status))?;
 							let wait = if status == 0 {
 								RshWait::Success
 							} else {
 								RshWait::Fail { code: status, cmd: None }
 							};
 							if job == 0 { // Foreground task just finished
-								unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), getpid()) }.unwrap();
-								tx.send(ShEvent::Prompt).map_err(|_| ShError::from_internal("Failed to send prompt to event loop"))?;
+								// Reset terminal control group if the shell is not controlling the terminal
+								if !unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)).unwrap_or(Pid::from_raw(0)) == Pid::this() } {
+									unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), getpid()) }.unwrap();
+								}
 							} else {
 								write_jobs(|j| {
 									j.get_job(job).map(|job| {
@@ -101,6 +102,7 @@ pub fn handle_signal(sig: ShEvent, tx: Sender<ShEvent>) -> RshResult<()> {
 									})
 								})?;
 							}
+							event::global_send(ShEvent::Prompt)?;
 							return Ok(())
 						}
 						WaitStatus::Signaled(_, signal, _) => {
@@ -113,10 +115,13 @@ pub fn handle_signal(sig: ShEvent, tx: Sender<ShEvent>) -> RshResult<()> {
 						WaitStatus::StillAlive => { /* Do nothing */ }
 						_ => unreachable!()
 					}
-					println!("processed sigchld");
+					write_meta(|m| m.reap_child())?;
 				}
-				Err(e) => {
-					return Err(ShError::from_internal("Waitpid failed"))
+				Err(_) => {
+					if !unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)).unwrap_or(Pid::from_raw(0)) == Pid::this() } {
+						unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), getpid()) }.unwrap();
+					}
+					event::global_send(ShEvent::Prompt)?
 				}
 			}
 		}

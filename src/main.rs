@@ -30,12 +30,13 @@ pub mod builtin;
 pub mod comp;
 pub mod signal;
 
-use std::{env, fs::File, io::Read, path::PathBuf, sync::mpsc, thread};
+use std::{env, fs::File, io::Read, path::PathBuf, sync::mpsc::{self, Receiver, Sender}, thread};
 
 use event::{EventLoop, ShError, ShEvent};
 use execute::{traverse_ast, ExecDispatcher, RshWait};
 use interp::parse::{descend, Span};
 use nix::sys::signal::{signal, SigHandler, Signal::SIGTTOU};
+use once_cell::sync::{Lazy, OnceCell};
 use prompt::PromptDispatcher;
 use shellenv::{read_vars, write_meta, write_vars, EnvFlags};
 use signal::SignalListener;
@@ -43,6 +44,8 @@ use signal::SignalListener;
 //use crate::event::EventLoop;
 
 pub type RshResult<T> = Result<T, ShError>;
+
+static GLOBAL_EVENT_CHANNEL: OnceCell<Sender<ShEvent>> = OnceCell::new();
 
 
 #[tokio::main]
@@ -65,10 +68,10 @@ async fn main() {
 			let (exec_tx,exec_rx) = mpsc::channel();
 			let (prompt_tx,prompt_rx) = mpsc::channel();
 			let event_loop = EventLoop::new(exec_tx,prompt_tx.clone());
-			let event_loop_inbox = event_loop.sender.clone();
-			let prompt_dispatch = PromptDispatcher::new(prompt_rx, event_loop_inbox.clone());
-			let exec_dispatch = ExecDispatcher::new(exec_rx, event_loop_inbox.clone());
-			let signal_listener = SignalListener::new(event_loop_inbox.clone());
+			GLOBAL_EVENT_CHANNEL.set(event_loop.sender.clone().into()).unwrap();
+			let prompt_dispatch = PromptDispatcher::new(prompt_rx);
+			let exec_dispatch = ExecDispatcher::new(exec_rx);
+			let signal_listener = SignalListener::new();
 			signal_listener.signal_listen().unwrap();
 
 			let event_loop_handle = thread::Builder::new()
@@ -161,9 +164,8 @@ fn main_noninteractive(args: Vec<String>) -> RshResult<RshWait> {
 	let state = descend(&input);
 	match state {
 		Ok(parse_state) => {
-			let (tx,_) = mpsc::channel();
 			let (sender,receiver) = mpsc::channel();
-			let dispatch = ExecDispatcher::new(receiver,tx);
+			let dispatch = ExecDispatcher::new(receiver);
 			let result = traverse_ast(parse_state.ast);
 			match result {
 				Ok(code) => {

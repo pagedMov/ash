@@ -470,6 +470,7 @@ pub struct EnvMeta {
 	last_input: String,
 	shopts: HashMap<String,usize>,
 	flags: EnvFlags,
+	num_children: usize,
 }
 
 impl EnvMeta {
@@ -478,10 +479,20 @@ impl EnvMeta {
 			last_input: String::new(),
 			shopts: init_shopts(),
 			flags,
+			num_children: 0,
 		}
 	}
 	pub fn set_last_input(&mut self,input: &str) {
 		self.last_input = input.to_string()
+	}
+	pub fn add_child(&mut self) {
+		self.num_children += 1;
+	}
+	pub fn reap_child(&mut self) {
+		self.num_children = self.num_children.saturating_sub(1);
+	}
+	pub fn children(&self) -> usize {
+		self.num_children
 	}
 	pub fn get_last_input(&self) -> String {
 		self.last_input.clone()
@@ -539,6 +550,10 @@ pub fn write_meta<F,T>(f: F) -> RshResult<T>
 where F: FnOnce(&mut EnvMeta) -> T {
 	let mut lock = META.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
+}
+
+pub fn is_interactive() -> RshResult<bool> {
+	read_meta(|m| m.flags.contains(EnvFlags::INTERACTIVE))
 }
 
 fn init_shopts() -> HashMap<String,usize> {
