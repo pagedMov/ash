@@ -30,16 +30,17 @@ pub mod builtin;
 pub mod comp;
 pub mod signal;
 
-use std::{env, fs::File, io::Read, path::PathBuf, sync::mpsc::{self, Receiver, Sender}, thread};
+use std::{env, fs::File, io::Read, os::fd::AsRawFd, path::PathBuf, sync::mpsc::{self, Receiver, Sender}, thread};
 
 use event::{EventLoop, ShError, ShEvent};
 use execute::{traverse_ast, ExecDispatcher, RshWait};
 use interp::parse::{descend, Span};
-use nix::sys::signal::{signal, SigHandler, Signal::{SIGTTIN, SIGTTOU}};
+use nix::{sys::{signal::{signal, SigHandler, Signal::{SIGTTIN, SIGTTOU}}, termios::{self, LocalFlags}}, unistd::isatty};
 use once_cell::sync::{Lazy, OnceCell};
 use prompt::PromptDispatcher;
 use shellenv::{read_vars, write_meta, write_vars, EnvFlags};
 use signal::SignalListener;
+use termios::Termios;
 
 //use crate::event::EventLoop;
 
@@ -47,9 +48,27 @@ pub type RshResult<T> = Result<T, ShError>;
 
 static GLOBAL_EVENT_CHANNEL: OnceCell<Sender<ShEvent>> = OnceCell::new();
 
+fn set_termios() -> Option<Termios> {
+	if isatty(std::io::stdin().as_raw_fd()).unwrap() {
+		let mut termios = termios::tcgetattr(std::io::stdin()).unwrap();
+		termios.local_flags &= !LocalFlags::ECHOCTL;
+		termios::tcsetattr(std::io::stdin(), nix::sys::termios::SetArg::TCSANOW, &termios).unwrap();
+		Some(termios)
+	} else {
+		None
+	}
+}
+
+fn restore_termios(orig: &Option<Termios>) {
+	if let Some(termios) = orig {
+		let fd = std::io::stdin();
+		termios::tcsetattr(fd, termios::SetArg::TCSANOW, termios).unwrap();
+	}
+}
 
 #[tokio::main]
 async fn main() {
+	env_logger::init();
 	let args = env::args().collect::<Vec<String>>();
 
 	// Ignore SIGTTOU
@@ -79,6 +98,7 @@ async fn main() {
 	}
 	let result = match args.len() {
 		1 => { // interactive
+			let termios = set_termios();
 			write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::INTERACTIVE)).unwrap();
 			signal_listener.signal_listen().unwrap();
 
@@ -104,7 +124,9 @@ async fn main() {
 					.unwrap();
 
 			prompt_tx.send(ShEvent::Prompt).unwrap();
-			event_loop_handle.join().unwrap()
+			let result = event_loop_handle.join().unwrap();
+			restore_termios(&termios);
+			result
 		},
 		_ => {
 			thread::spawn( move || {

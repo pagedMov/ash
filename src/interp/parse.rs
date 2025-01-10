@@ -486,7 +486,7 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 
 pub fn check_valid_operand(node: &Node) -> bool {
 	use crate::interp::parse::NdType::*;
-	matches!(node.nd_type, Pipeline {..} | Subshell {..} | Chain {..} | If {..} | For {..} | Loop {..} | Case {..} | Select {..} | Command {..} | Builtin {..})
+	matches!(node.nd_type, PipelineBranch {..} | Pipeline {..} | Subshell {..} | Chain {..} | If {..} | For {..} | Loop {..} | Case {..} | Select {..} | Command {..} | Builtin {..})
 }
 
 pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
@@ -520,6 +520,7 @@ pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				if let Some(mut left) = buffer.pop_back() {
 					if let Some(mut right) = ctx.next_node() {
 						if !check_valid_operand(&left) {
+							dbg!(&left);
 							return Err(ShError::from_parse("The left side of this pipeline is invalid", node.span))
 						}
 						if !check_valid_operand(&right) {

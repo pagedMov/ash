@@ -1,4 +1,5 @@
 use std::{ffi::c_int, io, panic::Location, sync::mpsc::{self, Receiver, Sender}};
+use libc::{getpid, tcgetpgrp};
 use signal_hook::iterator::Signals;
 
 
@@ -6,6 +7,22 @@ use crate::{execute::RshWait, interp::parse::{Node, Span}, shellenv::{read_meta,
 
 pub fn global_send(shell_event: ShEvent) -> RshResult<()> {
 	GLOBAL_EVENT_CHANNEL.get().unwrap().send(shell_event).map_err(|_| ShError::from_internal("Failed to send shell event over global channel"))
+}
+
+#[track_caller]
+pub fn fire_prompt() -> RshResult<()> {
+	let tc_group = unsafe { tcgetpgrp(0) };
+	let rsh_pid = unsafe { getpid() };
+	// Temporarily disabling this guard condition
+	//if tc_group != rsh_pid {
+		//dbg!(Location::caller());
+		//panic!("attempted to fire prompt without terminal control. tc group: {}, rsh pid: {}",tc_group,rsh_pid);
+	//}
+	if tc_group == rsh_pid {
+		global_send(ShEvent::Prompt)
+	} else {
+		Ok(())
+	}
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -19,10 +36,11 @@ pub enum ShError {
 }
 
 impl ShError {
+	#[track_caller]
 	pub fn from_io() -> Self {
 		let err = io::Error::last_os_error();
 		let loc = Location::caller();
-		eprintln!("{}, {}",loc.line(),loc.file());
+		eprintln!("{}, {}, {}",loc.line(),loc.file(), err);
 		ShError::IoError(err.to_string(),loc.line(),loc.file().to_string())
 	}
 	pub fn from_execf(msg: &str, code: i32, span: Span) -> Self {
@@ -117,7 +135,6 @@ impl EventLoop {
 					match status {
 						RshWait::Success => { /* Do nothing */ },
 						RshWait::Fail { code, cmd } => {
-							dbg!(code);
 							if code == 127 && cmd.is_some() {
 								eprintln!("Command not found: {}",cmd.unwrap())
 							}

@@ -8,15 +8,20 @@ use std::path::{Path, PathBuf};
 use bitflags::bitflags;
 use libc::{getegid, geteuid};
 use nix::fcntl::OFlag;
+use nix::sys::signal::{killpg, Signal};
 use nix::sys::stat::Mode;
 use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{access, fork, isatty, setpgid, AccessFlags, ForkResult};
+use nix::unistd::{access, fork, isatty, setpgid, AccessFlags, ForkResult, Pid};
+use crate::event::{self,ShEvent};
+use crate::interp::helper::StrExtension;
+use nix::unistd::tcsetpgrp;
+use std::os::fd::BorrowedFd;
 
 use crate::execute::{ProcIO, RshWait, RustFd};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk};
-use crate::shellenv::{self, read_logic, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, JobFlags };
+use crate::shellenv::{self, read_jobs, read_logic, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, JobFlags };
 use crate::event::ShError;
 use crate::RshResult;
 
@@ -465,7 +470,7 @@ pub fn alias(node: Node) -> RshResult<RshWait> {
 			return Err(ShError::from_syntax(&format!("Expected an assignment pattern in alias args, got {}",arg.text()), arg.span()))
 		}
 		let (alias,value) = arg.text().split_once('=').unwrap();
-		let value = value.trim_matches(['"','\'']);
+		let value = value.trim_quotes();
 		write_logic(|l| l.new_alias(alias, value.to_string()))?;
 	}
 	Ok(RshWait::Success )
@@ -506,11 +511,130 @@ pub fn cd(node: Node) -> RshResult<RshWait> {
 }
 
 pub fn fg(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
-	Ok(RshWait::Success )
+	let argv = node.get_argv()?;
+	let mut argv = VecDeque::from(argv);
+	argv.pop_front(); // Ignore 'fg'
+	let job_id;
+	if argv.is_empty() {
+		job_id = 0;
+	} else {
+		let arg = argv.pop_front().unwrap().text().to_string();
+
+		if !arg.starts_with('%') {
+
+			if arg.chars().all(|ch| ch.is_ascii_digit()) {
+				let job_candidate = read_jobs(|j| j.get_by_pgid(Pid::from_raw(arg.parse::<i32>().unwrap())).cloned())?;
+
+				if let Some(job) = job_candidate {
+					job_id = job.id();
+				} else {
+					return Ok(RshWait::Fail { code: 1, cmd: Some("fg".into()) })
+				}
+			} else {
+				return Err(ShError::from_syntax(format!("Invalid fg argument: {}",arg).as_str(), node.span()))
+			}
+		} else {
+			let arg = arg.strip_prefix('%').unwrap();
+
+			if arg.chars().all(|ch| ch.is_ascii_digit()) {
+				job_id = arg.parse::<i32>().unwrap();
+			} else {
+				let matches = read_jobs(|j| j.read_by_command(arg))?;
+
+				if matches.len() > 1 {
+					eprintln!("Warning: Multiple matches found for `{}`. Resuming the first match.", arg);
+				}
+
+				if matches.is_empty() {
+					return Ok(RshWait::Fail { code: 1, cmd: Some("fg".into()) })
+				} else {
+					job_id = matches[0].id();
+				}
+			}
+		}
+	}
+	let job = if job_id == 0 {
+		let job_order = read_jobs(|j| j.job_order().to_vec())?;
+		if let Some(id) = job_order.last() {
+			read_jobs(|j| j.read_job(*id).cloned())?
+		} else {
+			return Err(ShError::from_internal("Attempted to foreground with no current process"))
+		}
+	} else {
+		read_jobs(|j| j.read_job(job_id).cloned())?
+	};
+	if let Some(job) = job {
+		write_jobs(|j| {
+			if let Some(job) = j.get_job(job_id) {
+				job.cont().unwrap();
+			}
+		})?;
+		if job.is_stopped() {
+			killpg(*job.pgid(), Signal::SIGCONT).map_err(|_| ShError::from_io())?;
+		}
+		shellenv::attach_tty(*job.pgid())?;
+		Ok(RshWait::Success)
+	} else {
+		Ok(RshWait::Fail { code: 1, cmd: Some("fg".into()) })
+	}
 }
 
 pub fn bg(node: Node) -> RshResult<RshWait> {
-	todo!()
+	let argv = node.get_argv()?;
+	let mut argv = VecDeque::from(argv);
+	argv.pop_front(); // Ignore 'bg'
+	let job_id;
+
+	// Parse job ID from arguments
+	if argv.is_empty() {
+		let job_order = read_jobs(|j| j.job_order().to_vec())?;
+		job_id = *job_order.last().unwrap_or(&0);
+	} else {
+		let arg = argv.pop_front().unwrap().text().to_string();
+
+		if !arg.starts_with('%') {
+			if arg.chars().all(|ch| ch.is_ascii_digit()) {
+				job_id = arg.parse::<i32>().unwrap();
+			} else {
+				return Err(ShError::from_syntax(
+						format!("Invalid bg argument: {}", arg).as_str(),
+						node.span(),
+				));
+			}
+		} else {
+			let arg = arg.strip_prefix('%').unwrap();
+			if arg.chars().all(|ch| ch.is_ascii_digit()) {
+				job_id = arg.parse::<i32>().unwrap();
+			} else {
+				let matches = read_jobs(|j| j.read_by_command(arg))?;
+				if matches.len() > 1 {
+					eprintln!("Warning: Multiple matches found for `{}`. Resuming the first match.", arg);
+				}
+				job_id = matches.first().map_or(0, |job| job.id());
+			}
+		}
+	}
+
+	// Retrieve the job to be resumed
+	let job = read_jobs(|j| j.read_job(job_id).cloned())?;
+	if let Some(job) = job {
+		write_jobs(|j| {
+			if let Some(job) = j.get_job(job_id) {
+				job.cont().unwrap();
+			}
+		})?;
+		if job.is_stopped() {
+			killpg(*job.pgid(), Signal::SIGCONT).map_err(|_| ShError::from_io())?;
+		}
+
+		let job = read_jobs(|j| j.read_job(job_id).cloned().unwrap())?;
+		let job_order = read_jobs(|j| j.job_order().to_vec())?;
+		println!("{}",job.display(&job_order,JobFlags::PIDS));
+		Ok(RshWait::Success)
+	} else {
+		eprintln!("No such job: {}", job_id);
+		Ok(RshWait::Fail { code: 1, cmd: Some("bg".into()) })
+	}
 }
 
 pub fn source(node: Node) -> RshResult<RshWait> {
@@ -623,9 +747,18 @@ pub fn jobs(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 			flags |= flag;
 		}
 	}
-	write_jobs(|j| j.print_jobs(&flags))?;
 
-	Ok(RshWait::Success )
+	match unsafe { fork() } {
+		Ok(ForkResult::Child) => {
+			read_jobs(|j| j.print_jobs(&flags))?;
+			std::process::exit(0);
+		}
+		Ok(ForkResult::Parent { child: _ }) => {
+			write_jobs(|j| j.reset_recents())?;
+		}
+		Err(_) => return Err(ShError::from_internal("Failed to fork in print_jobs()"))
+	}
+	Ok(RshWait::Success)
 }
 
 pub fn echo(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
@@ -671,7 +804,6 @@ pub fn echo(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 
 	let redirs = node.get_redirs()?;
 
-	io.backup_fildescs()?;
 	let newline_opt = !flags.contains(EchoFlags::NO_NEWLINE);
 	let output_str = catstr(argv, newline_opt);
 	let mut fd_stack = vec![];
@@ -696,38 +828,22 @@ pub fn echo(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 		}
 	}
 
-	if node.flags.contains(NdFlags::IN_PIPE) {
-		output_fd.write(output_str.as_bytes())?;
-		std::process::exit(0);
-	}
+	io.backup_fildescs()?;
+	io.route_io()?;
+
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
 			output_fd.write(output_str.as_bytes())?;
 			std::process::exit(0);
 		}
-		Ok(ForkResult::Parent { child }) => {
-			for mut fd in fd_stack {
-				fd.close().unwrap();
-			}
-			io.restore_fildescs()?;
-			if node.flags.contains(NdFlags::BACKGROUND) {
-				setpgid(child, child).map_err(|_| ShError::from_io())?;
-				write_jobs(|j| j.new_job(vec![child], vec!["echo".into()], child, false))?;
-				Ok(RshWait::Success )
-			} else {
-				match waitpid(child, None) {
-					Ok(WaitStatus::Exited(_, code)) => match code {
-						0 => Ok(RshWait::Success ),
-						_ => Ok(RshWait::Fail { code, cmd: Some("echo".into()), }),
-					},
-					Ok(WaitStatus::Signaled(_,signal,_)) => {
-						Ok(RshWait::Fail { code: 128 + signal as i32, cmd: Some("echo".into()), })
-					}
-					Ok(_) => Err(ShError::from_execf("Unexpected waitpid result", 1, span)),
-					Err(err) => Err(ShError::from_execf(&format!("Waitpid failed: {}", err), 1, span)),
-				}
+		Ok(ForkResult::Parent { child: _ }) => {
+			for fd in &mut fd_stack {
+				fd.close()?
 			}
 		}
-		Err(_) => Err(ShError::from_execf("Fork failed", 1, span)),
+		Err(_) => return Err(ShError::from_internal("Failed to fork in echo()"))
 	}
+
+	io.restore_fildescs()?;
+	Ok(RshWait::Success)
 }

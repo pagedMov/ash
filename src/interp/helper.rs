@@ -94,9 +94,31 @@ pub trait StrExtension {
 	fn split_last(&self, pat: &str) -> Option<(String,String)>;
 	fn has_unescaped(&self, pat: &str) -> bool;
 	fn consume_escapes(&self) -> String;
+	fn trim_quotes(&self) -> String;
 }
 
 impl StrExtension for str {
+	fn trim_quotes(&self) -> String {
+		let chars = self.chars();
+		let mut result = String::new();
+		let mut in_quote = false;
+		let mut opening_quote: Option<char> = None;
+
+		for ch in chars {
+			match ch {
+				'\'' | '"' if !in_quote => {
+					opening_quote = Some(ch);
+					in_quote = true;
+				}
+				'\'' | '"' if Some(ch) == opening_quote => {
+					in_quote = false;
+					opening_quote = None;
+				}
+				_ => result.push(ch),
+			}
+		}
+		result.trim().to_string()
+	}
 	fn consume_escapes(&self) -> String {
 		let mut result = String::new();
 		let mut chars = self.chars().peekable();
