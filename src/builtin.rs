@@ -11,18 +11,19 @@ use nix::fcntl::OFlag;
 use nix::sys::signal::{killpg, Signal};
 use nix::sys::stat::Mode;
 use nix::unistd::{access, fork, isatty, AccessFlags, ForkResult, Pid};
+use regex::Regex;
 
 use crate::execute::{ProcIO, RshWait, RustFd};
-use crate::interp::helper::StrExtension;
-use crate::interp::parse::{NdType, Node, Span};
+use crate::interp::helper::{self, StrExtension};
+use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType, WdFlags};
-use crate::shellenv::{self, read_jobs, read_logic, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, JobFlags };
+use crate::shellenv::{self, read_jobs, read_logic, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, HashFloat, JobFlags, RVal};
 use crate::event::ShError;
 use crate::RshResult;
 
-pub const BUILTINS: [&str; 24] = [
-	"expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "wait",
+pub const BUILTINS: [&str; 30] = [
+	"type", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "wait",
 ];
 
 bitflags! {
@@ -96,6 +97,129 @@ pub fn catstr(mut c_strings: VecDeque<CString>,newline: bool) -> CString {
 	}
 
 	CString::from_vec_with_nul(cat).unwrap()
+}
+
+pub fn r#type(node: Node) -> RshResult<RshWait> {
+	let index_re = Regex::new(r"(\w+)\[(\d+)\]").unwrap();
+	let mut argv = VecDeque::from(node.get_argv()?);
+	argv.pop_front(); // Ignore `int`
+	while let Some(arg) = argv.pop_front() {
+		let text = arg.text();
+		if index_re.is_match(text) {
+			if let Some(caps) = index_re.captures(text) {
+				let var_name = caps.get(1).map_or("", |m| m.as_str());
+				let index = caps.get(2).map_or("", |m| m.as_str()).parse::<usize>().unwrap();
+
+				if let Some(var) = read_vars(|v| v.get_var(var_name))? {
+					if let RVal::Array(_) = var {
+						if let Ok(arr_element) = read_vars(|v| v.index_arr(var_name, index))? {
+							use crate::shellenv::RVal::*;
+							match arr_element {
+								String(_) => println!("string"),
+								Int(_) => println!("int"),
+								Float(_) => println!("float"),
+								Bool(_) => println!("bool"),
+								Array(_) => println!("array"),
+								Dict(_) => println!("dict"),
+							}
+						}
+					}
+				}
+			}
+		}
+		if let Some(var) = read_vars(|v| v.get_var(text))? {
+			use crate::shellenv::RVal::*;
+			match var {
+				String(_) => println!("string"),
+				Int(_) => println!("int"),
+				Float(_) => println!("float"),
+				Bool(_) => println!("bool"),
+				Array(_) => println!("array"),
+				Dict(_) => println!("dict"),
+			}
+		}
+	}
+	Ok(RshWait::Success)
+}
+
+pub fn int(node: Node) -> RshResult<RshWait> {
+	let mut argv = VecDeque::from(node.get_argv()?);
+	argv.pop_front(); // Ignore `int`
+	while let Some(arg) = argv.pop_front() {
+		if let Some((k,v)) = arg.text().split_once('=') {
+			helper::unset_var_conflicts(k)?;
+			if let Ok(int) = v.parse::<i32>() {
+				write_vars(|v| v.set_var(k, RVal::Int(int)))?
+			} else {
+				return Err(ShError::from_syntax(format!("Expected an integer in int definition, got `{}`",v).as_str(), node.span()))
+			}
+		} else {
+			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
+		}
+	}
+	Ok(RshWait::Success)
+}
+
+pub fn string(node: Node) -> RshResult<RshWait> {
+	let mut argv = VecDeque::from(node.get_argv()?);
+	argv.pop_front(); // Ignore `int`
+	while let Some(arg) = argv.pop_front() {
+		if let Some((k,val)) = arg.text().split_once('=') {
+			helper::unset_var_conflicts(k)?;
+			write_vars(|v| v.set_var(k, RVal::String(val.into())))?
+		} else {
+			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
+		}
+	}
+	Ok(RshWait::Success)
+}
+
+pub fn bool(node: Node) -> RshResult<RshWait> {
+	let mut argv = VecDeque::from(node.get_argv()?);
+	argv.pop_front(); // Ignore `int`
+	while let Some(arg) = argv.pop_front() {
+		if let Some((k,val)) = arg.text().split_once('=') {
+			helper::unset_var_conflicts(k)?;
+			if let Ok(bool) = val.parse::<bool>() {
+				write_vars(|v| v.set_var(k, RVal::Bool(bool)))?
+			}
+		} else {
+			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
+		}
+	}
+	Ok(RshWait::Success)
+}
+
+pub fn float(node: Node) -> RshResult<RshWait> {
+	let mut argv = VecDeque::from(node.get_argv()?);
+	argv.pop_front(); // Ignore `int`
+	while let Some(arg) = argv.pop_front() {
+		if let Some((k,val)) = arg.text().split_once('=') {
+			helper::unset_var_conflicts(k)?;
+			if let Ok(float) = val.parse::<f64>() {
+				write_vars(|v| v.set_var(k, RVal::Float(HashFloat(float))))?
+			}
+		} else {
+			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
+		}
+	}
+	Ok(RshWait::Success)
+}
+
+pub fn array(node: Node) -> RshResult<RshWait> {
+	let mut argv = VecDeque::from(node.get_argv()?);
+	argv.pop_front(); // Ignore `int`
+	while let Some(arg) = argv.pop_front() {
+		if let Some((k,val)) = arg.text().split_once('=') {
+			helper::unset_var_conflicts(k)?;
+			if let Ok(array) = helper::parse_vec(val) {
+				write_vars(|v| v.set_var(k, RVal::Array(array)))?
+			}
+		} else {
+			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
+		}
+	}
+	Ok(RshWait::Success)
 }
 
 /// Performs a test on a single argument by transforming it and then applying a property check.
@@ -539,94 +663,54 @@ impl ExprToken {
 
 pub fn tokenize_expr(input: &str) -> Vec<ExprToken> {
 	let mut tokens = Vec::new();
-	let mut current = String::new();
-
+	let mut current_token = String::new();
 	let mut chars = input.chars().peekable();
 
 	while let Some(ch) = chars.next() {
 		match ch {
-			' ' => {
-				// If there's an accumulated token, process it
-				if !current.is_empty() {
-					if let Some(token) = ExprToken::from(&current) {
-						tokens.push(token);
-						current.clear();
-					} else {
-						panic!("Invalid token: {}", current);
-					}
-				}
-			}
+			' ' => process_current_token(&mut current_token, &mut tokens),
 			'(' => {
-				// Process any accumulated token before '('
-				if !current.is_empty() {
-					if let Some(token) = ExprToken::from(&current) {
-						tokens.push(token);
-						current.clear();
-					} else {
-						panic!("Invalid token: {}", current);
-					}
-				}
+				process_current_token(&mut current_token, &mut tokens);
 				tokens.push(ExprToken::LParen);
 			}
 			')' => {
-				// Process any accumulated token before ')'
-				if !current.is_empty() {
-					if let Some(token) = ExprToken::from(&current) {
-						tokens.push(token);
-						current.clear();
-					} else {
-						panic!("Invalid token: {}", current);
-					}
-				}
+				process_current_token(&mut current_token, &mut tokens);
 				tokens.push(ExprToken::RParen);
 			}
 			'+' | '-' | '*' | '/' | '%' => {
-				// Handle operators
-				if !current.is_empty() {
-					if let Some(token) = ExprToken::from(&current) {
-						tokens.push(token);
-						current.clear();
-					} else {
-						panic!("Invalid token: {}", current);
-					}
-				}
-
-				// Handle multi-character operators (like `**` or `//`)
-				if ch == '*' || ch == '/' {
-					if let Some(next_ch) = chars.peek() {
-						if *next_ch == ch {
-							chars.next(); // Consume the second character
-							tokens.push(ExprToken::from(&format!("{ch}{ch}")).unwrap());
-							continue;
-						}
-					}
-				}
-
-				// Single-character operators
-				tokens.push(ExprToken::from(&ch.to_string()).unwrap());
+				process_current_token(&mut current_token, &mut tokens);
+				handle_operator(ch, &mut chars, &mut tokens);
 			}
-			_ if ch.is_ascii_digit() || ch == '.' => {
-				// Accumulate numbers
-				current.push(ch);
-			}
-			_ => {
-				panic!("Invalid character: {}", ch);
-			}
+			_ if ch.is_ascii_digit() || ch == '.' => current_token.push(ch),
+			_ => panic!("Invalid character: {}", ch),
 		}
 	}
 
-	// Process the last accumulated token, if any
-	if !current.is_empty() {
-		if let Some(token) = ExprToken::from(&current) {
-			tokens.push(token);
-		} else {
-			panic!("Invalid token: {}", current);
-		}
-	}
-
+	process_current_token(&mut current_token, &mut tokens);
 	tokens
 }
 
+fn process_current_token(current_token: &mut String, tokens: &mut Vec<ExprToken>) {
+	if !current_token.is_empty() {
+		if let Some(token) = ExprToken::from(current_token) {
+			tokens.push(token);
+			current_token.clear();
+		} else {
+			panic!("Invalid token: {}", current_token);
+		}
+	}
+}
+
+fn handle_operator(ch: char, chars: &mut std::iter::Peekable<std::str::Chars>, tokens: &mut Vec<ExprToken>) {
+	if (ch == '*' || ch == '/') && chars.peek() == Some(&ch) {
+		chars.next(); // Consume the second character
+		tokens.push(ExprToken::from(&format!("{ch}{ch}")).unwrap());
+	} else {
+		tokens.push(ExprToken::from(&ch.to_string()).unwrap());
+	}
+}
+
+/// Use the Shunting-Yard algorithm to reorganize in-set notation into reverse polish notation
 pub fn shunting_yard(tokens: Vec<ExprToken>) -> Vec<ExprToken> {
 	let mut output: VecDeque<ExprToken> = VecDeque::new();
 	let mut operators: Vec<ExprToken> = Vec::new();
@@ -665,13 +749,13 @@ pub fn shunting_yard(tokens: Vec<ExprToken>) -> Vec<ExprToken> {
 }
 
 fn float_to_string(value: f64) -> String {
-    if value.fract() == 0.0 {
-        // Convert to integer if there's no fractional part
-        format!("{}", value as i64)
-    } else {
-        // Keep as a float with precision
-        format!("{}", value)
-    }
+	if value.fract() == 0.0 {
+		// Convert to integer if there's no fractional part
+		format!("{}", value as i64)
+	} else {
+		// Keep as a float with precision
+		format!("{}", value)
+	}
 }
 
 pub fn expr(node: Node, io: ProcIO) -> RshResult<RshWait> {
@@ -736,45 +820,16 @@ pub fn expr(node: Node, io: ProcIO) -> RshResult<RshWait> {
 	// Convert the final result to a string
 	let result = float_to_string(result);
 
-	// Now we will manually construct a call to echo, and then use the echo() function to display the result
-	// This method allows us to leverage the I/O logic already present in echo() for free instead of re-implementing it here
-	let echo_call = Node {
-		command: Some(Tk {
-			tk_type: TkType::Ident,
-			wd: token::WordDesc {
-				text: "echo".into(),
-				span: node.span(),
-				flags: WdFlags::empty(),
-			},
-		}),
-		nd_type: NdType::Builtin {
-			argv: VecDeque::from(vec![
-				Tk {
-					tk_type: TkType::Ident,
-					wd: token::WordDesc {
-						text: "echo".into(),
-						span: node.span(),
-						flags: WdFlags::empty()
-					}
-				},
-				Tk {
-					tk_type: TkType::String,
-					wd: token::WordDesc {
-						text: result,
-						span: node.span(),
-						flags: WdFlags::empty(),
-					},
-				}
-			]),
-		},
-		flags: node.flags,
-		redirs: node.redirs.clone(),
-		span: node.span(),
-	};
-
-	echo(echo_call, io)?;
-	Ok(RshWait::Success)
+	// Do an internal echo call to display the result
+	echo_internal(
+		vec![result],
+		io,
+		node.span(),
+		node.flags,
+		node.redirs.clone()
+	)
 }
+
 
 pub fn alias(node: Node) -> RshResult<RshWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
@@ -821,71 +876,42 @@ pub fn cd(node: Node) -> RshResult<RshWait> {
 		}
 		let path = Path::new(new_pwd.to_str().unwrap());
 		std::env::set_current_dir(path).map_err(|_| ShError::from_io())?;
+		write_vars(|v| v.export_var("PWD", std::env::current_dir().unwrap().to_str().unwrap()))?;
 		Ok(RshWait::Success )
 }
 
-pub fn fg(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
+pub fn fg(node: Node) -> RshResult<RshWait> {
 	let argv = node.get_argv()?;
 	let mut argv = VecDeque::from(argv);
 	argv.pop_front(); // Ignore 'fg'
-	let job_id;
-	if argv.is_empty() {
-		job_id = 0;
-	} else {
-		let arg = argv.pop_front().unwrap().text().to_string();
 
-		if !arg.starts_with('%') {
+	let job_id = match argv.pop_front() {
+		Some(arg) => parse_job_id(arg.text(), node.span())?,
+		None => 0,
+	};
 
-			if arg.chars().all(|ch| ch.is_ascii_digit()) {
-				let job_candidate = read_jobs(|j| j.get_by_pgid(Pid::from_raw(arg.parse::<i32>().unwrap())).cloned())?;
-
-				if let Some(job) = job_candidate {
-					job_id = job.id();
-				} else {
-					return Ok(RshWait::Fail { code: 1, cmd: Some("fg".into()) })
-				}
-			} else {
-				return Err(ShError::from_syntax(format!("Invalid fg argument: {}",arg).as_str(), node.span()))
-			}
-		} else {
-			let arg = arg.strip_prefix('%').unwrap();
-
-			if arg.chars().all(|ch| ch.is_ascii_digit()) {
-				job_id = arg.parse::<i32>().unwrap();
-			} else {
-				let matches = read_jobs(|j| j.read_by_command(arg))?;
-
-				if matches.len() > 1 {
-					eprintln!("Warning: Multiple matches found for `{}`. Resuming the first match.", arg);
-				}
-
-				if matches.is_empty() {
-					return Ok(RshWait::Fail { code: 1, cmd: Some("fg".into()) })
-				} else {
-					job_id = matches[0].id();
-				}
-			}
-		}
-	}
 	let job = if job_id == 0 {
 		let job_order = read_jobs(|j| j.job_order().to_vec())?;
 		if let Some(id) = job_order.last() {
 			read_jobs(|j| j.read_job(*id).cloned())?
 		} else {
-			return Err(ShError::from_internal("Attempted to foreground with no current process"))
+			return Err(ShError::from_internal("Attempted to foreground with no current process"));
 		}
 	} else {
 		read_jobs(|j| j.read_job(job_id).cloned())?
 	};
+
 	if let Some(job) = job {
 		write_jobs(|j| {
 			if let Some(job) = j.get_job(job_id) {
 				job.cont().unwrap();
 			}
 		})?;
+
 		if job.is_stopped() {
 			killpg(*job.pgid(), Signal::SIGCONT).map_err(|_| ShError::from_io())?;
 		}
+
 		shellenv::attach_tty(*job.pgid())?;
 		Ok(RshWait::Success)
 	} else {
@@ -897,39 +923,15 @@ pub fn bg(node: Node) -> RshResult<RshWait> {
 	let argv = node.get_argv()?;
 	let mut argv = VecDeque::from(argv);
 	argv.pop_front(); // Ignore 'bg'
-	let job_id;
 
-	// Parse job ID from arguments
-	if argv.is_empty() {
-		let job_order = read_jobs(|j| j.job_order().to_vec())?;
-		job_id = *job_order.last().unwrap_or(&0);
-	} else {
-		let arg = argv.pop_front().unwrap().text().to_string();
-
-		if !arg.starts_with('%') {
-			if arg.chars().all(|ch| ch.is_ascii_digit()) {
-				job_id = arg.parse::<i32>().unwrap();
-			} else {
-				return Err(ShError::from_syntax(
-						format!("Invalid bg argument: {}", arg).as_str(),
-						node.span(),
-				));
-			}
-		} else {
-			let arg = arg.strip_prefix('%').unwrap();
-			if arg.chars().all(|ch| ch.is_ascii_digit()) {
-				job_id = arg.parse::<i32>().unwrap();
-			} else {
-				let matches = read_jobs(|j| j.read_by_command(arg))?;
-				if matches.len() > 1 {
-					eprintln!("Warning: Multiple matches found for `{}`. Resuming the first match.", arg);
-				}
-				job_id = matches.first().map_or(0, |job| job.id());
-			}
+	let job_id = match argv.pop_front() {
+		Some(arg) => parse_job_id(arg.text(), node.span())?,
+		None => {
+			let job_order = read_jobs(|j| j.job_order().to_vec())?;
+			*job_order.last().unwrap_or(&0)
 		}
-	}
+	};
 
-	// Retrieve the job to be resumed
 	let job = read_jobs(|j| j.read_job(job_id).cloned())?;
 	if let Some(job) = job {
 		write_jobs(|j| {
@@ -937,18 +939,45 @@ pub fn bg(node: Node) -> RshResult<RshWait> {
 				job.cont().unwrap();
 			}
 		})?;
+
 		if job.is_stopped() {
 			killpg(*job.pgid(), Signal::SIGCONT).map_err(|_| ShError::from_io())?;
 		}
 
 		let job = read_jobs(|j| j.read_job(job_id).cloned().unwrap())?;
 		let job_order = read_jobs(|j| j.job_order().to_vec())?;
-		println!("{}",job.display(&job_order,JobFlags::PIDS));
+		println!("{}", job.display(&job_order, JobFlags::PIDS));
 		Ok(RshWait::Success)
 	} else {
 		eprintln!("No such job: {}", job_id);
 		Ok(RshWait::Fail { code: 1, cmd: Some("bg".into()) })
 	}
+}
+
+fn parse_job_id(arg: &str, span: Span) -> RshResult<i32> {
+	if arg.starts_with('%') {
+		let arg = arg.strip_prefix('%').unwrap();
+		if arg.chars().all(|ch| ch.is_ascii_digit()) {
+			return Ok(arg.parse::<i32>().unwrap());
+		} else {
+			let matches = read_jobs(|j| j.read_by_command(arg))?;
+			if matches.len() > 1 {
+				eprintln!("Warning: Multiple matches found for `{}`. Resuming the first match.", arg);
+			}
+			if let Some(job) = matches.first() {
+				return Ok(job.id());
+			}
+		}
+	} else if arg.chars().all(|ch| ch.is_ascii_digit()) {
+		let job_candidate = read_jobs(|j| j.get_by_pgid(Pid::from_raw(arg.parse::<i32>().unwrap())).cloned())?;
+		if let Some(job) = job_candidate {
+			return Ok(job.id());
+		}
+	} else {
+		return Err(ShError::from_syntax(format!("Invalid argument: {}", arg).as_str(), span));
+	}
+
+	Err(ShError::from_syntax(format!("Invalid argument: {}", arg).as_str(), span))
 }
 
 pub fn source(node: Node) -> RshResult<RshWait> {
@@ -1075,9 +1104,43 @@ pub fn jobs(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 	Ok(RshWait::Success)
 }
 
+/// Used to call echo internally by passing a vector of strings. Makes it very simple to re-use the I/O logic present in echo elsewhere in the codebase.
+pub fn echo_internal(argv: Vec<String>, io: ProcIO, span: Span, flags: NdFlags, redirs: VecDeque<Node>) -> RshResult<RshWait> {
+	let mut tokens = vec![
+		Tk {
+			tk_type: TkType::Ident,
+			wd: token::WordDesc {
+				text: "echo".into(),
+				span,
+				flags: WdFlags::empty()
+			}
+		}
+	];
+	for arg in argv {
+		let token = Tk {
+			tk_type: TkType::String,
+			wd: token::WordDesc {
+				text: arg,
+				span,
+				flags: WdFlags::empty(),
+			},
+		};
+		tokens.push(token);
+	}
+	let echo_call = Node {
+		command: tokens.first().cloned(),
+		nd_type: NdType::Builtin {
+			argv: tokens.into(),
+		},
+		flags,
+		redirs,
+		span,
+	};
+	echo(echo_call, io)
+}
+
 pub fn echo(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 	let mut flags = EchoFlags::empty();
-	let span = node.span();
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
 	argv.pop_front(); // Remove 'echo' from argv
 										// Get flags

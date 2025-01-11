@@ -1,11 +1,12 @@
-use std::{collections::HashMap, env, ffi::CString, io::Read, mem::take, os::fd::BorrowedFd, panic::Location, path::PathBuf, sync::{Arc, LazyLock}};
+use std::{collections::BTreeMap, env, ffi::{CString, OsStr}, fmt::{self, Debug, Display}, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, str::FromStr, sync::{Arc, LazyLock}};
+use std::collections::HashMap;
 
 use bitflags::bitflags;
 use nix::{sys::signal::{self, kill, Signal}, unistd::{gethostname, isatty, tcgetpgrp, tcsetpgrp, Pid, User}};
 use once_cell::sync::Lazy;
 use std::{fs::File, sync::RwLock};
 
-use crate::{event::{self, ShError}, execute::{self, RshWait}, interp::parse::{descend, Node}, RshResult};
+use crate::{event::{self, ShError}, execute::{self, RshWait}, interp::{helper, parse::{descend, Node, Span}}, RshResult};
 
 pub static RSH_PGRP: Lazy<Pid> = Lazy::new(Pid::this);
 
@@ -88,27 +89,130 @@ bitflags! {
 	}
 }
 
-trait RshType {}
-trait RshScalar {}
-trait RshComposite {}
+#[derive(Debug, Clone)]
+pub struct HashFloat(pub f64);
 
-impl RshType for String {}
-impl RshScalar for String {}
+impl PartialEq for HashFloat {
+	fn eq(&self, other: &Self) -> bool {
+	    self.0.to_bits() == other.0.to_bits()
+	}
+}
 
-impl RshType for i32 {}
-impl RshScalar for i32 {}
+impl Eq for HashFloat {}
 
-impl RshType for f64 {}
-impl RshScalar for f64 {}
+impl Hash for HashFloat {
+	fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+	    self.0.to_bits().hash(state)
+	}
+}
 
-impl RshType for bool {}
-impl RshScalar for bool {}
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RVal {
+	String(String),
+	Int(i32),
+	Float(HashFloat),
+	Bool(bool),
+	Array(Vec<RVal>),
+	Dict(BTreeMap<RVal, RVal>),
+}
 
-impl<T: RshType> RshType for Vec<T> {}
-impl<T: RshType> RshComposite for Vec<T> {}
+impl RVal {
+	pub fn parse(s: &str) -> Result<Self, String> {
+		if let Ok(int) = s.parse::<i32>() {
+			return Ok(RVal::Int(int));
+		}
+		if let Ok(float) = s.parse::<f64>() {
+			return Ok(RVal::Float(HashFloat(float)));
+		}
+		if let Ok(boolean) = s.parse::<bool>() {
+			return Ok(RVal::Bool(boolean));
+		}
+		Ok(RVal::String(s.to_string()))
+	}
 
-impl<K: RshType, V: RshType> RshType for HashMap<K,V> {}
-impl<K: RshType, V: RshType> RshComposite for HashMap<K,V> {}
+	pub fn as_os_str(&self) -> Option<&OsStr> {
+		match self {
+			RVal::String(s) => Some(OsStr::new(s)),
+			_ => None, // Only strings can be converted to OsStr
+		}
+	}
+
+	pub fn as_string(&self) -> Option<&String> {
+		if let RVal::String(s) = self {
+			Some(s)
+		} else {
+			None
+		}
+	}
+
+	pub fn as_int(&self) -> Option<i32> {
+		if let RVal::Int(i) = self {
+			Some(*i)
+		} else {
+			None
+		}
+	}
+
+	pub fn as_float(&self) -> Option<f64> {
+		if let RVal::Float(f) = self {
+			Some(f.0)
+		} else {
+			None
+		}
+	}
+
+	pub fn as_bool(&self) -> Option<bool> {
+		if let RVal::Bool(b) = self {
+			Some(*b)
+		} else {
+			None
+		}
+	}
+
+	pub fn as_array(&self) -> Option<&Vec<RVal>> {
+		if let RVal::Array(arr) = self {
+			Some(arr)
+		} else {
+			None
+		}
+	}
+
+	pub fn as_dict(&self) -> Option<&BTreeMap<RVal, RVal>> {
+		if let RVal::Dict(dict) = self {
+			Some(dict)
+		} else {
+			None
+		}
+	}
+}
+
+impl Default for RVal {
+	fn default() -> Self {
+	  RVal::String("".into())
+	}
+}
+
+impl fmt::Display for RVal {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			RVal::Int(int) => write!(f, "{}", int),
+			RVal::String(string) => write!(f, "{}", string),
+			RVal::Float(float) => write!(f, "{}", float.0),
+			RVal::Bool(bool) => write!(f, "{}", bool),
+			RVal::Array(array) => {
+				let formatted_array: Vec<String> = array.iter().map(|val| format!("{}", val)).collect();
+				write!(f, "{}", formatted_array.join(" "))
+			}
+			RVal::Dict(dict) => {
+				let formatted_dict: Vec<String> = dict
+					.iter()
+					.map(|(key, value)| format!("{}: {}", key, value))
+					.collect();
+					write!(f, "{{{}}}", formatted_dict.join(", "))
+			}
+		}
+	}
+}
 
 #[derive(Debug,Clone)]
 pub struct Job {
@@ -468,26 +572,12 @@ impl JobTable {
 	}
 }
 
-#[derive(Debug,Clone)]
-pub enum RshValue {
-	String(String),
-	Bool(bool),
-	Int(i32),
-	Float(f64),
-	Array(Vec<RshValue>),
-	Dict(HashMap<RshValue, RshValue>),
-}
 
 #[derive(Debug,Clone)]
 pub struct VarTable {
 	env: HashMap<String,String>,
 	params: HashMap<String,String>,
-	strings: HashMap<String,String>,
-	bools: HashMap<String,bool>,
-	ints: HashMap<String,i32>,
-	floats: HashMap<String,f64>,
-	arrays: HashMap<String,Vec<RshValue>>,
-	dicts: HashMap<String,HashMap<RshValue,RshValue>>
+	vars: HashMap<String,RVal>
 }
 
 impl VarTable {
@@ -496,33 +586,31 @@ impl VarTable {
 		Self {
 			env,
 			params: HashMap::new(),
-			strings: HashMap::new(),
-			bools: HashMap::new(),
-			ints: HashMap::new(),
-			floats: HashMap::new(),
-			arrays: HashMap::new(),
-			dicts: HashMap::new(),
+			vars: HashMap::new()
 		}
 	}
 
-	pub fn borrow_evars(&self) -> &HashMap<String,String> {
+	pub fn borrow_evars(&self) -> &HashMap<String, String> {
 		&self.env
 	}
 
-
 	// Getters and setters for `env`
 	pub fn get_evar(&self, key: &str) -> Option<String> {
-		self.env.get(key).cloned()
+		self.env.get(key).cloned().map(|evar| evar.to_string())
 	}
 	pub fn export_var(&mut self, key: &str, val: &str) {
-		let value = val.trim_matches(['"','\'']).to_string();
-		self.env.insert(key.into(),value);
-		std::env::set_var(key, val);
+		let value = val.trim_matches(['"', '\'']).to_string();
+		self.env.insert(key.into(), value.clone());
+		std::env::set_var(key, value);
+	}
+	pub fn unset_evar(&mut self, key: &str) {
+		self.env.remove(key);
+		std::env::remove_var(key);
 	}
 
-	// Getters and setters for `params`
+	// Getters, setters, and unsetters for `params`
 	pub fn get_param(&self, key: &str) -> Option<String> {
-		self.params.get(key).cloned()
+		self.params.get(key).cloned().map(|param| param.to_string())
 	}
 	pub fn set_param(&mut self, key: String, value: String) {
 		self.params.insert(key, value);
@@ -530,58 +618,34 @@ impl VarTable {
 	pub fn reset_params(&mut self) {
 		self.params.clear();
 	}
-
-	// Getters and setters for `strings`
-	pub fn get_string(&self, key: &str) -> Option<String> {
-		if let Some(var) = self.strings.get(key).cloned() {
-			Some(var)
-		} else if let Some(var) = self.params.get(key).cloned() {
-			Some(var)
-		} else { self.env.get(key).cloned() }
-	}
-	pub fn set_string(&mut self, key: String, value: String) {
-		let value = value.trim_matches(['"','\'']).to_string();
-		self.strings.insert(key, value);
+	pub fn unset_param(&mut self, key: &str) {
+		self.params.remove(key);
 	}
 
-	// Getters and setters for `bools`
-	pub fn get_bool(&self, key: &str) -> Option<bool> {
-		self.bools.get(key).cloned()
+	pub fn set_var(&mut self, key: &str, val: RVal) {
+		self.vars.insert(key.to_string(),val);
 	}
-	pub fn set_bool(&mut self, key: String, value: bool) {
-		self.bools.insert(key, value);
+	pub fn unset_var(&mut self, key: &str) {
+		self.vars.remove(key);
 	}
-
-	// Getters and setters for `ints`
-	pub fn get_int(&self, key: &str) -> Option<i32> {
-		self.ints.get(key).cloned()
-	}
-	pub fn set_int(&mut self, key: String, value: i32) {
-		self.ints.insert(key, value);
+	pub fn get_var(&self, key: &str) -> Option<RVal> {
+		self.vars.get(key).cloned()
 	}
 
-	// Getters and setters for `floats`
-	pub fn get_float(&self, key: &str) -> Option<f64> {
-		self.floats.get(key).cloned()
-	}
-	pub fn set_float(&mut self, key: String, value: f64) {
-		self.floats.insert(key, value);
-	}
-
-	// Getters and setters for `arrays`
-	pub fn get_array(&self, key: &str) -> Option<Vec<RshValue>> {
-		self.arrays.get(key).cloned()
-	}
-	pub fn set_array(&mut self, key: String, value: Vec<RshValue>) {
-		self.arrays.insert(key, value);
-	}
-
-	// Getters and setters for `dicts`
-	pub fn get_dict(&self, key: &str) -> Option<HashMap<RshValue, RshValue>> {
-		self.dicts.get(key).cloned()
-	}
-	pub fn set_dict(&mut self, key: String, value: HashMap<RshValue, RshValue>) {
-		self.dicts.insert(key, value);
+	pub fn index_arr(&self, key: &str, index: usize) -> RshResult<RVal> {
+		if let Some(var) = self.vars.get(key) {
+			if let RVal::Array(arr) = var {
+				if let Some(value) = arr.get(index) {
+					Ok(value.clone())
+				} else {
+					Err(ShError::from_execf(format!("Index `{}` out of range for array `{}`",index,key).as_str(), 1, Span::new()))
+				}
+			} else {
+				Err(ShError::from_execf(format!("{} is not an array",key).as_str(), 1, Span::new()))
+			}
+		} else {
+			Err(ShError::from_execf(format!("{} is not a variable",key).as_str(), 1, Span::new()))
+		}
 	}
 }
 
@@ -828,6 +892,7 @@ fn init_env_vars(clean: bool) -> HashMap<String,String> {
 	env::set_var("SHELL", pathbuf_to_string(std::env::current_exe()));
 	env_vars.insert("HIST_FILE".into(),format!("{}/.rsh_hist",home));
 	env::set_var("HIST_FILE",format!("{}/.rsh_hist",home));
+
 	env_vars
 }
 

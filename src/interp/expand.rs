@@ -1,5 +1,6 @@
 use chrono::Local;
 use glob::glob;
+use regex::Regex;
 use std::collections::VecDeque;
 use std::io::{BufReader, Read};
 use std::mem::take;
@@ -13,12 +14,51 @@ use crate::interp::helper::{self,StrExtension, VecDequeExtension};
 use crate::shellenv::{read_logic, read_meta, read_vars, write_meta, EnvFlags, SavedEnv};
 use crate::RshResult;
 
-use super::parse::{self, NdType, Node, ParseState};
+use super::parse::{self, NdType, Node, ParseState, Span};
 use super::token::RshTokenizer;
 
 pub fn check_globs(string: String) -> bool {
 	string.has_unescaped("?") ||
 		string.has_unescaped("*")
+}
+
+pub fn expand_shebang(mut body: String) -> RshResult<String> {
+	// If no shebang, use the path to rsh
+	// and attach the '--subshell' argument to signal to the rsh subprocess that it is in a subshell context
+	if !body.starts_with("#!") {
+		let interpreter = std::env::current_exe().unwrap();
+		let mut shebang = "#!".to_string();
+		shebang.push_str(interpreter.to_str().unwrap());
+		shebang = format!("{} {}", shebang, "--subshell");
+		shebang.push('\n');
+		shebang.push_str(&body);
+		return Ok(shebang);
+	}
+
+	// If there is an abbreviated shebang (e.g. `#!python`), find the path to the interpreter using the PATH env var, and expand the command name to the full path (e.g. `#!python` -> `#!/usr/bin/python`)
+	if body.starts_with("#!") && !body.lines().next().unwrap_or_default().contains('/') {
+		let mut command = String::new();
+		let mut body_chars = body.chars().collect::<VecDeque<char>>();
+		body_chars.pop_front(); body_chars.pop_front();
+
+		while let Some(ch) = body_chars.pop_front() {
+			if matches!(ch, ' ' | '\t' | '\n' | ';') {
+				while body_chars.front().is_some_and(|ch| matches!(ch, ' ' | '\t' | '\n' | ';')) {
+					body_chars.pop_front();
+				}
+				body = body_chars.iter().collect::<String>();
+				break;
+			} else {
+				command.push(ch);
+			}
+		}
+		if let Some(path) = helper::which(&command) {
+			let path = format!("{}{}{}", "#!", path, '\n');
+			return Ok(format!("{}{}", path, body));
+		}
+	}
+
+	Ok(body)
 }
 
 pub fn expand_arguments(node: &mut Node) -> RshResult<Vec<Tk>> {
@@ -352,6 +392,7 @@ pub fn expand_alias(mut node: Node) -> RshResult<Node> {
 pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 	let mut working_buffer: VecDeque<Tk> = VecDeque::new();
 	let mut product_buffer: VecDeque<Tk> = VecDeque::new();
+	let split_words = token.tk_type != TkType::String;
 
 	//TODO: find some way to clean up this surprisingly functional mess
 	// Escaping breaks this right now I think
@@ -460,7 +501,30 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 		temp_buffer.push_back(elem);
 	});
 	product_buffer.extend(temp_buffer.drain(..));
+	if split_words {
+		split_tokens(&mut product_buffer);
+	}
 	Ok(product_buffer)
+}
+
+pub fn split_tokens(tk_buffer: &mut VecDeque<Tk>) {
+    let mut new_buffer = VecDeque::new();
+
+    while let Some(tk) = tk_buffer.pop_front() {
+        if tk.text().contains(" ") {
+            // Split the token's text into multiple parts
+            for part in tk.text().split_whitespace() {
+                let new_tk = Tk::new(part.to_string(), tk.span(), tk.flags()); // Adjust to your `Tk` constructor
+                new_buffer.push_back(new_tk);
+            }
+        } else {
+            // Token has no spaces; add it as is
+            new_buffer.push_back(tk);
+        }
+    }
+
+    // Replace the original buffer with the new one
+    *tk_buffer = new_buffer;
 }
 
 pub fn clean_escape_chars(token_buffer: &mut VecDeque<Tk>) {
@@ -603,6 +667,7 @@ pub fn expand_amble(amble: String) -> VecDeque<String> {
 }
 
 pub fn expand_var(mut string: String) -> RshResult<String> {
+	let index_regex = Regex::new(r"(\w+)\[(\d+)\]").unwrap();
 	loop {
 		let mut left = String::new();
 		let mut right = String::new();
@@ -637,10 +702,8 @@ pub fn expand_var(mut string: String) -> RshResult<String> {
 				_ if ch.is_alphanumeric() => {
 					var_name.push(ch);
 				}
-				'_' => {
-					var_name.push(ch);
-				}
-				'-' | '*' | '?' | '$' | '#' => {
+				'_' | '[' | ']' => var_name.push(ch),
+				'-' | '*' | '?' | '$' | '@' | '#' => {
 					var_name.push(ch);
 					break;
 				}
@@ -654,7 +717,19 @@ pub fn expand_var(mut string: String) -> RshResult<String> {
 		}
 		let right = right_chars.iter().collect::<String>();
 
-		let value = read_vars(|vars| vars.get_string(&var_name).unwrap_or_default())?;
+		let value = if index_regex.is_match(&var_name) {
+			if let Some(caps) = index_regex.captures(&var_name) {
+				let var_name = caps.get(1).map_or("", |m| m.as_str());
+				let index = caps.get(2).map_or("", |m| m.as_str());
+
+				read_vars(|v| v.index_arr(var_name, index.parse::<usize>().unwrap()).unwrap())?
+			} else {
+				return Err(ShError::from_syntax("This is a weird way to index a variable", Span::new()));
+			}
+		} else {
+			read_vars(|vars| vars.get_var(&var_name).unwrap_or_default())?
+		};
+
 		let expanded = format!("{}{}{}", left, value, right);
 
 		if expanded.has_unescaped("$") {

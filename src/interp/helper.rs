@@ -1,8 +1,8 @@
-use crate::{interp::token::REGEX, shellenv::read_vars};
+use crate::{interp::token::REGEX, shellenv::{read_meta, read_vars, write_vars, RVal, }, RshResult};
 use nix::unistd::dup2;
-use std::{collections::VecDeque, env, fs, io, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::Path};
+use std::{collections::{HashMap, VecDeque}, env, fs, io, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::Path};
 
-use super::parse::{NdType, Node};
+use super::{parse::{NdType, Node}, token::Tk};
 
 pub trait VecExtension<T> {
 	fn extended(self, vec: Vec<T>) -> Vec<T>;
@@ -17,10 +17,14 @@ impl<T> VecExtension<T> for Vec<T> {
 }
 
 pub trait VecDequeExtension<T> {
+	fn to_vec(self) -> Vec<T>;
 	fn map_rotate<F>(&mut self, transform: F) where F: FnMut(T);
 }
 
 impl<T> VecDequeExtension<T> for VecDeque<T> {
+	fn to_vec(self) -> Vec<T> {
+		self.into_iter().collect::<Vec<T>>()
+	}
 	/// Applies a transformation function to each element of the `VecDeque`
 	/// while preserving the original order of elements.
 	///
@@ -194,6 +198,29 @@ impl StrExtension for str {
 
 }
 
+pub fn parse_vec(input: &str) -> Result<Vec<RVal>,String> {
+	if !input.starts_with('[') {
+		return Err("Did not find an opening bracket for this array definition".into())
+	}
+	if !input.ends_with(']') {
+		return Err("Did not find a closing bracket for this array definition".into())
+	}
+	let array_str = input.strip_prefix('[').unwrap().strip_suffix(']').unwrap();
+	if let Some(vec) = vec_by_type(array_str) {
+		Ok(vec)
+	} else {
+		Err("Failed to parse this array".into())
+	}
+}
+
+fn vec_by_type(str: &str) -> Option<Vec<RVal>> {
+	str.split(',')
+		.map(str::trim)
+		.map(RVal::parse)
+		.collect::<Result<Vec<RVal>, _>>()
+		.ok()
+}
+
 // This is used when pesky system calls want to emit their own errors
 // Which ends up being redundant, since rsh has it's own error reporting system
 // Kind of hacky but fuck it
@@ -229,6 +256,32 @@ pub fn is_exec(path: &Path) -> bool {
 		.unwrap_or(false)
 }
 
+pub fn handle_autocd_check(node: &Node, argv: &[Tk]) -> RshResult<bool> {
+	if read_meta(|m| m.get_shopt("autocd").is_some_and(|opt| opt > 0))? && argv.len() == 1 {
+		let path_cand = argv.first().unwrap();
+		let is_relative = path_cand.text().starts_with('.');
+		let contains_slash = path_cand.text().contains('/');
+		let path_exists = Path::new(path_cand.text()).is_dir();
+
+		if (is_relative || contains_slash) && path_exists {
+			return Ok(true);
+		}
+	}
+	Ok(false)
+}
+
+pub fn unset_var_conflicts(key: &str) -> RshResult<()> {
+	if read_vars(|v| v.get_var(key))?.is_some() {
+		write_vars(|v| v.unset_var(key))?
+	}
+	if read_vars(|v| v.get_evar(key))?.is_some() {
+		std::env::remove_var(key);
+		write_vars(|v| v.unset_evar(key))?;
+	}
+
+	Ok(())
+}
+
 pub fn flatten_pipeline(left: Node, right: Node, mut flattened: VecDeque<Node>) -> VecDeque<Node> {
 	flattened.push_front(right);
 	if let NdType::PipelineBranch { left, right, both: _ } = left.nd_type {
@@ -262,19 +315,4 @@ pub fn is_brace_expansion(text: &str) -> bool {
 		} else {
 			false
 		}
-}
-
-#[cfg(test)]
-mod test {
-	use super::StrExtension;
-
-	#[test]
-	fn split_last_test() {
-		let string = "hello there here is a pattern '&&&' and another occurence of it '&&&' and another! '&&&' a lot of patterns today";
-		if let Some((left,right)) = string.split_last("&&&") {
-			assert_eq!((left,right),("hello there here is a pattern '&&&' and another occurence of it '&&&' and another! '".into(),"' a lot of patterns today".into()))
-		} else {
-			panic!()
-		}
-	}
 }

@@ -4,7 +4,7 @@ use libc::{memfd_create, MFD_CLOEXEC};
 use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::{waitpid, WaitStatus}}, unistd::{close, dup, dup2, execve, execvpe, fork, getpid, pipe, setpgid, tcgetpgrp, tcsetpgrp, ForkResult, Pid}, NixPath};
 use std::sync::Mutex;
 
-use crate::{builtin, event::{self, ShError, ShEvent}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node, Span}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, Job, SavedEnv}, RshResult, GLOBAL_EVENT_CHANNEL};
+use crate::{builtin, event::{self, ShError, ShEvent}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node, Span}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, Job, RVal, SavedEnv}, RshResult, GLOBAL_EVENT_CHANNEL};
 
 macro_rules! node_operation {
 	($node_type:path { $($field:tt)* }, $node:expr, $node_op:block) => {
@@ -389,7 +389,7 @@ impl ExecDispatcher {
 		Self { inbox }
 	}
 	pub fn run(&self) -> RshResult<RshWait> {
-		let mut status = RshWait::new();
+		let status = RshWait::new();
 		for tree in self.inbox.iter() {
 			thread::spawn(move || {
 				if let Err(e) = traverse_ast(tree) {
@@ -540,37 +540,58 @@ fn handle_case(node: Node, io: ProcIO) -> RshResult<RshWait> {
 
 fn handle_for(node: Node,io: ProcIO) -> RshResult<RshWait> {
 	let mut last_status = RshWait::new();
-	let body_io = ProcIO::from(None, io.stdout, io.stderr);
-	let redirs = node.get_redirs()?;
-	handle_redirs(redirs.into())?;
 
-	node_operation!(NdType::For { loop_vars, mut loop_arr, loop_body}, node, {
-		let var_count = loop_vars.len();
-		let mut var_index = 0;
-		let mut iteration_count = 0;
+	match unsafe { fork() } {
+		Ok(ForkResult::Child) => {
+			let body_io = ProcIO::from(None, io.stdout, io.stderr);
+			let redirs = node.get_redirs()?;
+			dbg!(&redirs);
+			handle_redirs(redirs.into())?;
 
-		let mut arr_buffer = VecDeque::new();
-		while let Some(token) = loop_arr.pop_front() {
-			let mut expanded = expand::expand_token(token, true)?;
-			while let Some(exp_token) = expanded.pop_front() {
-				arr_buffer.push_back(exp_token);
+			node_operation!(NdType::For { loop_vars, mut loop_arr, loop_body}, node, {
+				let var_count = loop_vars.len();
+				let mut var_index = 0;
+				let mut iteration_count = 0;
+
+				let mut arr_buffer = VecDeque::new();
+				while let Some(token) = loop_arr.pop_front() {
+					let mut expanded = expand::expand_token(token, true)?;
+					while let Some(exp_token) = expanded.pop_front() {
+						arr_buffer.push_back(exp_token);
+					}
+				}
+				loop_arr.extend(arr_buffer.drain(..));
+
+				while !loop_arr.is_empty() {
+					let current_val = loop_arr.pop_front().unwrap().text().to_string();
+
+					let current_var = loop_vars[var_index].text().to_string();
+					write_vars(|v| v.set_var(&current_var, RVal::parse(&current_val).unwrap_or_default()))?;
+
+					iteration_count += 1;
+					// TODO: modulo is expensive; find a better way to do this
+					var_index = iteration_count % var_count;
+
+					last_status = traverse_root(*loop_body.clone(), None, body_io.clone())?;
+				}
+			});
+			std::process::exit(0);
+		}
+		Ok(ForkResult::Parent { child }) => {
+			setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
+			if node.flags.contains(NdFlags::BACKGROUND) {
+				let job_id = write_jobs(|j| j.new_job(vec![child], vec!["for".into()], child))?;
+				shellenv::try_prompt()?;
+			} else {
+				if !node.flags.contains(NdFlags::FUNCTION) {
+					shellenv::attach_tty(child)?;
+				}
+				let job = Job::new(0, vec![child], vec!["for".into()], child);
+				write_jobs(|j| j.new_fg(job))?;
 			}
 		}
-		loop_arr.extend(arr_buffer.drain(..));
-
-		while !loop_arr.is_empty() {
-			let current_val = loop_arr.pop_front().unwrap().text().to_string();
-
-			let current_var = loop_vars[var_index].text().to_string();
-			write_vars(|v| v.set_string(current_var, current_val))?;
-
-			iteration_count += 1;
-			// TODO: modulo is expensive; find a better way to do this
-			var_index = iteration_count % var_count;
-
-			last_status = traverse_root(*loop_body.clone(), None, body_io.clone())?;
-		}
-	});
+		Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_for".into(), 1, node.span())),
+	}
 
 	Ok(last_status)
 }
@@ -660,7 +681,7 @@ fn handle_assignment(node: Node) -> RshResult<RshWait> {
 			let expanded = expand::expand_cmd_sub(dummy_tk)?;
 			value = expanded.text().to_string();
 		}
-		write_vars(|v| v.set_string(name, value))?;
+		write_vars(|v| v.set_var(&name, RVal::parse(&value).unwrap_or_default()))?;
 	});
 	shellenv::try_prompt()?;
 	Ok(RshWait::Success)
@@ -673,8 +694,14 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 		"expr" => builtin::expr(node, io),
 		"set" => builtin::set_or_unset(node, true),
 		"jobs" => builtin::jobs(node, io),
-		"fg" => builtin::fg(node, io),
+		"fg" => builtin::fg(node),
 		"bg" => builtin::bg(node),
+		"int" => builtin::int(node),
+		"bool" => builtin::bool(node),
+		"float" => builtin::float(node),
+		"arr" => builtin::array(node),
+		"type" => builtin::r#type(node),
+		//"dict" => builtin::dict(node),
 		"unset" => builtin::set_or_unset(node, false),
 		"source" => builtin::source(node),
 		"cd" => builtin::cd(node),
@@ -712,7 +739,7 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 		body = expand::expand_var(body.trim().to_string())?;
 		if body.is_empty() {
 			shellenv::try_prompt()?;
-			return Ok(RshWait::Success)
+			return Ok(RshWait::Success);
 		}
 
 		let mut c_argv = vec![CString::new("anonymous_subshell").unwrap()];
@@ -721,40 +748,9 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 			c_argv.push(c_arg);
 		}
 
-		// Shebang handling
-		// If no shebang, use the path to rsh
-		// and attach the '--subshell' argument to signal to the rsh subprocess that it is in a subshell context
-		if !body.starts_with("#!") {
-			let interpreter = std::env::current_exe().unwrap();
-			let mut shebang = "#!".to_string();
-			shebang.push_str(interpreter.to_str().unwrap());
-			shebang = format!("{} {}",shebang, "--subshell");
-			shebang.push('\n');
-			shebang.push_str(&body);
-			body = shebang;
+		// Handle shebang expansion
+		body = expand::expand_shebang(body)?;
 
-			// If there is an abbreviated shebang (e.g. `#!python`), find the path to the interpreter using the PATH env var, and expand the command name to the full path (e.g. `#!python` -> `#!/usr/bin/python`)
-		} else if body.starts_with("#!") && !body.lines().next().unwrap_or_default().contains('/') {
-			let mut command = String::new();
-			let mut body_chars = body.chars().collect::<VecDeque<char>>();
-			body_chars.pop_front(); body_chars.pop_front();
-
-			while let Some(ch) = body_chars.pop_front() {
-				if matches!(ch, ' ' | '\t' | '\n' | ';') {
-					while body_chars.front().is_some_and(|ch| matches!(ch, ' ' | '\t' | '\n' | ';')) {
-						body_chars.pop_front();
-					}
-					body = body_chars.iter().collect::<String>();
-					break
-				} else {
-					command.push(ch);
-				}
-			}
-			if let Some(path) = helper::which(&command) {
-				let path = format!("{}{}{}","#!",path,'\n');
-				body = format!("{}{}",path,body);
-			}
-		}
 		// Write the subshell contents to an in-memory file descriptor
 		let mut memfd = RustFd::new_memfd("anonymous_subshell", true)?;
 		memfd.write(body.as_bytes())?;
@@ -767,10 +763,10 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 			if !redirs.is_empty() {
 				open_fds.extend(handle_redirs(redirs.into())?);
 			}
-			let fd_path = CString::new(format!("/proc/self/fd/{}",memfd)).unwrap();
+			let fd_path = CString::new(format!("/proc/self/fd/{}", memfd)).unwrap();
 			let envp = shellenv::get_cstring_evars()?;
 			execve(&fd_path, &c_argv, &envp).unwrap();
-			unreachable!()
+			unreachable!();
 		}
 
 		// Execute the memfd in a forked child process
@@ -780,10 +776,10 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 				if !redirs.is_empty() {
 					open_fds.extend(handle_redirs(redirs.into())?);
 				}
-				let fd_path = CString::new(format!("/proc/self/fd/{}",memfd)).unwrap();
+				let fd_path = CString::new(format!("/proc/self/fd/{}", memfd)).unwrap();
 				let envp = shellenv::get_cstring_evars()?;
 				execve(&fd_path, &c_argv, &envp).unwrap();
-				unreachable!()
+				unreachable!();
 			}
 			Ok(ForkResult::Parent { child }) => {
 				memfd.close()?;
@@ -797,13 +793,14 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 					env_snapshot.restore_snapshot()?;
 				}
 			}
-			Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_subshell".into(), 1, node.span()))
+			Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_subshell".into(), 1, node.span())),
 		}
 
 		io.restore_fildescs()?;
 		Ok(RshWait::Success)
 	})
 }
+
 
 fn handle_function(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 	let span = node.span();
@@ -843,32 +840,86 @@ fn handle_function(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 	} else { unreachable!() }
 }
 
-fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
-	// Can't use fork_instruction! in this function unfortunately, because of the weird way that process group ids are handled with pipelines.
-	// TODO: Make fork_instruction! work with this logic somehow? would be nice
-	let mut last_status;
+/// Handles the execution of a pipeline of commands.
+///
+/// This function processes a node representing a pipeline of commands,
+/// creating the necessary pipes and forking processes to execute each command
+/// in the pipeline. It also handles process group IDs to ensure that the
+/// commands in the pipeline are executed as a single job.
+///
+/// # Arguments
+///
+/// * `node` - The node representing the pipeline of commands.
+/// * `io` - The `ProcIO` object managing input/output redirection.
+///
+/// # Returns
+///
+/// * `RshResult<RshWait>` - The result of the pipeline execution.
+///
+/// # Behavior
+///
+/// 1. **Initialization**:
+///    - Initializes variables to keep track of the previous read pipe,
+///      process group ID, command names, and process IDs.
+///
+/// 2. **Command Iteration**:
+///    - Iterates through each command in the pipeline.
+///    - Creates pipes between commands to handle inter-process communication.
+///    - Prepares the `ProcIO` object for each command, setting up input and output redirections.
+///
+/// 3. **Forking Processes**:
+///    - Forks a new process for each command in the pipeline.
+///    - In the child process, it routes input/output as necessary and executes the command.
+///    - In the parent process, it manages process group IDs and closes unused pipes.
+///
+/// 4. **Job Management**:
+///    - If the pipeline is to be executed in the background, it creates a new background job.
+///    - If the pipeline is to be executed in the foreground, it creates a new foreground job and attaches the terminal to the process group.
+///
+/// 5. **Completion**:
+///    - Returns the result of the pipeline execution.
+///
+/// # Notes
+///
+/// - This function does not use `fork_instruction!` due to the specific handling required for process group IDs in pipelines.
+/// - It handles shell functions containing pipelines and ensures proper input/output routing.
+///
+/// # Errors
+///
+/// - Returns an error if any of the fork or exec operations fail.
+/// - Returns an error if setting the process group ID fails.
+///
+/// # Example
+///
+/// ```rust
+/// let node = Node::from_pipeline("command1 | command2");
+/// let io = ProcIO::new();
+/// let result = handle_pipeline(node, io);
+/// ```
+///
+/// This example demonstrates how to create a pipeline node and handle its execution using the `handle_pipeline` function.
+pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 	let span = node.span();
 
 	let mut prev_read_pipe: Option<RustFd> = None;
 	let mut pgid: Option<Pid> = None;
 	let mut cmds = vec![];
 	let mut pids = vec![];
-	let mut fd_queue: Vec<RustFd> = vec![];
 
-	last_status = node_operation!(NdType::Pipeline { mut commands, both }, node, {
+	let last_status = node_operation!(NdType::Pipeline { mut commands, both }, node, {
 		let background = commands.back().is_some_and(|cmd| cmd.flags.contains(NdFlags::BACKGROUND));
 		let mut count = 0;
 		let last = commands.len() - 1;
 		while let Some(mut command) = commands.pop_front() {
-			let (r_pipe,mut w_pipe) = if !commands.is_empty() {
-				let (r_pipe,w_pipe) = RustFd::pipe()?;
-				(Some(r_pipe),Some(w_pipe))
+			let (r_pipe, mut w_pipe) = if !commands.is_empty() {
+				let (r_pipe, w_pipe) = RustFd::pipe()?;
+				(Some(r_pipe), Some(w_pipe))
 			} else {
-				(None,None)
+				(None, None)
 			};
 
 			let argv = command.get_argv()?;
-			if let NdType::Subshell {..} = command.nd_type {
+			if let NdType::Subshell { .. } = command.nd_type {
 				cmds.push("subshell".to_string());
 			} else {
 				let cmd_name = argv.first().unwrap().text();
@@ -880,7 +931,6 @@ fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 				w_pipe.take().map(|pipe| pipe.mk_shared()),
 				io.stderr.clone(),
 			);
-
 
 			match unsafe { fork() } {
 				Ok(ForkResult::Child) => {
@@ -894,17 +944,17 @@ fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 						io.route_output()?;
 					}
 					if let Some(mut read_pipe) = prev_read_pipe {
-							read_pipe.close()?;
+						read_pipe.close()?;
 					}
 					if let Some(mut write_pipe) = w_pipe {
-							write_pipe.close()?;
+						write_pipe.close()?;
 					}
 					command.flags |= NdFlags::IN_PIPE;
-					let result = traverse(command,current_io)?;
+					let result = traverse(command, current_io)?;
 					match result {
 						RshWait::Success => std::process::exit(0),
 						RshWait::Fail { code, cmd: _ } => std::process::exit(code),
-						_ => todo!()
+						_ => todo!(),
 					}
 				}
 				Ok(ForkResult::Parent { child }) => {
@@ -922,7 +972,7 @@ fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 
 					prev_read_pipe = r_pipe;
 
-					setpgid(child,pgid.unwrap()).map_err(|_| ShError::from_internal("Failed to set pgid in pipeline"))?;
+					setpgid(child, pgid.unwrap()).map_err(|_| ShError::from_internal("Failed to set pgid in pipeline"))?;
 					if commands.is_empty() {
 						if background {
 							write_jobs(|j| j.new_job(pids, cmds, pgid.unwrap()))?;
@@ -932,7 +982,7 @@ fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 							write_jobs(|j| j.new_fg(job))?;
 							shellenv::attach_tty(pgid.unwrap())?
 						}
-						break
+						break;
 					}
 				}
 				Err(e) => {
@@ -953,31 +1003,25 @@ fn handle_command(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 	let redirs = node.get_redirs()?;
 
 	if let NdType::Command { ref argv } = node.nd_type {
-		if read_meta(|m| m.get_shopt("autocd").is_some_and(|opt| opt > 0))? && argv.len() == 1 {
+		if helper::handle_autocd_check(&node, &argv.clone().to_vec())? {
 			let path_cand = argv.front().unwrap();
-			let is_relative = path_cand.text().starts_with('.');
-			let contains_slash = path_cand.text().contains('/');
-			let path_exists = Path::new(path_cand.text()).is_dir();
-
-			if (is_relative || contains_slash) && path_exists {
-				let argv = node.get_argv()?;
-				return handle_autocd(node.clone(), argv, path_cand.flags(),io);
-			}
+			let argv = node.get_argv()?;
+			return handle_autocd(node.clone(), argv, path_cand.flags(), io);
 		}
 	}
 
 	io.backup_fildescs()?;
 	io.route_io()?;
 
-	let (command,envp) = prepare_execvpe(&argv)?;
+	let (command, envp) = prepare_execvpe(&argv)?;
 
 	if node.flags.contains(NdFlags::IN_PIPE) {
 		let mut open_fds = VecDeque::new();
 		if !redirs.is_empty() {
 			open_fds.extend(handle_redirs(redirs.into())?);
 		}
-		execvpe(&command,&argv,&envp).unwrap();
-		unreachable!()
+		execvpe(&command, &argv, &envp).unwrap();
+		unreachable!();
 	}
 
 	match unsafe { fork() } {
@@ -986,8 +1030,8 @@ fn handle_command(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 			if !redirs.is_empty() {
 				open_fds.extend(handle_redirs(redirs.into())?);
 			}
-			execvpe(&command,&argv,&envp).unwrap();
-			unreachable!()
+			execvpe(&command, &argv, &envp).unwrap();
+			unreachable!();
 		}
 		Ok(ForkResult::Parent { child }) => {
 			setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
@@ -1002,7 +1046,7 @@ fn handle_command(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 				write_jobs(|j| j.new_fg(job))?;
 			}
 		}
-		Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_command".into(), 1, node.span()))
+		Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_command".into(), 1, node.span())),
 	}
 
 	io.restore_fildescs()?;

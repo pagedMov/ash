@@ -885,6 +885,7 @@ impl RshTokenizer {
 		let mut dub_quote = false;
 		let mut sng_quote = false;
 		let mut paren_stack = vec![];
+		let mut bracket_stack = vec![];
 		while let Some(ch) = self.advance() {
 			match ch {
 				'\\' => {
@@ -893,7 +894,15 @@ impl RshTokenizer {
 						wd = wd.add_char(char)
 					}
 				}
-				'(' => {
+				'[' if paren_stack.is_empty() => {
+					bracket_stack.push(ch);
+					wd = wd.add_char(ch)
+				}
+				']' if !bracket_stack.is_empty() => {
+					bracket_stack.pop();
+					wd = wd.add_char(ch)
+				}
+				'(' if bracket_stack.is_empty() => {
 					paren_stack.push(ch);
 					wd = wd.add_char(ch)
 				}
@@ -904,14 +913,12 @@ impl RshTokenizer {
 				'\'' if !dub_quote => {
 					// Single quote handling
 					sng_quote = !sng_quote;
-					wd = wd.add_char(ch);
 				}
 				'"' if !sng_quote => {
 					// Double quote handling
 					dub_quote = !dub_quote;
-					wd = wd.add_char(ch);
 				}
-				_ if !paren_stack.is_empty() || dub_quote || sng_quote => {
+				_ if !bracket_stack.is_empty() || !paren_stack.is_empty() || dub_quote || sng_quote => {
 					// Inside a quoted string
 					wd = wd.add_char(ch);
 				}
