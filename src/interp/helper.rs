@@ -91,6 +91,7 @@ impl<T> VecDequeExtension<T> for VecDeque<T> {
 }
 
 pub trait StrExtension {
+	fn trim_command_sub(&self) -> Option<String>;
 	fn split_last(&self, pat: &str) -> Option<(String,String)>;
 	fn has_unescaped(&self, pat: &str) -> bool;
 	fn consume_escapes(&self) -> String;
@@ -98,6 +99,11 @@ pub trait StrExtension {
 }
 
 impl StrExtension for str {
+	fn trim_command_sub(&self) -> Option<String> {
+		self.strip_prefix("$(")
+			.and_then(|s| s.strip_suffix(")"))
+			.map(|s| s.trim().to_string())
+	}
 	fn trim_quotes(&self) -> String {
 		let chars = self.chars();
 		let mut result = String::new();

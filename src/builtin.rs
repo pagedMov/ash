@@ -10,23 +10,19 @@ use libc::{getegid, geteuid};
 use nix::fcntl::OFlag;
 use nix::sys::signal::{killpg, Signal};
 use nix::sys::stat::Mode;
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{access, fork, isatty, setpgid, AccessFlags, ForkResult, Pid};
-use crate::event::{self,ShEvent};
-use crate::interp::helper::StrExtension;
-use nix::unistd::tcsetpgrp;
-use std::os::fd::BorrowedFd;
+use nix::unistd::{access, fork, isatty, AccessFlags, ForkResult, Pid};
 
 use crate::execute::{ProcIO, RshWait, RustFd};
-use crate::interp::parse::{NdFlags, NdType, Node, Span};
+use crate::interp::helper::StrExtension;
+use crate::interp::parse::{NdType, Node, Span};
 use crate::interp::{expand, token};
-use crate::interp::token::{Redir, RedirType, Tk};
+use crate::interp::token::{Redir, RedirType, Tk, TkType, WdFlags};
 use crate::shellenv::{self, read_jobs, read_logic, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, JobFlags };
 use crate::event::ShError;
 use crate::RshResult;
 
-pub const BUILTINS: [&str; 23] = [
-	"echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "wait",
+pub const BUILTINS: [&str; 24] = [
+	"expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "wait",
 ];
 
 bitflags! {
@@ -462,6 +458,324 @@ pub fn test(mut argv: VecDeque<Tk>) -> RshResult<RshWait> {
 	}
 }
 
+#[derive(Debug,Clone,PartialEq)]
+pub enum ExprToken {
+	Val { val: f64 },
+	Mod,
+	Div,
+	IntDiv,
+	Mult,
+	Add,
+	Sub,
+	Exp,
+	LParen,
+	RParen
+}
+
+impl ExprToken {
+	pub fn from(text: &str) -> Option<Self> {
+		match text {
+			_ if text.parse::<f64>().is_ok() => Some(Self::Val { val: text.parse::<f64>().unwrap() }),
+			"+" => Some(Self::Add),
+			"-" => Some(Self::Sub),
+			"/" => Some(Self::Div),
+			"**" => Some(Self::Exp),
+			"*" => Some(Self::Mult),
+			"%" => Some(Self::Mod),
+			"//" => Some(Self::IntDiv),
+			"(" => Some(Self::RParen),
+			")" => Some(Self::LParen),
+			_ => None
+		}
+	}
+	pub fn calculate(&self, left: f64, right: f64) -> Option<f64> {
+		match self {
+			ExprToken::Add => Some(left + right),
+			ExprToken::Sub => Some(left - right),
+			ExprToken::Mult => Some(left * right),
+			ExprToken::Div => {
+				if right != 0.0 {
+					Some(left / right)
+				} else {
+					None // Avoid division by zero
+				}
+			}
+			ExprToken::Mod => {
+				if right != 0.0 {
+					Some(left % right)
+				} else {
+					None // Avoid modulo by zero
+				}
+			}
+			ExprToken::IntDiv => {
+				if right != 0.0 {
+					Some((left / right).floor())
+				} else {
+					None // Avoid integer division by zero
+				}
+			}
+			ExprToken::Exp => Some(left.powf(right)),
+			_ => None, // LParen, RParen, and Val are not valid operators
+		}
+	}
+	pub fn extract_val(&self) -> Option<f64> {
+		if let ExprToken::Val { val } = self {
+			Some(*val)
+		} else {
+			None
+		}
+	}
+	pub fn precedence(&self) -> u8 {
+		match self {
+			ExprToken::Add | ExprToken::Sub => 1,
+			ExprToken::Mult | ExprToken::Div | ExprToken::IntDiv | ExprToken::Mod | ExprToken::Exp => 2,
+			_ => 0
+		}
+	}
+	pub fn is_left_associative(&self) -> bool {
+		matches!(self, ExprToken::Add | ExprToken::Sub | ExprToken::Mult | ExprToken::Div | ExprToken::IntDiv | ExprToken::Exp)
+	}
+}
+
+pub fn tokenize_expr(input: &str) -> Vec<ExprToken> {
+	let mut tokens = Vec::new();
+	let mut current = String::new();
+
+	let mut chars = input.chars().peekable();
+
+	while let Some(ch) = chars.next() {
+		match ch {
+			' ' => {
+				// If there's an accumulated token, process it
+				if !current.is_empty() {
+					if let Some(token) = ExprToken::from(&current) {
+						tokens.push(token);
+						current.clear();
+					} else {
+						panic!("Invalid token: {}", current);
+					}
+				}
+			}
+			'(' => {
+				// Process any accumulated token before '('
+				if !current.is_empty() {
+					if let Some(token) = ExprToken::from(&current) {
+						tokens.push(token);
+						current.clear();
+					} else {
+						panic!("Invalid token: {}", current);
+					}
+				}
+				tokens.push(ExprToken::LParen);
+			}
+			')' => {
+				// Process any accumulated token before ')'
+				if !current.is_empty() {
+					if let Some(token) = ExprToken::from(&current) {
+						tokens.push(token);
+						current.clear();
+					} else {
+						panic!("Invalid token: {}", current);
+					}
+				}
+				tokens.push(ExprToken::RParen);
+			}
+			'+' | '-' | '*' | '/' | '%' => {
+				// Handle operators
+				if !current.is_empty() {
+					if let Some(token) = ExprToken::from(&current) {
+						tokens.push(token);
+						current.clear();
+					} else {
+						panic!("Invalid token: {}", current);
+					}
+				}
+
+				// Handle multi-character operators (like `**` or `//`)
+				if ch == '*' || ch == '/' {
+					if let Some(next_ch) = chars.peek() {
+						if *next_ch == ch {
+							chars.next(); // Consume the second character
+							tokens.push(ExprToken::from(&format!("{ch}{ch}")).unwrap());
+							continue;
+						}
+					}
+				}
+
+				// Single-character operators
+				tokens.push(ExprToken::from(&ch.to_string()).unwrap());
+			}
+			_ if ch.is_ascii_digit() || ch == '.' => {
+				// Accumulate numbers
+				current.push(ch);
+			}
+			_ => {
+				panic!("Invalid character: {}", ch);
+			}
+		}
+	}
+
+	// Process the last accumulated token, if any
+	if !current.is_empty() {
+		if let Some(token) = ExprToken::from(&current) {
+			tokens.push(token);
+		} else {
+			panic!("Invalid token: {}", current);
+		}
+	}
+
+	tokens
+}
+
+pub fn shunting_yard(tokens: Vec<ExprToken>) -> Vec<ExprToken> {
+	let mut output: VecDeque<ExprToken> = VecDeque::new();
+	let mut operators: Vec<ExprToken> = Vec::new();
+
+	for token in tokens {
+		match token {
+			ExprToken::Val { .. } => output.push_back(token),
+			ExprToken::Add | ExprToken::Sub | ExprToken::Mult | ExprToken::Div | ExprToken::IntDiv | ExprToken::Mod | ExprToken::Exp => {
+				while let Some(op) = operators.last() {
+					if op.precedence() >= token.precedence() && token.is_left_associative() {
+						output.push_back(operators.pop().unwrap());
+					} else {
+						break;
+					}
+				}
+				operators.push(token);
+			}
+			ExprToken::LParen => operators.push(token),
+			ExprToken::RParen => {
+				while let Some(op) = operators.pop() {
+					if let ExprToken::LParen = op {
+						break;
+					} else {
+						output.push_back(op);
+					}
+				}
+			}
+		}
+	}
+
+	while let Some(op) = operators.pop() {
+		output.push_back(op);
+	}
+
+	output.into()
+}
+
+fn float_to_string(value: f64) -> String {
+    if value.fract() == 0.0 {
+        // Convert to integer if there's no fractional part
+        format!("{}", value as i64)
+    } else {
+        // Keep as a float with precision
+        format!("{}", value)
+    }
+}
+
+pub fn expr(node: Node, io: ProcIO) -> RshResult<RshWait> {
+	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
+	argv.pop_front(); // Ignore `expr`
+
+	let arg = argv.pop_front();
+	let mut result: f64 = 0.0;
+
+	if let Some(expr) = arg {
+		if let TkType::String = expr.tk_type {
+			let tokens = tokenize_expr(expr.text());
+
+			let mut rpn = VecDeque::from(shunting_yard(tokens));
+			let mut token_buffer = VecDeque::new();
+
+			while let Some(token) = rpn.pop_front() {
+				if let ExprToken::Val { .. } = token {
+					// Push values directly onto the stack
+					token_buffer.push_back(token);
+				} else {
+					// Pop operands for the operator
+					let right = token_buffer.pop_back().ok_or_else(|| {
+						ShError::InvalidSyntax("Missing right operand for operator".into(), node.span())
+					})?;
+					let r_val = right.extract_val().unwrap();
+
+					let left = token_buffer.pop_back().ok_or_else(|| {
+						ShError::InvalidSyntax("Missing left operand for operator".into(), node.span())
+					})?;
+					let l_val = left.extract_val().unwrap();
+
+					// Perform the calculation
+					if let Some(calculation) = token.calculate(l_val, r_val) {
+						// Push the result back onto the stack
+						token_buffer.push_back(ExprToken::Val { val: calculation });
+						result = calculation; // Keep track of the final result
+					} else {
+						return Err(ShError::InvalidSyntax(
+								format!("Invalid calculation for operator {:?}", token),
+								node.span(),
+						));
+					}
+				}
+			}
+
+			// At this point, token_buffer should contain the final result as the last value
+			if token_buffer.len() != 1 {
+				return Err(ShError::InvalidSyntax(
+						"Malformed expression: multiple values remain in operand stack".into(),
+						node.span(),
+				));
+			}
+		} else {
+			return Err(ShError::InvalidSyntax(
+					"Expected a string in `expr` argument".into(),
+					node.span(),
+			));
+		}
+	}
+
+	// Convert the final result to a string
+	let result = float_to_string(result);
+
+	// Now we will manually construct a call to echo, and then use the echo() function to display the result
+	// This method allows us to leverage the I/O logic already present in echo() for free instead of re-implementing it here
+	let echo_call = Node {
+		command: Some(Tk {
+			tk_type: TkType::Ident,
+			wd: token::WordDesc {
+				text: "echo".into(),
+				span: node.span(),
+				flags: WdFlags::empty(),
+			},
+		}),
+		nd_type: NdType::Builtin {
+			argv: VecDeque::from(vec![
+				Tk {
+					tk_type: TkType::Ident,
+					wd: token::WordDesc {
+						text: "echo".into(),
+						span: node.span(),
+						flags: WdFlags::empty()
+					}
+				},
+				Tk {
+					tk_type: TkType::String,
+					wd: token::WordDesc {
+						text: result,
+						span: node.span(),
+						flags: WdFlags::empty(),
+					},
+				}
+			]),
+		},
+		flags: node.flags,
+		redirs: node.redirs.clone(),
+		span: node.span(),
+	};
+
+	echo(echo_call, io)?;
+	Ok(RshWait::Success)
+}
+
 pub fn alias(node: Node) -> RshResult<RshWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front();
@@ -496,18 +810,18 @@ pub fn cd(node: Node) -> RshResult<RshWait> {
 		.iter()
 		.map(|arg| CString::new(arg.text()).unwrap())
 		.collect::<VecDeque<CString>>();
-	argv.pop_front();
-	let new_pwd;
-	if let Some(arg) = argv.pop_front() {
-		new_pwd = arg;
-	} else if let Some(home_path) = read_vars(|vars| vars.get_evar("HOME"))? {
-		new_pwd = CString::new(home_path).unwrap();
-	} else {
-		new_pwd = CString::new("/").unwrap();
-	}
-	let path = Path::new(new_pwd.to_str().unwrap());
-	std::env::set_current_dir(path).map_err(|_| ShError::from_io())?;
-	Ok(RshWait::Success )
+		argv.pop_front();
+		let new_pwd;
+		if let Some(arg) = argv.pop_front() {
+			new_pwd = arg;
+		} else if let Some(home_path) = read_vars(|vars| vars.get_evar("HOME"))? {
+			new_pwd = CString::new(home_path).unwrap();
+		} else {
+			new_pwd = CString::new("/").unwrap();
+		}
+		let path = Path::new(new_pwd.to_str().unwrap());
+		std::env::set_current_dir(path).map_err(|_| ShError::from_io())?;
+		Ok(RshWait::Success )
 }
 
 pub fn fg(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
@@ -643,12 +957,12 @@ pub fn source(node: Node) -> RshResult<RshWait> {
 		.iter()
 		.map(|arg| CString::new(arg.text()).unwrap())
 		.collect::<VecDeque<CString>>();
-	argv.pop_front();
-	for path in argv {
-		let file_path = Path::new(OsStr::from_bytes(path.as_bytes()));
-		shellenv::source_file(file_path.to_path_buf())?
-	}
-	Ok(RshWait::Success )
+		argv.pop_front();
+		for path in argv {
+			let file_path = Path::new(OsStr::from_bytes(path.as_bytes()));
+			shellenv::source_file(file_path.to_path_buf())?
+		}
+		Ok(RshWait::Success )
 }
 
 fn flags_from_chars(chars: &str) -> EnvFlags {
@@ -816,9 +1130,9 @@ pub fn echo(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 			RustFd::from_stderr()?
 		}
 	} else if let Some(ref out_fd) = io.stdout {
-			out_fd.lock().unwrap().dup().unwrap_or_else(|_| RustFd::from_stdout().unwrap())
-		} else {
-			RustFd::from_stdout()?
+		out_fd.lock().unwrap().dup().unwrap_or_else(|_| RustFd::from_stdout().unwrap())
+	} else {
+		RustFd::from_stdout()?
 	};
 
 	if let Some(ref fd) = io.stderr {

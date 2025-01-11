@@ -884,34 +884,60 @@ impl RshTokenizer {
 	fn complete_word(&mut self, mut wd: WordDesc) -> WordDesc {
 		let mut dub_quote = false;
 		let mut sng_quote = false;
+		let mut paren_stack = vec![];
 		while let Some(ch) = self.advance() {
-			if matches!(ch, '\'') && !dub_quote {
-				// Single quote handling
-				sng_quote = !sng_quote;
-				wd = wd.add_char(ch);
-			} else if matches!(ch, '"') && !sng_quote {
-				// Double quote handling
-				dub_quote = !dub_quote;
-				wd = wd.add_char(ch);
-			} else if dub_quote || sng_quote {
-				// Inside a quoted string
-				wd = wd.add_char(ch);
-			} else if !matches!(ch, ' ' | '\t' | '\n' | ';') {
-				// Regular character
-				wd = wd.add_char(ch);
-			} else if matches!(ch, '\n' | ';') {
-				// Preserve cmdsep for tokenizing
-				self.char_stream.push_front(ch);
-				self.span.end -= 1;
-				wd.span = self.span;
-				break;
-			} else {
-				// Whitespace handling
-				self.char_stream.push_front(ch);
-				while self.char_stream.front().is_some_and(|c| matches!(c, ' ' | '\t')) {
-					self.advance();
+			match ch {
+				'\\' => {
+					wd = wd.add_char(ch);
+					if let Some(char) = self.advance() {
+						wd = wd.add_char(char)
+					}
 				}
-				break;
+				'(' => {
+					paren_stack.push(ch);
+					wd = wd.add_char(ch)
+				}
+				')' if !paren_stack.is_empty() => {
+					paren_stack.pop();
+					wd = wd.add_char(ch)
+				}
+				'\'' if !dub_quote => {
+					// Single quote handling
+					sng_quote = !sng_quote;
+					wd = wd.add_char(ch);
+				}
+				'"' if !sng_quote => {
+					// Double quote handling
+					dub_quote = !dub_quote;
+					wd = wd.add_char(ch);
+				}
+				_ if !paren_stack.is_empty() || dub_quote || sng_quote => {
+					// Inside a quoted string
+					wd = wd.add_char(ch);
+				}
+				_ if !matches!(ch, ' ' | '\t' | '\n' | ';') => {
+					// Regular character
+					wd = wd.add_char(ch);
+				}
+				'\n' | ';' => {
+					// Preserve cmdsep for tokenizing
+					self.char_stream.push_front(ch);
+					self.span.end -= 1;
+					wd.span = self.span;
+					break;
+				}
+				' ' | '\t' => {
+					// Whitespace handling
+					self.char_stream.push_front(ch);
+					while self.char_stream.front().is_some_and(|c| matches!(c, ' ' | '\t')) {
+						self.advance();
+					}
+					break;
+				}
+				_ => {
+					// Default case (shouldn't be hit in the current logic)
+					wd = wd.add_char(ch);
+				}
 			}
 		}
 		wd

@@ -69,7 +69,7 @@ fn restore_termios(orig: &Option<Termios>) {
 #[tokio::main]
 async fn main() {
 	env_logger::init();
-	let args = env::args().collect::<Vec<String>>();
+	let mut args = env::args().collect::<Vec<String>>();
 
 	// Ignore SIGTTOU
 	unsafe { signal(SIGTTOU, SigHandler::SigIgn).unwrap() };
@@ -95,6 +95,11 @@ async fn main() {
 		if let Err(e) = shellenv::source_file(path) {
 			eprintln!("Failed to source rc file: {:?}",e);
 		}
+	}
+	if args.iter().any(|arg| arg == "--subshell") {
+		let index = args.iter().position(|arg| arg == "--subshell").unwrap();
+		args.remove(index);
+		write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::IN_SUBSH)).unwrap();
 	}
 	let result = match args.len() {
 		1 => { // interactive

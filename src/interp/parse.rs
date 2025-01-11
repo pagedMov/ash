@@ -20,6 +20,7 @@ bitflags! {
 		const BACKGROUND         = 0b00000000000000000000000000001000;
 		const IN_PIPE            = 0b00000000000000000000000000010000;
 		const FUNCTION           = 0b00000000000000000000000000100000;
+		const IN_CMD_SUB         = 0b00000000000000000000000001000000;
 	}
 }
 
@@ -160,6 +161,7 @@ impl Node {
 	}
 	pub fn get_redirs(&self) -> RshResult<Vec<Node>> {
 		if !self.flags.contains(NdFlags::VALID_OPERAND) {
+			dbg!(self);
 			return Err(ShError::from_internal("Called get_redirs with an invalid operand"))
 		}
 		let mut redir_vec = vec![];
@@ -1485,7 +1487,7 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				break // Background operator '&' is always the last argument
 			}
 			TkType::Subshell => continue, // Don't include the subshell token in the args
-			TkType::Ident | TkType::String | TkType::VariableSub | TkType::Assignment => {
+			TkType::Ident | TkType::CommandSub | TkType::String | TkType::VariableSub | TkType::Assignment => {
 				// Add to argv
 				argv.push_back(tk);
 			}

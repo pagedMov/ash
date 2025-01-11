@@ -50,33 +50,32 @@ bitflags! {
 		const NO_ALIAS         = 0b00000000000000000000000000000001;
 		const NO_VAR           = 0b00000000000000000000000000000010;
 		const NO_FUNC          = 0b00000000000000000000000000000100;
-
 		// Context
 		const IN_FUNC          = 0b00000000000000000000000000001000; // Enables the `return` builtin
 		const INTERACTIVE      = 0b00000000000000000000000000010000;
 		const CLEAN            = 0b00000000000000000000000000100000; // Do not inherit env vars from parent
 		const NO_RC            = 0b00000000000000000000000001000000;
-
+		const IN_SUBSH         = 0b00000000000000000000000010000000; // In a subshell
 		// Options set by 'set' command
-		const EXPORT_ALL_VARS  = 0b00000000000000000000000010000000; // set -a
-		const REPORT_JOBS_ASAP = 0b00000000000000000000000100000000; // set -b
-		const EXIT_ON_ERROR    = 0b00000000000000000000001000000000; // set -e
-		const NO_GLOB          = 0b00000000000000000000010000000000; // set -f
-		const HASH_CMDS        = 0b00000000000000000000100000000000; // set -h
-		const ASSIGN_ANYWHERE  = 0b00000000000000000001000000000000; // set -k
-		const ENABLE_JOB_CTL   = 0b00000000000000000010000000000000; // set -m
-		const NO_EXECUTE       = 0b00000000000000000100000000000000; // set -n
-		const ENABLE_RSHELL    = 0b00000000000000001000000000000000; // set -r
-		const EXIT_AFTER_EXEC  = 0b00000000000000010000000000000000; // set -t
-		const UNSET_IS_ERROR   = 0b00000000000000100000000000000000; // set -u
-		const PRINT_INPUT      = 0b00000000000001000000000000000000; // set -v
-		const STACK_TRACE      = 0b00000000000010000000000000000000; // set -x
-		const EXPAND_BRACES    = 0b00000000000100000000000000000000; // set -B
-		const NO_OVERWRITE     = 0b00000000001000000000000000000000; // set -C
-		const INHERIT_ERR      = 0b00000000010000000000000000000000; // set -E
-		const HIST_SUB         = 0b00000000100000000000000000000000; // set -H
-		const NO_CD_SYMLINKS   = 0b00000001000000000000000000000000; // set -P
-		const INHERIT_RET      = 0b00000010000000000000000000000000; // set -T
+		const EXPORT_ALL_VARS  = 0b00000000000000000000000100000000; // set -a
+		const REPORT_JOBS_ASAP = 0b00000000000000000000001000000000; // set -b
+		const EXIT_ON_ERROR    = 0b00000000000000000000010000000000; // set -e
+		const NO_GLOB          = 0b00000000000000000000100000000000; // set -f
+		const HASH_CMDS        = 0b00000000000000000001000000000000; // set -h
+		const ASSIGN_ANYWHERE  = 0b00000000000000000010000000000000; // set -k
+		const ENABLE_JOB_CTL   = 0b00000000000000000100000000000000; // set -m
+		const NO_EXECUTE       = 0b00000000000000001000000000000000; // set -n
+		const ENABLE_RSHELL    = 0b00000000000000010000000000000000; // set -r
+		const EXIT_AFTER_EXEC  = 0b00000000000000100000000000000000; // set -t
+		const UNSET_IS_ERROR   = 0b00000000000001000000000000000000; // set -u
+		const PRINT_INPUT      = 0b00000000000010000000000000000000; // set -v
+		const STACK_TRACE      = 0b00000000000100000000000000000000; // set -x
+		const EXPAND_BRACES    = 0b00000000001000000000000000000000; // set -B
+		const NO_OVERWRITE     = 0b00000000010000000000000000000000; // set -C
+		const INHERIT_ERR      = 0b00000000100000000000000000000000; // set -E
+		const HIST_SUB         = 0b00000001000000000000000000000000; // set -H
+		const NO_CD_SYMLINKS   = 0b00000010000000000000000000000000; // set -P
+		const INHERIT_RET      = 0b00000100000000000000000000000000; // set -T
 	}
 	#[derive(Debug,Copy,Clone)]
 	pub struct JobFlags: i8 {
@@ -135,8 +134,8 @@ impl Job {
 			saved_statuses: vec![]
 		}
 	}
-	pub fn is_active(&self) -> bool {
-		self.active
+	pub fn is_running(&self) -> bool {
+		self.statuses.iter().any(|stat| matches!(stat,RshWait::Running))
 	}
 	pub fn is_stopped(&self) -> bool {
 		self.statuses.iter().all(|stat| matches!(stat,RshWait::Stopped {..} | RshWait::Success | RshWait::Fail {..}))
@@ -667,6 +666,9 @@ impl EnvMeta {
 	pub fn mod_flags<F>(&mut self, flag_mod: F)
 		where F: FnOnce(&mut EnvFlags) {
 			flag_mod(&mut self.flags)
+	}
+	pub fn flags(&self) -> EnvFlags {
+		self.flags
 	}
 }
 

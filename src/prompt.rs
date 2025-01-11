@@ -113,6 +113,8 @@ impl PromptDispatcher {
 									} else { unreachable!() };
 									if !deck.is_empty() {
 										event::global_send(ShEvent::NewAST(state.ast))?;
+									} else {
+										shellenv::try_prompt()?;
 									}
 								}
 								Err(e) => {

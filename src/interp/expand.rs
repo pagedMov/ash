@@ -1,9 +1,13 @@
 use chrono::Local;
 use glob::glob;
 use std::collections::VecDeque;
+use std::io::{BufReader, Read};
 use std::mem::take;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::PathBuf;
 use crate::event::ShError;
+use crate::execute::{self, ProcIO, RustFd};
+use crate::interp::parse::NdFlags;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
 use crate::interp::helper::{self,StrExtension, VecDequeExtension};
 use crate::shellenv::{read_logic, read_meta, read_vars, write_meta, EnvFlags, SavedEnv};
@@ -19,9 +23,19 @@ pub fn check_globs(string: String) -> bool {
 
 pub fn expand_arguments(node: &mut Node) -> RshResult<Vec<Tk>> {
 	let argv = node.get_argv()?;
+	let mut cmd_name = None;
+	let mut glob = true;
 	let mut expand_buffer = Vec::new();
 	for arg in &argv {
-		let mut expanded = expand_token(arg.clone())?;
+		if cmd_name.is_none() {
+			cmd_name = Some(arg.text());
+			if cmd_name == Some("expr") { // We don't expand globs for the `expr` builtin
+				glob = false;
+			}
+			expand_buffer.push(arg.clone()); // We also don't expand command names
+			continue
+		}
+		let mut expanded = expand_token(arg.clone(),glob)?;
 		while let Some(token) = expanded.pop_front() {
 			if !token.text().is_empty() {
 				// Do not return empty tokens
@@ -335,7 +349,7 @@ pub fn expand_alias(mut node: Node) -> RshResult<Node> {
 	}
 }
 
-pub fn expand_token(token: Tk) -> RshResult<VecDeque<Tk>> {
+pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 	let mut working_buffer: VecDeque<Tk> = VecDeque::new();
 	let mut product_buffer: VecDeque<Tk> = VecDeque::new();
 
@@ -344,8 +358,16 @@ pub fn expand_token(token: Tk) -> RshResult<VecDeque<Tk>> {
 
 	working_buffer.push_back(token.clone());
 	while let Some(mut token) = working_buffer.pop_front() {
-		let is_glob = check_globs(token.text().into());
+		// If expand_glob is true, then check for globs. Otherwise, is_glob is false
+		let is_glob = if expand_glob { check_globs(token.text().into()) } else { expand_glob };
 		let is_brace_expansion = helper::is_brace_expansion(token.text());
+		let is_cmd_sub = matches!(token.tk_type,TkType::CommandSub);
+
+		if is_cmd_sub {
+			let new_token = expand_cmd_sub(token)?;
+			product_buffer.push_back(new_token);
+			continue
+		}
 
 		let expand_home = token.text().has_unescaped("~");
 		if expand_home {
@@ -447,6 +469,32 @@ pub fn clean_escape_chars(token_buffer: &mut VecDeque<Tk>) {
 		text = text.replace('\\',"");
 		token.wd.text = text;
 	}
+}
+
+pub fn expand_cmd_sub(token: Tk) -> RshResult<Tk> {
+	let new_token;
+	if let TkType::CommandSub = token.tk_type {
+		let body = token.text().to_string();
+		let node = Node {
+			command: None,
+			nd_type: NdType::Subshell { body, argv: VecDeque::new() },
+			flags: NdFlags::VALID_OPERAND | NdFlags::IN_CMD_SUB,
+			redirs: VecDeque::new(),
+			span: token.span()
+		};
+		let (mut r_pipe,w_pipe) = RustFd::pipe()?;
+		let io = ProcIO::from(None,Some(w_pipe.mk_shared()),None);
+		execute::handle_subshell(node, io)?;
+		let buffer = r_pipe.read()?;
+		new_token = Tk {
+			tk_type: TkType::String,
+			wd: WordDesc { text: buffer.trim().to_string(), span: token.span(), flags: token.flags() }
+		};
+		r_pipe.close()?;
+	} else {
+		return Err(ShError::from_internal("Called expand_cmd_sub() on a non-commandsub token"))
+	}
+	Ok(new_token)
 }
 
 pub fn expand_braces(word: String, mut results: VecDeque<String>) -> VecDeque<String> {

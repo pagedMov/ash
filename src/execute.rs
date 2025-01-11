@@ -1,10 +1,10 @@
-use std::{collections::{HashMap, VecDeque}, ffi::CString, fmt::{self, Display}, os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd}, path::Path, sync::{mpsc::Receiver, Arc}, thread};
+use std::{collections::{HashMap, VecDeque}, ffi::CString, fmt::{self, Display}, os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd}, panic::Location, path::Path, sync::{mpsc::Receiver, Arc}, thread};
 
 use libc::{memfd_create, MFD_CLOEXEC};
 use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::{waitpid, WaitStatus}}, unistd::{close, dup, dup2, execve, execvpe, fork, getpid, pipe, setpgid, tcgetpgrp, tcsetpgrp, ForkResult, Pid}, NixPath};
 use std::sync::Mutex;
 
-use crate::{builtin, event::{self, ShError, ShEvent}, interp::{expand, helper::{self, VecDequeExtension}, parse::{self, NdFlags, NdType, Node, Span}, token::{Redir, RedirType, Tk, WdFlags}}, shellenv::{self, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, Job, SavedEnv}, RshResult, GLOBAL_EVENT_CHANNEL};
+use crate::{builtin, event::{self, ShError, ShEvent}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node, Span}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, Job, SavedEnv}, RshResult, GLOBAL_EVENT_CHANNEL};
 
 macro_rules! node_operation {
 	($node_type:path { $($field:tt)* }, $node:expr, $node_op:block) => {
@@ -96,6 +96,16 @@ impl RustFd {
 		}
 	}
 
+	pub fn read(&self) -> RshResult<String> {
+		if !self.is_valid() {
+			return Err(ShError::from_internal("Attempted to read from an invalid RustFd"));
+		}
+		let mut buffer = [0; 1024];
+		let bytes_read = nix::unistd::read(self.as_raw_fd(), &mut buffer).map_err(|_| ShError::from_io())?;
+		let output = String::from_utf8_lossy(&buffer[..bytes_read]);
+		Ok(output.to_string())
+	}
+
 	/// Wrapper for nix::unistd::pipe(), simply produces two `RustFds` that point to a read and write pipe respectfully
 	pub fn pipe() -> RshResult<(Self,Self)> {
 		let (r_pipe,w_pipe) = pipe().map_err(|_| ShError::from_io())?;
@@ -135,11 +145,14 @@ impl RustFd {
 		Ok(Self { fd: file_fd })
 	}
 
+	#[track_caller]
 	pub fn close(&mut self) -> RshResult<()> {
 		if !self.is_valid() {
-			return Err(ShError::from_internal("Attempted to close an invalid RustFd"));
+			return Ok(())
 		}
-		close(self.fd).map_err(|_| ShError::from_io())?;
+		close(self.fd).map_err(|_| {
+			ShError::from_io()
+		})?;
 		self.fd = -1;
 		Ok(())
 	}
@@ -160,9 +173,9 @@ impl Display for RustFd {
 }
 
 impl Drop for RustFd {
+	#[track_caller]
 	fn drop(&mut self) {
-		if self.fd >= 0 {
-			self.close().ok();
+		if self.fd >= 0 && self.close().is_err() {
 		}
 	}
 }
@@ -538,7 +551,7 @@ fn handle_for(node: Node,io: ProcIO) -> RshResult<RshWait> {
 
 		let mut arr_buffer = VecDeque::new();
 		while let Some(token) = loop_arr.pop_front() {
-			let mut expanded = expand::expand_token(token)?;
+			let mut expanded = expand::expand_token(token, true)?;
 			while let Some(exp_token) = expanded.pop_front() {
 				arr_buffer.push_back(exp_token);
 			}
@@ -634,7 +647,19 @@ fn handle_chain(node: Node) -> RshResult<RshWait> {
 
 fn handle_assignment(node: Node) -> RshResult<RshWait> {
 	node_operation!(NdType::Assignment { name, value }, node, {
-		let value = value.unwrap_or_default();
+		let mut value = value.unwrap_or_default();
+		if let Some(body) = value.trim_command_sub() {
+			let dummy_tk = Tk {
+				tk_type: TkType::CommandSub,
+				wd: crate::interp::token::WordDesc {
+					text: body,
+					span: node.span(),
+					flags: WdFlags::empty()
+				}
+			};
+			let expanded = expand::expand_cmd_sub(dummy_tk)?;
+			value = expanded.text().to_string();
+		}
 		write_vars(|v| v.set_string(name, value))?;
 	});
 	shellenv::try_prompt()?;
@@ -645,6 +670,7 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 	let argv = expand::expand_arguments(&mut node)?;
 	let result = match argv.first().unwrap().text() {
 		"echo" => builtin::echo(node, io),
+		"expr" => builtin::expr(node, io),
 		"set" => builtin::set_or_unset(node, true),
 		"jobs" => builtin::jobs(node, io),
 		"fg" => builtin::fg(node, io),
@@ -672,18 +698,23 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 	result
 }
 
-fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
+pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 	// Expand arguments and get redirections
 	expand::expand_arguments(&mut node)?;
 	let redirs = node.get_redirs()?;
 
 	// Save environment state
-	let snapshot = SavedEnv::get_snapshot()?;
+	let env_snapshot = SavedEnv::get_snapshot()?;
 	write_vars(|v| v.reset_params())?;
 
 	// Perform subshell node operation
 	node_operation!(NdType::Subshell { mut body, mut argv }, node, {
-		body = body.trim().to_string();
+		body = expand::expand_var(body.trim().to_string())?;
+		if body.is_empty() {
+			shellenv::try_prompt()?;
+			return Ok(RshWait::Success)
+		}
+
 		let mut c_argv = vec![CString::new("anonymous_subshell").unwrap()];
 		while let Some(tk) = argv.pop_front() {
 			let c_arg = CString::new(tk.text()).unwrap();
@@ -692,10 +723,12 @@ fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 
 		// Shebang handling
 		// If no shebang, use the path to rsh
+		// and attach the '--subshell' argument to signal to the rsh subprocess that it is in a subshell context
 		if !body.starts_with("#!") {
 			let interpreter = std::env::current_exe().unwrap();
 			let mut shebang = "#!".to_string();
 			shebang.push_str(interpreter.to_str().unwrap());
+			shebang = format!("{} {}",shebang, "--subshell");
 			shebang.push('\n');
 			shebang.push_str(&body);
 			body = shebang;
@@ -723,10 +756,22 @@ fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 			}
 		}
 		// Write the subshell contents to an in-memory file descriptor
-		let memfd = RustFd::new_memfd("anonymous_subshell", true)?;
+		let mut memfd = RustFd::new_memfd("anonymous_subshell", true)?;
 		memfd.write(body.as_bytes())?;
+
 		io.backup_fildescs()?;
 		io.route_io()?;
+
+		if node.flags.contains(NdFlags::IN_PIPE) || read_meta(|m| m.flags().contains(EnvFlags::IN_SUBSH))? {
+			let mut open_fds = VecDeque::new();
+			if !redirs.is_empty() {
+				open_fds.extend(handle_redirs(redirs.into())?);
+			}
+			let fd_path = CString::new(format!("/proc/self/fd/{}",memfd)).unwrap();
+			let envp = shellenv::get_cstring_evars()?;
+			execve(&fd_path, &c_argv, &envp).unwrap();
+			unreachable!()
+		}
 
 		// Execute the memfd in a forked child process
 		match unsafe { fork() } {
@@ -741,13 +786,16 @@ fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 				unreachable!()
 			}
 			Ok(ForkResult::Parent { child }) => {
-				if !node.flags.contains(NdFlags::FUNCTION) {
+				memfd.close()?;
+				if !node.flags.intersects(NdFlags::FUNCTION | NdFlags::IN_CMD_SUB) {
 					setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
 					shellenv::attach_tty(child)?;
 				}
-				let job = Job::new(0, vec![child], vec!["anonymous_subshell".into()], child);
-				write_jobs(|j| j.new_fg(job))?;
-				snapshot.restore_snapshot()?;
+				if !node.flags.contains(NdFlags::IN_CMD_SUB) {
+					let job = Job::new(0, vec![child], vec!["anonymous_subshell".into()], child);
+					write_jobs(|j| j.new_fg(job))?;
+					env_snapshot.restore_snapshot()?;
+				}
 			}
 			Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_subshell".into(), 1, node.span()))
 		}

@@ -108,7 +108,9 @@ fn handle_child_stop(pid: Pid, signal: Signal) -> RshResult<()> {
 fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
 	let job = read_jobs(|j| j.get_by_pid(pid).cloned())?;
 	if job.is_none() {
-		return Err(ShError::from_internal(format!("Failed to find a job containing this pid: {}",pid).as_str()))
+		shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
+		shellenv::try_prompt()?;
+		return Ok(())
 	}
 	let pgid = *job.unwrap().pgid();
 	write_jobs(|j| {
@@ -117,7 +119,7 @@ fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
 		}
 	})?;
 	if read_jobs(|j| j.is_finished(pgid))? {
-		if read_jobs(|j| j.get_by_pgid(pgid).is_none_or(|job| job.is_foreground()))? {
+		if read_jobs(|j| j.get_by_pgid(pgid).is_some())? {
 			shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
 			shellenv::try_prompt()?;
 		} else {
@@ -129,6 +131,9 @@ fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
 			let job_order = read_jobs(|j| j.job_order().to_vec())?;
 			println!("{}",job.display(&job_order,JobFlags::PIDS))
 		}
+	} else if read_jobs(|j| j.get_by_pgid(pgid).is_none())? {
+		shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
+		shellenv::try_prompt()?;
 	}
 	Ok(())
 }
