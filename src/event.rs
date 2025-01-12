@@ -3,27 +3,7 @@ use libc::{getpid, tcgetpgrp};
 use signal_hook::iterator::Signals;
 
 
-use crate::{execute::RshWait, interp::parse::{Node, Span}, shellenv::{read_meta, write_meta}, signal::{self, }, RshResult, GLOBAL_EVENT_CHANNEL};
-
-pub fn global_send(shell_event: ShEvent) -> RshResult<()> {
-	GLOBAL_EVENT_CHANNEL.get().unwrap().send(shell_event).map_err(|_| ShError::from_internal("Failed to send shell event over global channel"))
-}
-
-#[track_caller]
-pub fn fire_prompt() -> RshResult<()> {
-	let tc_group = unsafe { tcgetpgrp(0) };
-	let rsh_pid = unsafe { getpid() };
-	// Temporarily disabling this guard condition
-	//if tc_group != rsh_pid {
-		//dbg!(Location::caller());
-		//panic!("attempted to fire prompt without terminal control. tc group: {}, rsh pid: {}",tc_group,rsh_pid);
-	//}
-	if tc_group == rsh_pid {
-		global_send(ShEvent::Prompt)
-	} else {
-		Ok(())
-	}
-}
+use crate::{execute::{self, RshWait}, interp::{parse::{descend, NdType, Node, Span}, token::RshTokenizer}, prompt, shellenv::{self, read_meta, write_meta}, signal::{self, }, RshResult, GLOBAL_EVENT_CHANNEL};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShError {
@@ -94,66 +74,36 @@ pub enum ShEvent {
 	Prompt
 }
 
-pub struct EventLoop {
-	pub exec_tx: Sender<Vec<Node>>,
-	pub prompt_tx: Sender<ShEvent>,
-	pub inbox: Receiver<ShEvent>,
-	pub sender: Sender<ShEvent>
-}
+pub fn main_loop() -> RshResult<()> {
+	loop {
+		let input = prompt::run()?;
+		write_meta(|m| m.leave_prompt())?;
+		if !input.is_empty() {
+			let mut tokenizer = RshTokenizer::new(&input);
 
-impl EventLoop {
-	pub fn new(exec_tx: Sender<Vec<Node>>,prompt_tx: Sender<ShEvent>) -> Self {
-		let (sender,inbox) = mpsc::channel();
-		Self {
-			exec_tx,
-			prompt_tx,
-			inbox,
-			sender
-		}
-	}
-	pub fn listen(&self) -> RshResult<RshWait> {
-		use crate::event::ShEvent::*;
-		let mut status = RshWait::new();
-		for event in self.inbox.iter() {
-			match event {
-				Input(text) => {
-					write_meta(|m| m.set_last_input(&text))?
-				}
-				NewNodeDeck(node) => {
-					// Forward to execution thread
-					self.exec_tx.send(node).unwrap();
-				}
-				Prompt => {
-					// Forward to prompt thread
-					self.prompt_tx.send(ShEvent::Prompt).map_err(|_| ShError::from_internal("failed to send signal to prompt thread"))?
-				}
-				Exit(code) => {
-					// TODO: Implement more cleanup logic later
-					std::process::exit(code);
-				}
-				LastStatus(status) => {
-					match status {
-						RshWait::Success => { /* Do nothing */ },
-						RshWait::Fail { code, cmd } => {
-							if code == 127 && cmd.is_some() {
-								eprintln!("Command not found: {}",cmd.unwrap())
-							}
+			loop {
+				let result = descend(&mut tokenizer);
+				match result {
+					Ok(Some(state)) => {
+						shellenv::await_fg_job()?;
+						let deck = if let NdType::Root { ref deck } = state.ast.nd_type {
+							deck
+						} else {
+							unreachable!()
+						};
+						if !deck.is_empty() {
+							// Send each deck immediately for execution
+							execute::traverse_ast(state.ast)?;
+						} else {
+							break;
 						}
-						_ => { /* Do Nothing */ }
 					}
-				}
-				Error(err) => {
-					// TODO: re-implement proper error handling
-					eprintln!("{:?}",err);
-				}
-				Signal(_) => {
-					// Forward to signal thread
-					if let Err(e) = signal::handle_signal(event) {
-						self.sender.send(ShEvent::Error(e)).unwrap();
+					Ok(None) => break,
+					Err(e) => {
+						eprintln!("{:?}",e);
 					}
 				}
 			}
 		}
-		Ok(status)
 	}
 }

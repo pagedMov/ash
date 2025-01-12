@@ -1573,6 +1573,7 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	if background {
 		node.flags |= NdFlags::BACKGROUND
 	}
+	dbg!(&node);
 	ctx.attach_node(node);
 	Ok(ctx)
 }

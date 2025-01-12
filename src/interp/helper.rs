@@ -1,4 +1,4 @@
-use crate::{interp::token::REGEX, shellenv::{read_meta, read_vars, write_vars, RVal, }, RshResult};
+use crate::{interp::token::REGEX, shellenv::{read_logic, read_meta, read_vars, write_logic, write_vars, RVal }, RshResult};
 use nix::unistd::dup2;
 use std::{collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::Path};
 
@@ -305,6 +305,20 @@ pub fn handle_autocd_check(node: &Node, argv: &[Tk]) -> RshResult<bool> {
 		}
 	}
 	Ok(false)
+}
+
+pub fn overwrite_func(alias: &str) -> RshResult<()> {
+	if read_logic(|l| l.get_func(alias))?.is_some() {
+		write_logic(|l| l.remove_func(alias))?;
+	}
+	Ok(())
+}
+
+pub fn overwrite_alias(func: &str) -> RshResult<()> {
+	if read_logic(|l| l.get_alias(func))?.is_some() {
+		write_logic(|l| l.remove_alias(func))?;
+	}
+	Ok(())
 }
 
 pub fn unset_var_conflicts(key: &str) -> RshResult<()> {

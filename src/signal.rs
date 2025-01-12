@@ -1,78 +1,50 @@
-use std::thread;
+use nix::{sys::{signal::{killpg, signal, SigHandler, Signal} , wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{getpgid, tcgetpgrp, Pid}};
 
-use nix::{sys::{signal::{killpg, Signal} , wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{getpgid, Pid}};
+use crate::{execute::RshWait, shellenv::{self, read_jobs, write_jobs, JobFlags, RSH_PGRP}, RshResult};
 
-use signal_hook::consts::signal::*;
-use signal_hook::iterator::Signals;
-
-use crate::{event::{ShError, ShEvent}, execute::RshWait, shellenv::{self, read_jobs, write_jobs, JobFlags, RSH_PGRP}, RshResult};
-
-pub struct SignalListener { }
-
-impl SignalListener {
-	pub fn new() -> Self {
-		Self { }
-	}
-
-	pub fn signal_listen(&self) -> std::io::Result<()> {
-		// Define signals to listen for
-		let mut signals = Signals::new([
-			SIGINT, SIGIO, SIGPIPE, SIGTSTP, SIGQUIT, SIGTERM, SIGCHLD, SIGHUP, SIGWINCH, SIGUSR1, SIGUSR2,
-		])?;
-
-		// Spawn a thread to listen for signals
-		thread::spawn(move || {
-			for signal in signals.forever() {
-				let event = match signal {
-					SIGINT => ShEvent::Signal(SIGINT),
-					SIGIO => ShEvent::Signal(SIGIO),
-					SIGPIPE => ShEvent::Signal(SIGPIPE),
-					SIGTSTP => ShEvent::Signal(SIGTSTP),
-					SIGQUIT => ShEvent::Signal(SIGQUIT),
-					SIGTERM => ShEvent::Signal(SIGTERM),
-					SIGCHLD => ShEvent::Signal(SIGCHLD),
-					SIGHUP => ShEvent::Signal(SIGHUP),
-					SIGWINCH => ShEvent::Signal(SIGWINCH),
-					SIGUSR1 => ShEvent::Signal(SIGUSR1),
-					SIGUSR2 => ShEvent::Signal(SIGUSR2),
-					_ => continue, // Ignore unhandled signals
-				};
-
-				handle_signal(event);
-			}
-		});
-
-		Ok(())
+pub fn sig_handler_setup() {
+	unsafe {
+		signal(Signal::SIGCHLD, SigHandler::Handler(handle_sigchld)).unwrap();
+		signal(Signal::SIGQUIT, SigHandler::Handler(handle_sigquit)).unwrap();
+		signal(Signal::SIGTSTP, SigHandler::Handler(handle_sigtstp)).unwrap();
+		signal(Signal::SIGHUP, SigHandler::Handler(handle_sigtstp)).unwrap();
+		signal(Signal::SIGTTIN, SigHandler::SigIgn).unwrap();
+		signal(Signal::SIGTTOU, SigHandler::SigIgn).unwrap();
 	}
 }
 
-impl Default for SignalListener {
-	fn default() -> Self {
-		Self::new()
-	}
+extern "C" fn handle_sighup(_: libc::c_int) {
+	write_jobs(|j| j.kill_all()).unwrap();
+	std::process::exit(0);
 }
 
-pub fn handle_signal(sig: ShEvent) -> RshResult<()> {
-	match sig {
-		ShEvent::Signal(SIGCHLD) => handle_sigchld(),
-		ShEvent::Signal(SIGTSTP) | ShEvent::Signal(SIGINT) => Ok(()), // Ignore at the prompt
-		_ => unimplemented!(),
-	}
+extern "C" fn handle_sigtstp(_: libc::c_int) {
+	let fg_pgrp = shellenv::term_controller();
+	let _ = killpg(fg_pgrp, Signal::SIGTSTP);
 }
 
-fn handle_sigchld() -> RshResult<()> {
+extern "C" fn handle_sigint(_: libc::c_int) {
+	// Send SIGINT to the foreground process group
+	let fg_pgrp = shellenv::term_controller();
+	let _ = killpg(fg_pgrp, Signal::SIGINT);
+}
+
+extern "C" fn handle_sigquit(_: libc::c_int) {
+	std::process::exit(0);
+}
+
+extern "C" fn handle_sigchld(_: libc::c_int) {
 	let flags = WaitPidFlag::WUNTRACED;
 	while let Ok(status) = waitpid(None, Some(flags)) {
 		match status {
-			WaitStatus::Exited(pid, _code) => handle_child_exit(pid, status)?,
-			WaitStatus::Signaled(pid, signal, _) => handle_child_signal(pid, signal)?,
-			WaitStatus::Stopped(pid, signal) => handle_child_stop(pid, signal)?,
-			WaitStatus::Continued(pid) => handle_child_continue(pid)?,
+			WaitStatus::Exited(pid, _code) => handle_child_exit(pid, status),
+			WaitStatus::Signaled(pid, signal, _) => handle_child_signal(pid, signal),
+			WaitStatus::Stopped(pid, signal) => handle_child_stop(pid, signal),
+			WaitStatus::Continued(pid) => handle_child_continue(pid),
 			WaitStatus::StillAlive => break, // No more processes to reap
 			_ => unreachable!(),
-		}
+		};
 	}
-	Ok(())
 }
 
 fn handle_child_signal(pid: Pid, sig: Signal) -> RshResult<()> {
@@ -84,7 +56,6 @@ fn handle_child_signal(pid: Pid, sig: Signal) -> RshResult<()> {
 	})?;
 	if matches!(sig,Signal::SIGINT) {
 		shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal
-		shellenv::try_prompt()?;
 	}
 	Ok(())
 }
@@ -101,7 +72,6 @@ fn handle_child_stop(pid: Pid, signal: Signal) -> RshResult<()> {
 		}
 	})?;
 	shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal
-	shellenv::try_prompt()?;
 	Ok(())
 }
 
@@ -110,7 +80,6 @@ fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
 	if job.is_none() {
 		shellenv::notify_job_done(pid)?;
 		shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
-		shellenv::try_prompt()?;
 		return Ok(())
 	}
 	let pgid = *job.unwrap().pgid();
@@ -123,7 +92,6 @@ fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
 		shellenv::notify_job_done(pgid)?;
 		if read_jobs(|j| j.get_by_pgid(pgid).is_some())? {
 			shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
-			shellenv::try_prompt()?;
 		} else {
 			let job = read_jobs(|j| j.get_by_pgid(pgid).cloned().unwrap())?;
 			if job.id() == 0 {
@@ -135,7 +103,6 @@ fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
 		}
 	} else if read_jobs(|j| j.get_by_pgid(pgid).is_none())? {
 		shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
-		shellenv::try_prompt()?;
 	}
 	Ok(())
 }

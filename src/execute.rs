@@ -394,9 +394,7 @@ impl ExecDispatcher {
 		for deck in self.inbox.iter() {
 			for tree in deck {
 				shellenv::await_term_ctl()?;
-				if let Err(e) = traverse_ast(tree) {
-					let _ = event::global_send(ShEvent::Error(e));
-				}
+				traverse_ast(tree)?;
 			}
 		}
 		Ok(status)
@@ -507,7 +505,6 @@ fn handle_func_def(node: Node) -> RshResult<RshWait> {
 	node_operation!(NdType::FuncDef { name, body }, node, {
 		write_logic(|l| l.new_func(&name, *body.clone()))?;
 	});
-	shellenv::try_prompt()?;
 	Ok(last_status)
 }
 
@@ -565,7 +562,6 @@ fn handle_for(node: Node,io: ProcIO) -> RshResult<RshWait> {
 			setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
 			if node.flags.contains(NdFlags::BACKGROUND) {
 				let job_id = write_jobs(|j| j.new_job(vec![child], vec!["for".into()], child))?;
-				shellenv::try_prompt()?;
 			} else {
 				if !node.flags.contains(NdFlags::FUNCTION) {
 					shellenv::attach_tty(child)?;
@@ -670,61 +666,59 @@ fn handle_assignment(node: Node) -> RshResult<RshWait> {
 		}
 		write_vars(|v| v.set_var(&name, RVal::parse(&value).unwrap_or_default()))?;
 	});
-	shellenv::try_prompt()?;
 	Ok(RshWait::Success)
 }
 
 fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 	let argv = node.get_argv()?;
-	match unsafe { fork() } {
-		Ok(ForkResult::Child) => {
-			let result = match argv.first().unwrap().text() {
-				"echo" => builtin::echo(node, io),
-				"expr" => builtin::expr(node, io),
-				"set" => builtin::set_or_unset(node, true),
-				"jobs" => builtin::jobs(node, io),
-				"fg" => builtin::fg(node),
-				"bg" => builtin::bg(node),
-				"int" => builtin::int(node),
-				"bool" => builtin::bool(node),
-				"float" => builtin::float(node),
-				"arr" => builtin::array(node),
-				"type" => builtin::r#type(node),
-				//"dict" => builtin::dict(node),
-				"unset" => builtin::set_or_unset(node, false),
-				"source" => builtin::source(node),
-				"cd" => builtin::cd(node),
-				"pwd" => builtin::pwd(node.span()),
-				"alias" => builtin::alias(node),
-				"unalias" => builtin::unalias(node),
-				"export" => builtin::export(node),
-				"[" | "test" => builtin::test(node.get_argv()?.into()),
-				"builtin" => {
-					// This one allows you to safely wrap builtins in aliases/functions
-					if let NdType::Builtin { mut argv } = node.nd_type {
-						argv.pop_front();
-						node.nd_type = NdType::Builtin { argv };
-						handle_builtin(node, io)
-					} else { unreachable!() }
-				}
-				_ => unimplemented!("found this builtin: {}",argv[0].text())
-			};
-			std::process::exit(0);
-		}
-		Ok(ForkResult::Parent { child }) => {
-			setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
-			if node.flags.contains(NdFlags::BACKGROUND) {
-				write_jobs(|j| j.new_job(vec![child], vec![node.get_argv().unwrap().first().unwrap().text().to_string()], child))?;
-				shellenv::try_prompt()?;
+	let background = node.flags.contains(NdFlags::BACKGROUND);
+	let builtin_result = match argv.first().unwrap().text() {
+		"echo" => builtin::echo(node, io),
+		"expr" => builtin::expr(node, io),
+		"set" => builtin::set_or_unset(node, true),
+		"jobs" => builtin::jobs(node, io),
+		"fg" => builtin::fg(node),
+		"bg" => builtin::bg(node),
+		"int" => builtin::int(node),
+		"bool" => builtin::bool(node),
+		"float" => builtin::float(node),
+		"arr" => builtin::array(node),
+		"type" => builtin::r#type(node),
+		//"dict" => builtin::dict(node),
+		"unset" => builtin::set_or_unset(node, false),
+		"source" => builtin::source(node),
+		"cd" => builtin::cd(node),
+		"pwd" => builtin::pwd(node.span()),
+		"alias" => builtin::alias(node),
+		"unalias" => builtin::unalias(node),
+		"export" => builtin::export(node),
+		"[" | "test" => builtin::test(node.get_argv()?.into()),
+		"builtin" => {
+			if let NdType::Builtin { mut argv } = node.nd_type {
+				argv.pop_front();
+				node.nd_type = NdType::Builtin { argv };
+				handle_builtin(node, io)
 			} else {
-				if !node.flags.contains(NdFlags::FUNCTION) {
-					shellenv::attach_tty(child)?;
-				}
-				let job = Job::new(0, vec![child], vec![node.get_argv().unwrap().first().unwrap().text().to_string()], child);
-				write_jobs(|j| j.new_fg(job))?;
+				unreachable!()
 			}
 		}
-		Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_builtin".into(), 1, node.span())),
+		_ => unimplemented!("found this builtin: {}", argv[0].text()),
+	};
+
+	if !background {
+		let pgid = nix::unistd::getpgrp();
+		let job = Job::new(0, vec![pgid], argv.iter().map(|arg| arg.text().to_string()).collect(), pgid);
+		write_jobs(|j| j.new_fg(job))?;
+		write_jobs(|j| j.complete(0))?;
+		builtin_result?;
+		shellenv::notify_job_done(pgid)?;
+	} else {
+		let pgid = nix::unistd::getpgrp();
+		let job = Job::new(0, vec![pgid], vec![argv.first().unwrap().text().into()], pgid);
+		write_jobs(|j| j.new_job(vec![pgid], vec![argv.first().unwrap().text().into()], pgid))?;
+		write_jobs(|j| j.complete(0))?;
+		shellenv::notify_job_done(pgid)?;
+		builtin_result?;
 	}
 
 	Ok(RshWait::Success)
@@ -743,7 +737,6 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 	node_operation!(NdType::Subshell { mut body, mut argv }, node, {
 		body = expand::expand_var(body.trim().to_string())?;
 		if body.is_empty() {
-			shellenv::try_prompt()?;
 			return Ok(RshWait::Success);
 		}
 
@@ -839,7 +832,6 @@ fn handle_function(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 			*e = e.overwrite_span(span)
 		}
 		env_snapshot.restore_snapshot()?;
-		shellenv::try_prompt()?;
 		result
 	} else { unreachable!() }
 }
@@ -980,7 +972,6 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 					if commands.is_empty() {
 						if background {
 							write_jobs(|j| j.new_job(pids, cmds, pgid.unwrap()))?;
-							shellenv::try_prompt()?;
 						} else {
 							let job = Job::new(0, pids, cmds, pgid.unwrap());
 							write_jobs(|j| j.new_fg(job))?;
@@ -1041,7 +1032,6 @@ fn handle_command(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 			setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
 			if node.flags.contains(NdFlags::BACKGROUND) {
 				let job_id = write_jobs(|j| j.new_job(vec![child], vec![command.to_str().unwrap().to_string()], child))?;
-				shellenv::try_prompt()?;
 			} else {
 				if !node.flags.contains(NdFlags::FUNCTION) {
 					shellenv::attach_tty(child)?;

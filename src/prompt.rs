@@ -1,5 +1,6 @@
 use crate::{comp::RshHelper, event::{self, ShError, ShEvent}, interp::token::RshTokenizer, shellenv::{self, await_term_ctl, read_meta, read_vars, write_meta}, RshResult};
 use std::{path::{Path, PathBuf}, sync::mpsc::Receiver};
+use nix::{sys::signal::{kill, Signal}, unistd::Pid};
 use signal_hook::consts::signal::*;
 
 use rustyline::{self, config::Configurer, error::ReadlineError, history::{DefaultHistory, History}, ColorMode, Config, EditMode, Editor};
@@ -65,87 +66,43 @@ fn init_prompt() -> RshResult<Editor<RshHelper, DefaultHistory>> {
 		Ok(rl)
 }
 
-pub struct PromptDispatcher {
-	inbox: Receiver<ShEvent>,
-}
+pub fn run() -> RshResult<String> {
+	shellenv::await_fg_job()?;
+	write_meta(|m| m.enter_prompt())?;
 
-impl PromptDispatcher {
-	pub fn new(inbox: Receiver<ShEvent>) -> Self {
-		Self { inbox }
-	}
-	pub fn run(&self) -> RshResult<()> {
-		for message in self.inbox.iter() {
-			if let ShEvent::Prompt = message {
-				shellenv::await_term_ctl()?;
-				write_meta(|m| m.enter_prompt())?;
+	let mut rl = init_prompt()?;
+	let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE"))?.unwrap_or_else(|| -> String {
+		let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
+		format!("{}/.rsh_hist",home)
+	});
+	let prompt = expand::expand_prompt()?;
 
-				let mut rl = init_prompt()?;
-				let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE"))?.unwrap_or_else(|| -> String {
-					let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
-					format!("{}/.rsh_hist",home)
-				});
-				let prompt = expand::expand_prompt()?;
-
-				match rl.readline(&prompt) {
-					Ok(line) => {
-						write_meta(|m| m.leave_prompt())?;
-						if !line.is_empty() {
-							rl.history_mut()
-								.add(&line)
-								.map_err(|_| ShError::from_internal("Failed to write to history file"))?;
-								rl.history_mut()
-									.save(Path::new(&hist_path))
-									.map_err(|_| ShError::from_internal("Failed to write to history file"))?;
-								write_meta(|m| m.set_last_input(&line))?;
-
-								let mut tokenizer = RshTokenizer::new(&line);
-
-								loop {
-									let result = descend(&mut tokenizer);
-									match result {
-										Ok(Some(state)) => {
-											await_term_ctl()?;
-											let deck = if let NdType::Root { ref deck } = state.ast.nd_type {
-												deck
-											} else {
-												unreachable!()
-											};
-											if !deck.is_empty() {
-												// Send each deck immediately for execution
-												event::global_send(ShEvent::NewNodeDeck(deck.clone().into()))?;
-											} else {
-												break;
-											}
-										}
-										Ok(None) => break,
-										Err(e) => {
-											event::global_send(ShEvent::Error(e))?;
-										}
-									}
-								}
-						} else {
-							shellenv::try_prompt()?;
-						}
-					}
-					Err(ReadlineError::Interrupted) => {
-						write_meta(|m| m.leave_prompt())?;
-						event::global_send(ShEvent::Signal(SIGINT))?;
-						shellenv::try_prompt()?;
-					}
-					Err(ReadlineError::Eof) => {
-						write_meta(|m| m.leave_prompt())?;
-						event::global_send(ShEvent::Signal(SIGQUIT))?;
-						shellenv::try_prompt()?;
-					}
-					Err(e) => {
-						write_meta(|m| m.leave_prompt())?;
-						eprintln!("readline error");
-						eprintln!("{:?}",e);
-						shellenv::try_prompt()?;
-					}
-				}
-			} else { return Err(ShError::from_internal(format!("Expected Prompt event, got this: {:?}", message).as_str())) }
+	match rl.readline(&prompt) {
+		Ok(line) => {
+			write_meta(|m| m.leave_prompt())?;
+			if !line.is_empty() {
+				rl.history_mut()
+					.add(&line)
+					.map_err(|_| ShError::from_internal("Failed to write to history file"))?;
+					rl.history_mut()
+						.save(Path::new(&hist_path))
+						.map_err(|_| ShError::from_internal("Failed to write to history file"))?;
+					write_meta(|m| m.set_last_input(&line))?;
+			}
+			Ok(line)
 		}
-		Ok(())
+		Err(ReadlineError::Interrupted) => {
+			write_meta(|m| m.leave_prompt())?;
+			return Ok(String::new())
+		}
+		Err(ReadlineError::Eof) => {
+			write_meta(|m| m.leave_prompt())?;
+			kill(Pid::this(), Signal::SIGQUIT);
+			return Ok(String::new())
+		}
+		Err(e) => {
+			write_meta(|m| m.leave_prompt())?;
+			Err(ShError::from_internal(e.to_string().as_str()))
+		}
 	}
 }

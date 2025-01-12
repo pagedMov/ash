@@ -1,8 +1,8 @@
-use std::{collections::BTreeMap, env, ffi::{CString, OsStr}, fmt::{self, Debug, Display}, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, str::FromStr, sync::{Arc, Condvar, LazyLock, Mutex}};
+use std::{borrow::BorrowMut, collections::BTreeMap, env, ffi::{CString, OsStr}, fmt::{self, Debug, Display}, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, str::FromStr, sync::{Arc, Condvar, LazyLock, Mutex}};
 use std::collections::HashMap;
 
 use bitflags::bitflags;
-use nix::{sys::signal::{self, kill, Signal}, unistd::{gethostname, getpgrp, isatty, tcgetpgrp, tcsetpgrp, Pid, User}};
+use nix::{sys::signal::{self, kill, killpg, Signal}, unistd::{gethostname, getpgrp, isatty, tcgetpgrp, tcsetpgrp, Pid, User}};
 use once_cell::sync::Lazy;
 use std::{fs::File, sync::RwLock};
 
@@ -334,6 +334,7 @@ impl Job {
 		}
 	}
 	pub fn display(&self, job_order: &[i32], flags: JobFlags) -> String {
+		dbg!(&self);
 		let long = flags.contains(JobFlags::LONG);
 		let init = flags.contains(JobFlags::INIT);
 		let pids = flags.contains(JobFlags::PIDS);
@@ -428,6 +429,17 @@ impl JobTable {
 			job_order: Vec::new(),
 			updated_since_check: Vec::new(),
 
+		}
+	}
+	pub fn kill_all(&mut self) {
+		for job in self.jobs.values_mut() {
+			let pgid = job.pgid();
+			let _ = killpg(*pgid, Signal::SIGTERM);
+
+			// Iterate over statuses mutably and update them
+			for status in &mut job.statuses {
+				*status = RshWait::Terminated { signal: 15 };
+			}
 		}
 	}
 	pub fn update_fg_status(&mut self, pid: Option<Pid>, wait: RshWait) {
@@ -549,6 +561,7 @@ impl JobTable {
 		let job_id = self.jobs.len() + 1;
 		let job = Job::new(job_id as i32,pids,commands,pgid);
 		if job_id >= 1 {
+			dbg!(&job);
 			println!("{}",job.display(&self.job_order,JobFlags::INIT));
 		}
 		self.jobs.insert(job_id as i32, job);
@@ -712,6 +725,9 @@ impl LogicTable {
 	pub fn get_func(&self, name: &str) -> Option<Node> {
 		self.functions.get(name).map(|boxed_node| *boxed_node.clone())
 	}
+	pub fn remove_func(&mut self, name: &str) {
+		self.functions.remove(name);
+	}
 }
 
 impl Default for LogicTable {
@@ -814,6 +830,20 @@ pub fn await_job(pgid: Pid) -> RshResult<()> {
 	Ok(())
 }
 
+pub fn await_fg_job() -> RshResult<()> {
+	let status_handle = read_jobs(|j| j.read_job(0).map(|job| job.get_status_handle()))?;
+	if status_handle.is_none() {
+		return Ok(())
+	}
+	let status_handle = status_handle.unwrap();
+	let (lock,cvar) = &*status_handle;
+	let mut is_complete = lock.lock().unwrap();
+	while !*is_complete {
+		is_complete = cvar.wait(is_complete).unwrap();
+	}
+	Ok(())
+}
+
 pub fn notify_job_done(pgid: Pid) -> RshResult<()> {
 	let status_handle = read_jobs(|j| j.get_by_pgid(pgid).map(|job| job.get_status_handle()))?;
 	if status_handle.is_none() {
@@ -847,18 +877,6 @@ pub fn attach_tty(pgid: Pid) -> RshResult<()> {
 
 pub fn term_controller() -> Pid {
 	unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) }.unwrap()
-}
-
-pub fn try_prompt() -> RshResult<()> {
-	let in_prompt = read_meta(|m| m.in_prompt)?;
-	let is_interactive = read_meta(|m| m.flags.contains(EnvFlags::INTERACTIVE))?;
-	if !is_interactive {
-		return Ok(())
-	}
-	if !in_prompt {
-		event::fire_prompt()?;
-	} else { /* Do nothing */ }
-	Ok(())
 }
 
 pub fn read_jobs<F,T>(f: F) -> RshResult<T>

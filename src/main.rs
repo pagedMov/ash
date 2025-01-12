@@ -32,14 +32,12 @@ pub mod signal;
 
 use std::{env, fs::File, io::Read, os::fd::AsRawFd, path::PathBuf, sync::mpsc::{self, Receiver, Sender}, thread};
 
-use event::{EventLoop, ShError, ShEvent};
+use event::{ShError, ShEvent};
 use execute::{traverse_ast, ExecDispatcher, RshWait};
 use interp::{parse::{descend, Span}, token::RshTokenizer};
 use nix::{sys::{signal::{signal, SigHandler, Signal::{SIGTTIN, SIGTTOU}}, termios::{self, LocalFlags}}, unistd::isatty};
 use once_cell::sync::{Lazy, OnceCell};
-use prompt::PromptDispatcher;
 use shellenv::{read_vars, write_meta, write_vars, EnvFlags};
-use signal::SignalListener;
 use termios::Termios;
 
 //use crate::event::EventLoop;
@@ -72,16 +70,7 @@ async fn main() {
 	let mut args = env::args().collect::<Vec<String>>();
 
 	// Ignore SIGTTOU
-	unsafe { signal(SIGTTOU, SigHandler::SigIgn).unwrap() };
-	unsafe { signal(SIGTTIN, SigHandler::SigIgn).unwrap() };
-
-	let (exec_tx,exec_rx) = mpsc::channel();
-	let (prompt_tx,prompt_rx) = mpsc::channel();
-	let event_loop = EventLoop::new(exec_tx,prompt_tx.clone());
-	GLOBAL_EVENT_CHANNEL.set(event_loop.sender.clone()).unwrap();
-	let prompt_dispatch = PromptDispatcher::new(prompt_rx);
-	let exec_dispatch = ExecDispatcher::new(exec_rx);
-	let signal_listener = SignalListener::new();
+	signal::sig_handler_setup();
 
 	if args[0].starts_with('-') {
 		// TODO: handle unwrap
@@ -101,58 +90,19 @@ async fn main() {
 		args.remove(index);
 		write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::IN_SUBSH)).unwrap();
 	}
-	let result = match args.len() {
+	match args.len() {
 		1 => { // interactive
 			let termios = set_termios();
 			write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::INTERACTIVE)).unwrap();
-			signal_listener.signal_listen().unwrap();
 
-			let event_loop_handle = thread::Builder::new()
-					.name("event_loop".into())
-					.spawn(move || {
-							event_loop.listen()
-					})
-					.unwrap();
+			event::main_loop().unwrap();
 
-			let prompt_handle = thread::Builder::new()
-					.name("prompt_dispatch".into())
-					.spawn(move || {
-							prompt_dispatch.run()
-					})
-					.unwrap();
-
-			let exec_handle = thread::Builder::new()
-					.name("exec_dispatch".into())
-					.spawn(move || {
-							exec_dispatch.run()
-					})
-					.unwrap();
-
-			prompt_tx.send(ShEvent::Prompt).unwrap();
-			let result = event_loop_handle.join().unwrap();
 			restore_termios(&termios);
-			result
 		},
 		_ => {
-			thread::spawn( move || {
-				main_noninteractive(args)
-			}).join().unwrap()
+			main_noninteractive(args).unwrap();
 		}
 	};
-	match result {
-		Ok(status) => {
-			match status {
-				RshWait::Success {..} => std::process::exit(0),
-				RshWait::Fail { code, cmd: _, } => std::process::exit(code),
-				_ => unreachable!()
-			}
-		}
-		Err(err) => {
-			eprintln!("{:?}",err);
-			std::process::exit(1)
-		}
-	}
-
 }
 
 

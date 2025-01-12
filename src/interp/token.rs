@@ -590,6 +590,7 @@ impl RshTokenizer {
 			}
 		} else if let Some(content) = read_logic(|l| l.get_alias(wd.text.as_str())).unwrap() {
 			let mut sub_tokenizer = RshTokenizer::new(&content);
+			dbg!(&content);
 			loop {
 				let mut deck = sub_tokenizer.tokenize_one()?;
 				if deck.is_empty() { break };
