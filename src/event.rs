@@ -86,7 +86,7 @@ impl ShError {
 #[derive(Debug,Clone)]
 pub enum ShEvent {
 	Input(String),
-	NewAST(Node),
+	NewNodeDeck(Vec<Node>),
 	Exit(i32),
 	Signal(c_int),
 	Error(ShError),
@@ -95,14 +95,14 @@ pub enum ShEvent {
 }
 
 pub struct EventLoop {
-	pub exec_tx: Sender<Node>,
+	pub exec_tx: Sender<Vec<Node>>,
 	pub prompt_tx: Sender<ShEvent>,
 	pub inbox: Receiver<ShEvent>,
 	pub sender: Sender<ShEvent>
 }
 
 impl EventLoop {
-	pub fn new(exec_tx: Sender<Node>,prompt_tx: Sender<ShEvent>) -> Self {
+	pub fn new(exec_tx: Sender<Vec<Node>>,prompt_tx: Sender<ShEvent>) -> Self {
 		let (sender,inbox) = mpsc::channel();
 		Self {
 			exec_tx,
@@ -119,7 +119,7 @@ impl EventLoop {
 				Input(text) => {
 					write_meta(|m| m.set_last_input(&text))?
 				}
-				NewAST(node) => {
+				NewNodeDeck(node) => {
 					// Forward to execution thread
 					self.exec_tx.send(node).unwrap();
 				}

@@ -1,4 +1,4 @@
-use crate::{comp::RshHelper, event::{self, ShError, ShEvent}, shellenv::{self, read_meta, read_vars, write_meta}, RshResult, GLOBAL_EVENT_CHANNEL};
+use crate::{comp::RshHelper, event::{self, ShError, ShEvent}, interp::token::RshTokenizer, shellenv::{self, await_term_ctl, read_meta, read_vars, write_meta}, RshResult, GLOBAL_EVENT_CHANNEL};
 use std::{os::fd::BorrowedFd, path::{Path, PathBuf}, sync::mpsc::{Receiver, Sender}};
 use libc::getpid;
 use nix::{unistd::{tcgetpgrp, tcsetpgrp, Pid}, NixPath};
@@ -75,21 +75,10 @@ impl PromptDispatcher {
 	pub fn new(inbox: Receiver<ShEvent>) -> Self {
 		Self { inbox }
 	}
-	pub fn await_control(&self) {
-		loop {
-			// Wait for terminal control to be surrendered before attempting to display the prompt
-			let current_control_group = unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)).unwrap() };
-			if current_control_group == Pid::this() {
-				break
-			} else {
-				std::thread::sleep(std::time::Duration::from_millis(25));
-			}
-		}
-	}
 	pub fn run(&self) -> RshResult<()> {
 		for message in self.inbox.iter() {
 			if let ShEvent::Prompt = message {
-				self.await_control();
+				shellenv::await_term_ctl()?;
 				write_meta(|m| m.enter_prompt())?;
 
 				let mut rl = init_prompt()?;
@@ -98,32 +87,47 @@ impl PromptDispatcher {
 					format!("{}/.rsh_hist",home)
 				});
 				let prompt = expand::expand_prompt()?;
+
 				match rl.readline(&prompt) {
 					Ok(line) => {
-						write_meta(|m| m.leave_prompt())?;
-						if !line.is_empty() {
-							rl.history_mut().add(&line).map_err(|_| ShError::from_internal("Failed to write to history file"))?;
-							rl.history_mut().save(Path::new(&hist_path)).map_err(|_| ShError::from_internal("Failed to write to history file"))?;
-							write_meta(|m| m.set_last_input(&line))?;
-							let result = descend(&line);
-							match result {
-								Ok(state) => {
-									let deck = if let NdType::Root { ref deck } = state.ast.nd_type {
-										deck
-									} else { unreachable!() };
-									if !deck.is_empty() {
-										event::global_send(ShEvent::NewAST(state.ast))?;
-									} else {
-										shellenv::try_prompt()?;
+							write_meta(|m| m.leave_prompt())?;
+							if !line.is_empty() {
+									rl.history_mut()
+											.add(&line)
+											.map_err(|_| ShError::from_internal("Failed to write to history file"))?;
+									rl.history_mut()
+											.save(Path::new(&hist_path))
+											.map_err(|_| ShError::from_internal("Failed to write to history file"))?;
+									write_meta(|m| m.set_last_input(&line))?;
+
+									let mut tokenizer = RshTokenizer::new(&line);
+
+									loop {
+											let result = descend(&mut tokenizer);
+											match result {
+													Ok(Some(state)) => {
+															await_term_ctl()?;
+															let deck = if let NdType::Root { ref deck } = state.ast.nd_type {
+																	deck
+															} else {
+																	unreachable!()
+															};
+															if !deck.is_empty() {
+																	// Send each deck immediately for execution
+																	event::global_send(ShEvent::NewNodeDeck(deck.clone().into()))?;
+															} else {
+																	break;
+															}
+													}
+													Ok(None) => break,
+													Err(e) => {
+															event::global_send(ShEvent::Error(e))?;
+													}
+											}
 									}
-								}
-								Err(e) => {
-									event::global_send(ShEvent::Error(e))?
-								}
+							} else {
+									shellenv::try_prompt()?;
 							}
-						} else {
-							shellenv::try_prompt()?;
-						}
 					}
 					Err(ReadlineError::Interrupted) => {
 						write_meta(|m| m.leave_prompt())?;

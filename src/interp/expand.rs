@@ -337,55 +337,11 @@ pub fn process_ansi_escapes(input: &str) -> String {
 	result
 }
 
-pub fn expand_alias(mut node: Node) -> RshResult<Node> {
-	match node.nd_type {
-		NdType::Command { ref mut argv } | NdType::Builtin { ref mut argv } => {
-			if let Some(cmd_tk) = argv.pop_front() {
-				if let Some(alias_content) = read_logic(|log| log.get_alias(cmd_tk.text()))? {
-					let new_argv = take(argv);
-					let env_snap = SavedEnv::get_snapshot()?;
-					write_meta(|meta| meta.mod_flags(|f| *f |= EnvFlags::NO_ALIAS))?;
-					let mut state = ParseState {
-						input: alias_content.clone(),
-						tokens: VecDeque::new(),
-						ast: Node::new(),
-					};
-
-					let mut tokenizer = RshTokenizer::new(&alias_content);
-					tokenizer.tokenize()?;
-					state.tokens = tokenizer.tokens.into();
-					let mut alias_tokens = state.tokens;
-					// Trim `SOI` and `EOI` tokens
-					alias_tokens.pop_back();
-					alias_tokens.pop_front();
-					alias_tokens.extend(new_argv);
-
-					// Guard against recursive aliasing
-					// i.e. "alias grep="grep --color-auto"
-					if alias_tokens.front().is_some_and(|tk| tk.text() == cmd_tk.text()) {
-						for token in &mut alias_tokens {
-							if token.text() == cmd_tk.text() {
-								token.wd.flags |= WdFlags::FROM_ALIAS
-							}
-						}
-					}
-
-					state.tokens = alias_tokens;
-					state = parse::parse(state)?;
-					for redir in node.redirs {
-						state.ast.redirs.push_back(redir.clone())
-					}
-					env_snap.restore_snapshot()?;
-					Ok(state.ast)
-				} else {
-					argv.push_front(cmd_tk);
-					Ok(node)
-				}
-			} else {
-				Ok(node)
-			}
-		}
-		_ => unreachable!()
+pub fn expand_alias(alias: &str) -> RshResult<String> {
+	if let Some(alias_content) = read_logic(|log| log.get_alias(alias))? {
+		Ok(alias_content)
+	} else {
+		Err(ShError::from_internal(format!("Did not find an alias for this: {}",alias).as_str()))
 	}
 }
 
@@ -511,16 +467,17 @@ pub fn split_tokens(tk_buffer: &mut VecDeque<Tk>) {
     let mut new_buffer = VecDeque::new();
 
     while let Some(tk) = tk_buffer.pop_front() {
-        if tk.text().contains(" ") {
-            // Split the token's text into multiple parts
-            for part in tk.text().split_whitespace() {
-                let new_tk = Tk::new(part.to_string(), tk.span(), tk.flags()); // Adjust to your `Tk` constructor
-                new_buffer.push_back(new_tk);
-            }
-        } else {
-            // Token has no spaces; add it as is
-            new_buffer.push_back(tk);
-        }
+			let split = tk.text().split_outside_quotes();
+			for word in split {
+				new_buffer.push_back(Tk {
+					tk_type: TkType::String,
+					wd: WordDesc {
+						text: word,
+						span: tk.span(),
+						flags: tk.flags(),
+					}
+				});
+			}
     }
 
     // Replace the original buffer with the new one

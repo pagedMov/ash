@@ -1,10 +1,11 @@
 use std::{collections::{HashMap, VecDeque}, ffi::CString, fmt::{self, Display}, os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd}, panic::Location, path::Path, sync::{mpsc::Receiver, Arc}, thread};
 
+use std::time::Duration;
 use libc::{memfd_create, MFD_CLOEXEC};
 use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::{waitpid, WaitStatus}}, unistd::{close, dup, dup2, execve, execvpe, fork, getpid, pipe, setpgid, tcgetpgrp, tcsetpgrp, ForkResult, Pid}, NixPath};
 use std::sync::Mutex;
 
-use crate::{builtin, event::{self, ShError, ShEvent}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node, Span}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, Job, RVal, SavedEnv}, RshResult, GLOBAL_EVENT_CHANNEL};
+use crate::{builtin, event::{self, ShError, ShEvent}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node, Span}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, read_jobs, read_logic, read_meta, read_vars, term_controller, write_jobs, write_logic, write_meta, write_vars, EnvFlags, Job, RVal, SavedEnv, RSH_PGRP}, RshResult, GLOBAL_EVENT_CHANNEL};
 
 macro_rules! node_operation {
 	($node_type:path { $($field:tt)* }, $node:expr, $node_op:block) => {
@@ -381,22 +382,22 @@ impl Default for ProcIO {
 }
 
 pub struct ExecDispatcher {
-	inbox: Receiver<Node>,
+	inbox: Receiver<Vec<Node>>,
 }
 
 impl ExecDispatcher {
-	pub fn new(inbox: Receiver<Node>) -> Self {
+	pub fn new(inbox: Receiver<Vec<Node>>) -> Self {
 		Self { inbox }
 	}
 	pub fn run(&self) -> RshResult<RshWait> {
 		let status = RshWait::new();
-		for tree in self.inbox.iter() {
-			thread::spawn(move || {
+		for deck in self.inbox.iter() {
+			for tree in deck {
+				shellenv::await_term_ctl()?;
 				if let Err(e) = traverse_ast(tree) {
 					let _ = event::global_send(ShEvent::Error(e));
 				}
-
-			});
+			}
 		}
 		Ok(status)
 	}
@@ -406,7 +407,7 @@ pub fn traverse_ast(ast: Node) -> RshResult<RshWait> {
 	let saved_in = RustFd::from_stdin()?;
 	let saved_out = RustFd::from_stdout()?;
 	let saved_err = RustFd::from_stderr()?;
-	let status = traverse_root(ast, None, ProcIO::new())?;
+	let status = traverse(ast, ProcIO::new())?;
 	saved_in.dup2(&0)?;
 	saved_out.dup2(&1)?;
 	saved_err.dup2(&2)?;
@@ -417,33 +418,14 @@ pub fn traverse_ast(ast: Node) -> RshResult<RshWait> {
 fn traverse(node: Node, io: ProcIO) -> RshResult<RshWait> {
 	let last_status;
 	match node.nd_type {
-		NdType::Command { ref argv } | NdType::Builtin { ref argv } => {
-			let mut node = node.clone();
-			let command_name = argv.front().unwrap();
-			let not_from_alias = !command_name.flags().contains(WdFlags::FROM_ALIAS);
-			let is_not_command_builtin = command_name.text() != "command";
-			if not_from_alias && is_not_command_builtin {
-				node = expand::expand_alias(node.clone())?;
-			}
-			if let Some(_func) = read_logic(|log| log.get_func(command_name.text()))? {
-				//last_status = handle_function(node, io)?;
-				last_status = handle_function(node, io)?;
-			} else if !matches!(node.nd_type, NdType::Command {..} | NdType::Builtin {..}) {
-				// If the resulting alias expansion returns a root node
-				// then traverse the resulting sub-tree
-				return traverse_root(node, None, io)
-			} else {
-				match node.nd_type {
-					NdType::Command {..} => {
-						last_status = handle_command(node, io)?;
-					}
-					NdType::Builtin {..} => {
-						//last_status = handle_builtin(node, io)?;
-						last_status = handle_builtin(node, io)?;
-					}
-					_ => unreachable!()
-				}
-			}
+		NdType::Command {..} => {
+			last_status = handle_command(node, io)?;
+		}
+		NdType::Builtin {..} => {
+			last_status = handle_builtin(node, io)?;
+		}
+		NdType::Function {..} => {
+			last_status = handle_function(node, io)?;
 		}
 		NdType::Pipeline {..} => {
 			last_status = handle_pipeline(node, io)?;
@@ -545,7 +527,6 @@ fn handle_for(node: Node,io: ProcIO) -> RshResult<RshWait> {
 		Ok(ForkResult::Child) => {
 			let body_io = ProcIO::from(None, io.stdout, io.stderr);
 			let redirs = node.get_redirs()?;
-			dbg!(&redirs);
 			handle_redirs(redirs.into())?;
 
 			node_operation!(NdType::For { loop_vars, mut loop_arr, loop_body}, node, {
@@ -804,9 +785,8 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 
 fn handle_function(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 	let span = node.span();
-	if let NdType::Command { ref mut argv } | NdType::Builtin { ref mut argv } = node.nd_type {
-		let func_name = argv.pop_front().unwrap();
-		let mut func = read_logic(|l| l.get_func(func_name.text()).unwrap())?;
+	if let NdType::Function { body, mut argv } = node.nd_type {
+		let mut func = *body; // Unbox the root node for the function
 		func.flags |= NdFlags::FUNCTION;
 		if node.flags.contains(NdFlags::IN_PIPE) {
 			func.flags |= NdFlags::IN_PIPE;

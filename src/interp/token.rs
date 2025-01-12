@@ -7,9 +7,11 @@ use std::mem::take;
 
 use crate::interp::parse::Span;
 use crate::event::ShError;
+use crate::shellenv::read_logic;
 use crate::RshResult;
 use crate::builtin::BUILTINS;
 
+use super::expand;
 use super::helper::StrExtension;
 
 pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
@@ -484,17 +486,20 @@ impl RshTokenizer {
 		let tokens = vec![Tk { tk_type: TkType::SOI, wd: WordDesc::empty() }];
 		Self { input, char_stream, context: TkState::Command, tokens, span: Span::new() }
 	}
+	pub fn input(&self) -> String {
+		self.input.clone()
+	}
 	fn advance(&mut self) -> Option<char> {
 		self.span.end += 1;
 		self.char_stream.pop_front()
 	}
-	pub fn tokenize(&mut self) -> RshResult<()> {
+	pub fn tokenize_one(&mut self) -> RshResult<Vec<Tk>> {
 		use crate::interp::token::TkState::*;
 		let mut wd = WordDesc::empty();
 		while !self.char_stream.is_empty() {
 			self.span.start = self.span.end;
 			wd = wd.set_span(self.span);
-			if self.context == DeadEnd && !matches!(self.char_stream.front().unwrap(),';' | '\n') {
+			if self.context == DeadEnd && !matches!(self.char_stream.front().unwrap(), ';' | '\n') {
 				return Err(ShError::from_parse("Expected a semicolon or newline here", self.span))
 			}
 			match self.char_stream.front().unwrap() {
@@ -508,9 +513,8 @@ impl RshTokenizer {
 				}
 				';' | '\n' => {
 					self.advance();
-					self.tokens.push(Tk::cmdsep(&wd,self.span.end));
-					self.context = Command;
-					continue
+					self.tokens.push(Tk::cmdsep(&wd, self.span.end));
+					break
 				}
 				'#' => self.context = Comment,
 				'(' if self.context == Command => self.context = Subshell,
@@ -532,9 +536,9 @@ impl RshTokenizer {
 				_ => { /* Do nothing */ }
 			}
 			match self.context {
-				Command => self.command_context(take(&mut wd)),
-				Arg => self.arg_context(take(&mut wd)),
-				DQuote | SQuote => self.string_context(take(&mut wd)),
+				Command => self.command_context(take(&mut wd))?,
+				Arg => self.arg_context(take(&mut wd))?,
+				DQuote | SQuote => self.string_context(take(&mut wd))?,
 				VarDec => self.vardec_context(take(&mut wd))?,
 				SingleVarDec => self.vardec_context(take(&mut wd))?,
 				ArrDec => self.arrdec_context(take(&mut wd))?,
@@ -551,11 +555,9 @@ impl RshTokenizer {
 				_ => unreachable!()
 			}
 		}
-		self.tokens.push(Tk::end_of_input(self.input.len()));
-		self.clean_tokens();
-		Ok(())
+		Ok(take(&mut self.tokens))
 	}
-	fn command_context(&mut self, mut wd: WordDesc) {
+	fn command_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
 		use crate::interp::token::TkState::*;
 		wd = self.complete_word(wd);
 		if wd.text.ends_with("()") {
@@ -584,6 +586,13 @@ impl RshTokenizer {
 				"case" => self.tokens.push(Tk { tk_type: TkType::Case, wd }),
 				"select" => self.tokens.push(Tk { tk_type: TkType::Select, wd }),
 				_ => unreachable!("text: {}", wd.text)
+			}
+		} else if let Some(content) = read_logic(|l| l.get_alias(wd.text.as_str())).unwrap() {
+			let mut sub_tokenizer = RshTokenizer::new(&content);
+			loop {
+				let mut deck = sub_tokenizer.tokenize_one()?;
+				if deck.is_empty() { break };
+				self.tokens.extend(deck.drain(..));
 			}
 		} else if matches!(wd.text.as_str(), ";" | "\n") || self.char_stream.is_empty() {
 			let flags = match self.context {
@@ -625,8 +634,9 @@ impl RshTokenizer {
 				self.context = Arg
 			}
 		}
+		Ok(())
 	}
-	fn arg_context(&mut self, mut wd: WordDesc) {
+	fn arg_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
 		wd = self.complete_word(wd);
 		match wd.text.as_str() {
 			"||" | "&&" | "|" | "|&" => {
@@ -690,11 +700,16 @@ impl RshTokenizer {
 				self.tokens.push(Tk { tk_type: TkType::Redirection { redir }, wd })
 			}
 			_ => {
-				self.tokens.push(Tk { tk_type: TkType::Ident, wd: wd.add_flag(WdFlags::IS_ARG) });
+				// Now we will just expand the token here
+				// This catches variable subs, command subs, brace expansions, the whole nine yards
+				let token = Tk { tk_type: TkType::Ident, wd: wd.add_flag(WdFlags::IS_ARG) };
+				let mut expanded = expand::expand_token(token, true)?;
+				self.tokens.extend(expanded.drain(..));
 			}
 		}
+		Ok(())
 	}
-	fn string_context(&mut self, mut wd: WordDesc) {
+	fn string_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
 		// Pop the opening quote
 		self.advance();
 		while let Some(ch) = self.advance() {
@@ -719,8 +734,15 @@ impl RshTokenizer {
 				}
 			}
 		}
-		wd.span = self.span;
-		self.tokens.push(Tk { tk_type: TkType::String, wd })
+		if self.context == TkState::DQuote {
+			wd.span = self.span;
+			let token = Tk { tk_type: TkType::String, wd };
+			let mut expanded = expand::expand_token(token, true)?;
+			self.tokens.extend(expanded.drain(..));
+		} else {
+			self.tokens.push(Tk { tk_type: TkType::String, wd });
+		}
+		Ok(())
 	}
 	fn vardec_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
 		let mut found = false;
@@ -872,9 +894,12 @@ impl RshTokenizer {
 				body.push(ch);
 			}
 			let mut body_tokenizer = RshTokenizer::new(&body);
-			body_tokenizer.tokenize()?;
-			let len = body_tokenizer.tokens.len();
-			let body_tokens = Vec::from(&body_tokenizer.tokens[1..len-1]); // Strip SOI/EOI tokens
+			let mut body_tokens = vec![];
+			while let Ok(mut block) = body_tokenizer.tokenize_one() {
+				if !block.is_empty() {
+					body_tokens.extend(block.drain(..))
+				}
+			}
 			self.tokens.extend(body_tokens);
 			wd = wd.set_span(span);
 		}

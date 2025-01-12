@@ -34,7 +34,7 @@ use std::{env, fs::File, io::Read, os::fd::AsRawFd, path::PathBuf, sync::mpsc::{
 
 use event::{EventLoop, ShError, ShEvent};
 use execute::{traverse_ast, ExecDispatcher, RshWait};
-use interp::parse::{descend, Span};
+use interp::{parse::{descend, Span}, token::RshTokenizer};
 use nix::{sys::{signal::{signal, SigHandler, Signal::{SIGTTIN, SIGTTOU}}, termios::{self, LocalFlags}}, unistd::isatty};
 use once_cell::sync::{Lazy, OnceCell};
 use prompt::PromptDispatcher;
@@ -196,27 +196,34 @@ fn main_noninteractive(args: Vec<String>) -> RshResult<RshWait> {
 		let key = format!("{}",index + 1);
 		write_vars(|v| v.set_param(key, param))?;
 	}
-	let state = descend(&input);
-	match state {
-		Ok(parse_state) => {
-			let (sender,receiver) = mpsc::channel();
-			let dispatch = ExecDispatcher::new(receiver);
-			let result = traverse_ast(parse_state.ast);
-			match result {
-				Ok(code) => {
-					if let RshWait::Fail { code, cmd } = code {
+	let mut tokenizer = RshTokenizer::new(&input);
+	let mut last_result = RshWait::new();
+	loop {
+		let state = descend(&mut tokenizer);
+		match state {
+			Ok(Some(parse_state)) => {
+				let (sender,receiver) = mpsc::channel();
+				let dispatch = ExecDispatcher::new(receiver);
+				let result = traverse_ast(parse_state.ast);
+				match result {
+					Ok(code) => {
+						if let RshWait::Fail { code, cmd } = code {
+							panic!()
+						} else {
+							last_result = code;
+						}
+					}
+					Err(e) => {
+						eprintln!("{:?}", e);
 						panic!()
-					} else { Ok(code) }
-				}
-				Err(e) => {
-					eprintln!("{:?}", e);
-					panic!()
+					}
 				}
 			}
-		}
-		Err(e) => {
-			eprintln!("{:?}", e);
-			panic!()
+			Ok(None) => break Ok(last_result),
+			Err(e) => {
+				eprintln!("{:?}", e);
+				panic!()
+			}
 		}
 	}
 }

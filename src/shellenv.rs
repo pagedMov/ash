@@ -1,14 +1,22 @@
-use std::{collections::BTreeMap, env, ffi::{CString, OsStr}, fmt::{self, Debug, Display}, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, str::FromStr, sync::{Arc, LazyLock}};
+use std::{collections::BTreeMap, env, ffi::{CString, OsStr}, fmt::{self, Debug, Display}, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, str::FromStr, sync::{Arc, Condvar, LazyLock, Mutex}};
 use std::collections::HashMap;
 
 use bitflags::bitflags;
-use nix::{sys::signal::{self, kill, Signal}, unistd::{gethostname, isatty, tcgetpgrp, tcsetpgrp, Pid, User}};
+use nix::{sys::signal::{self, kill, Signal}, unistd::{gethostname, getpgrp, isatty, tcgetpgrp, tcsetpgrp, Pid, User}};
 use once_cell::sync::Lazy;
 use std::{fs::File, sync::RwLock};
 
-use crate::{event::{self, ShError}, execute::{self, RshWait}, interp::{helper, parse::{descend, Node, Span}}, RshResult};
+use crate::{event::{self, ShError}, execute::{self, RshWait}, interp::{helper, parse::{descend, Node, Span}, token::RshTokenizer}, RshResult};
 
 pub static RSH_PGRP: Lazy<Pid> = Lazy::new(Pid::this);
+
+pub static TERM_CTL: LazyLock<Arc<RwLock<TermCtl>>> = LazyLock::new(|| {
+	Arc::new(
+		RwLock::new(
+			TermCtl::new()
+		)
+	)
+});
 
 pub static JOBS: LazyLock<Arc<RwLock<JobTable>>> = LazyLock::new(|| {
 	Arc::new(
@@ -57,7 +65,7 @@ bitflags! {
 		const CLEAN            = 0b00000000000000000000000000100000; // Do not inherit env vars from parent
 		const NO_RC            = 0b00000000000000000000000001000000;
 		const IN_SUBSH         = 0b00000000000000000000000010000000; // In a subshell
-		// Options set by 'set' command
+																																 // Options set by 'set' command
 		const EXPORT_ALL_VARS  = 0b00000000000000000000000100000000; // set -a
 		const REPORT_JOBS_ASAP = 0b00000000000000000000001000000000; // set -b
 		const EXIT_ON_ERROR    = 0b00000000000000000000010000000000; // set -e
@@ -94,7 +102,7 @@ pub struct HashFloat(pub f64);
 
 impl PartialEq for HashFloat {
 	fn eq(&self, other: &Self) -> bool {
-	    self.0.to_bits() == other.0.to_bits()
+		self.0.to_bits() == other.0.to_bits()
 	}
 }
 
@@ -102,7 +110,7 @@ impl Eq for HashFloat {}
 
 impl Hash for HashFloat {
 	fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-	    self.0.to_bits().hash(state)
+		self.0.to_bits().hash(state)
 	}
 }
 
@@ -188,7 +196,7 @@ impl RVal {
 
 impl Default for RVal {
 	fn default() -> Self {
-	  RVal::String("".into())
+		RVal::String("".into())
 	}
 }
 
@@ -736,10 +744,52 @@ impl EnvMeta {
 	}
 }
 
+pub struct TermCtl {
+	rsh_pgrp: Pid,
+	term_ctl_status: Arc<(Mutex<bool>, Condvar)>
+}
+
+impl TermCtl {
+	pub fn new() -> Self {
+		let rsh_pgrp = getpgrp();
+		let term_ctl_status = Arc::new((Mutex::new(false), Condvar::new()));
+		Self { rsh_pgrp, term_ctl_status }
+	}
+
+	pub fn wait_for_terminal_control(&self) {
+		let (lock, cvar) = &*self.term_ctl_status;
+		let mut has_control = lock.lock().unwrap();
+
+		while !*has_control {
+			if term_controller() == self.rsh_pgrp {
+				*has_control = true;
+				break;
+			}
+			// Pass the MutexGuard directly (remove the `&mut`)
+			has_control = cvar.wait(has_control).unwrap();
+		}
+	}
+
+	pub fn notify_terminal_control(&self) {
+		let (lock, cvar) = &*self.term_ctl_status;
+		let mut has_control = lock.lock().unwrap();
+		*has_control = true;
+		cvar.notify_all();
+	}
+
+	pub fn my_pgrp(&self) -> Pid {
+		self.rsh_pgrp
+	}
+}
+
 pub fn attach_tty(pgid: Pid) -> RshResult<()> {
 	// Ensure stdin (fd 0) is a tty before proceeding
 	if !isatty(0).unwrap_or(false) {
 		return Ok(());
+	}
+
+	if pgid == my_pgrp()? {
+		notify_term_ctl()?
 	}
 
 	// Attempt to set the process group for the terminal
@@ -747,6 +797,10 @@ pub fn attach_tty(pgid: Pid) -> RshResult<()> {
 		tcsetpgrp(BorrowedFd::borrow_raw(0), pgid)
 			.map_err(|e| ShError::from_internal(format!("Failed to attach tty to pgid {}: {}", pgid, e).as_str()))
 	}
+}
+
+pub fn term_controller() -> Pid {
+	unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) }.unwrap()
 }
 
 pub fn try_prompt() -> RshResult<()> {
@@ -802,6 +856,20 @@ pub fn write_meta<F,T>(f: F) -> RshResult<T>
 where F: FnOnce(&mut EnvMeta) -> T {
 	let mut lock = META.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
+}
+pub fn await_term_ctl() -> RshResult<()> {
+	let term_ctl = TERM_CTL.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
+	term_ctl.wait_for_terminal_control();
+	Ok(())
+}
+pub fn notify_term_ctl() -> RshResult<()> {
+	let term_ctl = TERM_CTL.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
+	term_ctl.notify_terminal_control();
+	Ok(())
+}
+pub fn my_pgrp() -> RshResult<Pid> {
+	let term_ctl = TERM_CTL.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
+	Ok(term_ctl.my_pgrp())
 }
 
 pub fn is_interactive() -> RshResult<bool> {
@@ -908,12 +976,16 @@ pub fn source_file(path: PathBuf) -> RshResult<()> {
 	file.read_to_string(&mut buffer).map_err(|_| ShError::from_io())?;
 	write_meta(|meta| meta.set_last_input(&buffer.clone()))?;
 
-	let state = descend(&buffer)?;
-	let result = execute::traverse_ast(state.ast)?;
-	if let RshWait::Fail { code, cmd } = result {
-		if code == 127 {
-			if let Some(cmd) = cmd {
-				eprintln!("Command not found: {}",cmd);
+	let mut tokenizer = RshTokenizer::new(&buffer);
+	loop {
+		let state = descend(&mut tokenizer)?;
+		if state.is_none() { break }
+		let result = execute::traverse_ast(state.unwrap().ast)?;
+		if let RshWait::Fail { code, cmd } = result {
+			if code == 127 {
+				if let Some(cmd) = cmd {
+					eprintln!("Command not found: {}",cmd);
+				}
 			}
 		}
 	}

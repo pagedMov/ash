@@ -5,6 +5,7 @@ use std::mem::take;
 
 use crate::event::ShError;
 use crate::interp::token::{RedirType, RshTokenizer, Tk, TkType};
+use crate::shellenv::read_logic;
 use crate::RshResult;
 
 use super::helper;
@@ -59,6 +60,7 @@ enum Phase {
 enum CmdType {
 	Builtin,
 	Subshell,
+	Function,
 	Command
 }
 
@@ -194,6 +196,7 @@ pub enum NdType {
 	Assignment {name: String, value: Option<String> },
 	Command { argv: VecDeque<Tk> },
 	Builtin { argv: VecDeque<Tk> },
+	Function { body: Box<Node>, argv: VecDeque<Tk> },
 	Redirection { redir: Redir },
 	And,
 	Or,
@@ -286,10 +289,10 @@ impl DescentContext {
 	}
 }
 
-pub fn descend(input: &str) -> RshResult<ParseState> {
-	let mut tokenizer = RshTokenizer::new(input);
+pub fn descend(tokenizer: &mut RshTokenizer) -> RshResult<Option<ParseState>> {
+	let input = tokenizer.input();
 	let mut state = ParseState {
-		input: input.to_string(),
+		input: input.clone(),
 		tokens: VecDeque::new(),
 		ast: Node {
 			command: None,
@@ -300,12 +303,12 @@ pub fn descend(input: &str) -> RshResult<ParseState> {
 		}
 	};
 
-	tokenizer.tokenize();
-	state.tokens = tokenizer.tokens.into();
+	let deck = tokenizer.tokenize_one()?;
+	state.tokens = deck.into();
 
 	state = parse(state)?;
 
-	Ok(state)
+	Ok(Some(state))
 }
 
 /// The purpose of this function is mainly just to be an entry point for the parsing logic
@@ -1413,7 +1416,11 @@ pub fn build_func_def(mut ctx: DescentContext) -> RshResult<DescentContext> {
 			ast: Node::new()
 		};
 
-		tokenizer.tokenize();
+		loop {
+			let mut deck = tokenizer.tokenize_one()?;
+			if deck.is_empty() { break };
+			state.tokens.extend(deck.drain(..));
+		}
 		state.tokens = tokenizer.tokens.into();
 		let state = parse(state)?;
 		let func_tree = state.ast.boxed();
@@ -1461,10 +1468,13 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let mut background = false;
 
 	let cmd = ctx.front_tk().unwrap().clone();
+	let func_body = read_logic(|l| l.get_func(cmd.text()))?;
 	let cmd_type = if cmd.flags().contains(WdFlags::BUILTIN) {
 		CmdType::Builtin
 	} else if cmd.tk_type == TkType::Subshell {
 		CmdType::Subshell
+	} else if func_body.is_some() {
+		CmdType::Function
 	} else {
 		CmdType::Command
 	};
@@ -1539,6 +1549,15 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 			Node {
 				command,
 				nd_type: NdType::Builtin { argv },
+				span,
+				flags: NdFlags::VALID_OPERAND,
+				redirs: VecDeque::new()
+			}
+		}
+		CmdType::Function => {
+			Node {
+				command,
+				nd_type: NdType::Function { body: Box::new(func_body.unwrap()), argv },
 				span,
 				flags: NdFlags::VALID_OPERAND,
 				redirs: VecDeque::new()

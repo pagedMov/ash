@@ -1,6 +1,6 @@
 use crate::{interp::token::REGEX, shellenv::{read_meta, read_vars, write_vars, RVal, }, RshResult};
 use nix::unistd::dup2;
-use std::{collections::{HashMap, VecDeque}, env, fs, io, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::Path};
+use std::{collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::Path};
 
 use super::{parse::{NdType, Node}, token::Tk};
 
@@ -100,9 +100,46 @@ pub trait StrExtension {
 	fn has_unescaped(&self, pat: &str) -> bool;
 	fn consume_escapes(&self) -> String;
 	fn trim_quotes(&self) -> String;
+	fn split_outside_quotes(&self) -> Vec<String>;
 }
 
 impl StrExtension for str {
+	fn split_outside_quotes(&self) -> Vec<String> {
+		let mut result = Vec::new();
+		let mut working_str = String::new();
+		let mut dquoted = false;
+		let mut squoted = false;
+
+		for ch in self.chars() {
+			match ch {
+				' ' | '\t' if !dquoted && !squoted => {
+					// Push the current token if not in quotes
+					if !working_str.is_empty() {
+						result.push(std::mem::take(&mut working_str));
+					}
+				}
+				'"' if !squoted => {
+					// Toggle double-quote state
+					dquoted = !dquoted;
+				}
+				'\'' if !dquoted => {
+					// Toggle single-quote state
+					squoted = !squoted;
+				}
+				_ => {
+					// Append to the current token
+					working_str.push(ch);
+				}
+			}
+		}
+
+		// Push the last token if any
+		if !working_str.is_empty() {
+			result.push(working_str);
+		}
+
+		result
+	}
 	fn trim_command_sub(&self) -> Option<String> {
 		self.strip_prefix("$(")
 			.and_then(|s| s.strip_suffix(")"))
