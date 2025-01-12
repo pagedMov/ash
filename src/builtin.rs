@@ -835,6 +835,7 @@ pub fn alias(node: Node) -> RshResult<RshWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front();
 	while let Some(arg) = argv.pop_front() {
+		dbg!(&arg.text());
 		if !token::REGEX["assignment"].is_match(arg.text()) {
 			return Err(ShError::from_syntax(&format!("Expected an assignment pattern in alias args, got {}",arg.text()), arg.span()))
 		}
