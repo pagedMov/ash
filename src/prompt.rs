@@ -1,7 +1,5 @@
-use crate::{comp::RshHelper, event::{self, ShError, ShEvent}, interp::token::RshTokenizer, shellenv::{self, await_term_ctl, read_meta, read_vars, write_meta}, RshResult, GLOBAL_EVENT_CHANNEL};
-use std::{os::fd::BorrowedFd, path::{Path, PathBuf}, sync::mpsc::{Receiver, Sender}};
-use libc::getpid;
-use nix::{unistd::{tcgetpgrp, tcsetpgrp, Pid}, NixPath};
+use crate::{comp::RshHelper, event::{self, ShError, ShEvent}, interp::token::RshTokenizer, shellenv::{self, await_term_ctl, read_meta, read_vars, write_meta}, RshResult};
+use std::{path::{Path, PathBuf}, sync::mpsc::Receiver};
 use signal_hook::consts::signal::*;
 
 use rustyline::{self, config::Configurer, error::ReadlineError, history::{DefaultHistory, History}, ColorMode, Config, EditMode, Editor};
@@ -90,44 +88,44 @@ impl PromptDispatcher {
 
 				match rl.readline(&prompt) {
 					Ok(line) => {
-							write_meta(|m| m.leave_prompt())?;
-							if !line.is_empty() {
-									rl.history_mut()
-											.add(&line)
-											.map_err(|_| ShError::from_internal("Failed to write to history file"))?;
-									rl.history_mut()
-											.save(Path::new(&hist_path))
-											.map_err(|_| ShError::from_internal("Failed to write to history file"))?;
-									write_meta(|m| m.set_last_input(&line))?;
+						write_meta(|m| m.leave_prompt())?;
+						if !line.is_empty() {
+							rl.history_mut()
+								.add(&line)
+								.map_err(|_| ShError::from_internal("Failed to write to history file"))?;
+								rl.history_mut()
+									.save(Path::new(&hist_path))
+									.map_err(|_| ShError::from_internal("Failed to write to history file"))?;
+								write_meta(|m| m.set_last_input(&line))?;
 
-									let mut tokenizer = RshTokenizer::new(&line);
+								let mut tokenizer = RshTokenizer::new(&line);
 
-									loop {
-											let result = descend(&mut tokenizer);
-											match result {
-													Ok(Some(state)) => {
-															await_term_ctl()?;
-															let deck = if let NdType::Root { ref deck } = state.ast.nd_type {
-																	deck
-															} else {
-																	unreachable!()
-															};
-															if !deck.is_empty() {
-																	// Send each deck immediately for execution
-																	event::global_send(ShEvent::NewNodeDeck(deck.clone().into()))?;
-															} else {
-																	break;
-															}
-													}
-													Ok(None) => break,
-													Err(e) => {
-															event::global_send(ShEvent::Error(e))?;
-													}
+								loop {
+									let result = descend(&mut tokenizer);
+									match result {
+										Ok(Some(state)) => {
+											await_term_ctl()?;
+											let deck = if let NdType::Root { ref deck } = state.ast.nd_type {
+												deck
+											} else {
+												unreachable!()
+											};
+											if !deck.is_empty() {
+												// Send each deck immediately for execution
+												event::global_send(ShEvent::NewNodeDeck(deck.clone().into()))?;
+											} else {
+												break;
 											}
+										}
+										Ok(None) => break,
+										Err(e) => {
+											event::global_send(ShEvent::Error(e))?;
+										}
 									}
-							} else {
-									shellenv::try_prompt()?;
-							}
+								}
+						} else {
+							shellenv::try_prompt()?;
+						}
 					}
 					Err(ReadlineError::Interrupted) => {
 						write_meta(|m| m.leave_prompt())?;

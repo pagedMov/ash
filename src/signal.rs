@@ -108,6 +108,7 @@ fn handle_child_stop(pid: Pid, signal: Signal) -> RshResult<()> {
 fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
 	let job = read_jobs(|j| j.get_by_pid(pid).cloned())?;
 	if job.is_none() {
+		shellenv::notify_job_done(pid)?;
 		shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
 		shellenv::try_prompt()?;
 		return Ok(())
@@ -119,6 +120,7 @@ fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
 		}
 	})?;
 	if read_jobs(|j| j.is_finished(pgid))? {
+		shellenv::notify_job_done(pgid)?;
 		if read_jobs(|j| j.get_by_pgid(pgid).is_some())? {
 			shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
 			shellenv::try_prompt()?;

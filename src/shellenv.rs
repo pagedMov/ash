@@ -229,8 +229,8 @@ pub struct Job {
 	commands: Vec<String>,
 	pgid: Pid,
 	statuses: Vec<RshWait>,
-	active: bool,
-	saved_statuses: Vec<RshWait>
+	saved_statuses: Vec<RshWait>,
+	finished: Arc<(Mutex<bool>, Condvar)>
 }
 
 impl Job {
@@ -242,9 +242,29 @@ impl Job {
 			pids,
 			commands,
 			statuses: vec![RshWait::Running;num_pids],
-			active: true,
-			saved_statuses: vec![]
+			saved_statuses: vec![],
+			finished: Arc::new((Mutex::new(false), Condvar::new()))
 		}
+	}
+
+	pub fn get_status_handle(&self) -> Arc<(Mutex<bool>,Condvar)> {
+		Arc::clone(&self.finished)
+	}
+
+	// These two methods allow other threads to stop and wait for specific jobs to finish
+	pub fn await_completion(&self) {
+		let (lock, cvar) = &*self.finished;
+		let mut is_finished = lock.lock().unwrap();
+		while !*is_finished {
+			is_finished = cvar.wait(is_finished).unwrap();
+		}
+	}
+	// This method notifies the job that it has completed
+	pub fn notify_completion(&self) {
+		let (lock, cvar) = &*self.finished;
+		let mut is_complete = lock.lock().unwrap();
+		*is_complete = true;
+		cvar.notify_all();
 	}
 	pub fn is_running(&self) -> bool {
 		self.statuses.iter().any(|stat| matches!(stat,RshWait::Running))
@@ -304,9 +324,6 @@ impl Job {
 	}
 	pub fn commands(&self) -> Vec<String> {
 		self.commands.clone()
-	}
-	pub fn deactivate(&mut self) {
-		self.active = false;
 	}
 	pub fn signal_proc(&self, sig: Signal) -> RshResult<()> {
 		if self.pids().len() == 1 {
@@ -637,7 +654,11 @@ impl VarTable {
 		self.vars.remove(key);
 	}
 	pub fn get_var(&self, key: &str) -> Option<RVal> {
-		self.vars.get(key).cloned()
+		if let Some(var) = self.vars.get(key).cloned() {
+			Some(var)
+		} else if let Some(var) = self.params.get(key).cloned() {
+			Some(RVal::String(var))
+		} else { self.env.get(key).cloned().map(RVal::String) }
 	}
 
 	pub fn index_arr(&self, key: &str, index: usize) -> RshResult<RVal> {
@@ -777,9 +798,34 @@ impl TermCtl {
 		cvar.notify_all();
 	}
 
+
 	pub fn my_pgrp(&self) -> Pid {
 		self.rsh_pgrp
 	}
+}
+
+pub fn await_job(pgid: Pid) -> RshResult<()> {
+	let status_handle = read_jobs(|j| j.get_by_pgid(pgid).map(|job| job.get_status_handle()))?.unwrap();
+	let (lock,cvar) = &*status_handle;
+	let mut is_complete = lock.lock().unwrap();
+	while !*is_complete {
+		is_complete = cvar.wait(is_complete).unwrap();
+	}
+	Ok(())
+}
+
+pub fn notify_job_done(pgid: Pid) -> RshResult<()> {
+	let status_handle = read_jobs(|j| j.get_by_pgid(pgid).map(|job| job.get_status_handle()))?;
+	if status_handle.is_none() {
+		return Ok(())
+	}
+	let status_handle = status_handle.unwrap();
+
+	let (lock, cvar) = &*status_handle;
+	let mut is_complete = lock.lock().unwrap();
+	*is_complete = true;
+	cvar.notify_all();
+	Ok(())
 }
 
 pub fn attach_tty(pgid: Pid) -> RshResult<()> {

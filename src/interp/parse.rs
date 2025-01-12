@@ -6,7 +6,7 @@ use std::mem::take;
 use crate::event::ShError;
 use crate::interp::token::{RedirType, RshTokenizer, Tk, TkType};
 use crate::shellenv::read_logic;
-use crate::RshResult;
+use crate::{builtin, RshResult};
 
 use super::helper;
 use super::token::{Redir, WdFlags};
@@ -163,7 +163,6 @@ impl Node {
 	}
 	pub fn get_redirs(&self) -> RshResult<Vec<Node>> {
 		if !self.flags.contains(NdFlags::VALID_OPERAND) {
-			dbg!(self);
 			return Err(ShError::from_internal("Called get_redirs with an invalid operand"))
 		}
 		let mut redir_vec = vec![];
@@ -491,7 +490,7 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 
 pub fn check_valid_operand(node: &Node) -> bool {
 	use crate::interp::parse::NdType::*;
-	matches!(node.nd_type, PipelineBranch {..} | Pipeline {..} | Subshell {..} | Chain {..} | If {..} | For {..} | Loop {..} | Case {..} | Select {..} | Command {..} | Builtin {..})
+	matches!(node.nd_type, PipelineBranch {..} | Pipeline {..} | Subshell {..} | Chain {..} | If {..} | For {..} | Loop {..} | Case {..} | Select {..} | Function {..} | Command {..} | Builtin {..})
 }
 
 pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
@@ -525,7 +524,6 @@ pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				if let Some(mut left) = buffer.pop_back() {
 					if let Some(mut right) = ctx.next_node() {
 						if !check_valid_operand(&left) {
-							dbg!(&left);
 							return Err(ShError::from_parse("The left side of this pipeline is invalid", node.span))
 						}
 						if !check_valid_operand(&right) {
@@ -1421,7 +1419,6 @@ pub fn build_func_def(mut ctx: DescentContext) -> RshResult<DescentContext> {
 			if deck.is_empty() { break };
 			state.tokens.extend(deck.drain(..));
 		}
-		state.tokens = tokenizer.tokens.into();
 		let state = parse(state)?;
 		let func_tree = state.ast.boxed();
 		let node = Node {
@@ -1469,7 +1466,7 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 
 	let cmd = ctx.front_tk().unwrap().clone();
 	let func_body = read_logic(|l| l.get_func(cmd.text()))?;
-	let cmd_type = if cmd.flags().contains(WdFlags::BUILTIN) {
+	let cmd_type = if builtin::BUILTINS.contains(&cmd.text()) {
 		CmdType::Builtin
 	} else if cmd.tk_type == TkType::Subshell {
 		CmdType::Subshell

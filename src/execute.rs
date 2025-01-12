@@ -460,6 +460,9 @@ fn traverse(node: Node, io: ProcIO) -> RshResult<RshWait> {
 		NdType::Cmdsep => {
 			last_status = RshWait::new();
 		}
+		NdType::Root {..} => {
+			last_status = traverse_root(node, None, io)?;
+		}
 		_ => unimplemented!("Support for node type `{:?}` is not yet implemented",node.nd_type)
 	}
 	Ok(last_status)
@@ -632,19 +635,22 @@ fn handle_if(node: Node, io: ProcIO) -> RshResult<RshWait> {
 }
 
 fn handle_chain(node: Node) -> RshResult<RshWait> {
-	let mut last_status;
+	let last_status;
 
 	node_operation!(NdType::Chain { left, right, op }, node, {
-		last_status = traverse(*left, ProcIO::new())?;
+		traverse(*left, ProcIO::new())?;
+		let pgid = read_jobs(|j| *j.read_job(0).unwrap().pgid())?;
+		shellenv::await_job(pgid)?; // Park the thread while we wait for the previous command to exit
+		last_status = read_jobs(|j| j.read_job(0).unwrap().get_proc_statuses().first().unwrap().clone())?;
 		if last_status == RshWait::Success {
 			if let NdType::And = op.nd_type {
-				last_status = traverse(*right,ProcIO::new())?;
+				traverse(*right,ProcIO::new())?;
 			}
 		} else if let NdType::Or = op.nd_type {
-			last_status = traverse(*right,ProcIO::new())?;
+			traverse(*right,ProcIO::new())?;
 		}
 	});
-	Ok(last_status)
+	Ok(last_status.clone())
 }
 
 fn handle_assignment(node: Node) -> RshResult<RshWait> {
@@ -669,41 +675,59 @@ fn handle_assignment(node: Node) -> RshResult<RshWait> {
 }
 
 fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
-	let argv = expand::expand_arguments(&mut node)?;
-	let result = match argv.first().unwrap().text() {
-		"echo" => builtin::echo(node, io),
-		"expr" => builtin::expr(node, io),
-		"set" => builtin::set_or_unset(node, true),
-		"jobs" => builtin::jobs(node, io),
-		"fg" => builtin::fg(node),
-		"bg" => builtin::bg(node),
-		"int" => builtin::int(node),
-		"bool" => builtin::bool(node),
-		"float" => builtin::float(node),
-		"arr" => builtin::array(node),
-		"type" => builtin::r#type(node),
-		//"dict" => builtin::dict(node),
-		"unset" => builtin::set_or_unset(node, false),
-		"source" => builtin::source(node),
-		"cd" => builtin::cd(node),
-		"pwd" => builtin::pwd(node.span()),
-		"alias" => builtin::alias(node),
-		"unalias" => builtin::unalias(node),
-		"export" => builtin::export(node),
-		"[" | "test" => builtin::test(node.get_argv()?.into()),
-		"builtin" => {
-			// This one allows you to safely wrap builtins in aliases/functions
-			if let NdType::Builtin { mut argv } = node.nd_type {
-				argv.pop_front();
-				node.nd_type = NdType::Builtin { argv };
-				handle_builtin(node, io)
-			} else { unreachable!() }
+	let argv = node.get_argv()?;
+	match unsafe { fork() } {
+		Ok(ForkResult::Child) => {
+			let result = match argv.first().unwrap().text() {
+				"echo" => builtin::echo(node, io),
+				"expr" => builtin::expr(node, io),
+				"set" => builtin::set_or_unset(node, true),
+				"jobs" => builtin::jobs(node, io),
+				"fg" => builtin::fg(node),
+				"bg" => builtin::bg(node),
+				"int" => builtin::int(node),
+				"bool" => builtin::bool(node),
+				"float" => builtin::float(node),
+				"arr" => builtin::array(node),
+				"type" => builtin::r#type(node),
+				//"dict" => builtin::dict(node),
+				"unset" => builtin::set_or_unset(node, false),
+				"source" => builtin::source(node),
+				"cd" => builtin::cd(node),
+				"pwd" => builtin::pwd(node.span()),
+				"alias" => builtin::alias(node),
+				"unalias" => builtin::unalias(node),
+				"export" => builtin::export(node),
+				"[" | "test" => builtin::test(node.get_argv()?.into()),
+				"builtin" => {
+					// This one allows you to safely wrap builtins in aliases/functions
+					if let NdType::Builtin { mut argv } = node.nd_type {
+						argv.pop_front();
+						node.nd_type = NdType::Builtin { argv };
+						handle_builtin(node, io)
+					} else { unreachable!() }
+				}
+				_ => unimplemented!("found this builtin: {}",argv[0].text())
+			};
+			std::process::exit(0);
 		}
-		_ => unimplemented!("found this builtin: {}",argv[0].text())
-	};
+		Ok(ForkResult::Parent { child }) => {
+			setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
+			if node.flags.contains(NdFlags::BACKGROUND) {
+				write_jobs(|j| j.new_job(vec![child], vec![node.get_argv().unwrap().first().unwrap().text().to_string()], child))?;
+				shellenv::try_prompt()?;
+			} else {
+				if !node.flags.contains(NdFlags::FUNCTION) {
+					shellenv::attach_tty(child)?;
+				}
+				let job = Job::new(0, vec![child], vec![node.get_argv().unwrap().first().unwrap().text().to_string()], child);
+				write_jobs(|j| j.new_fg(job))?;
+			}
+		}
+		Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_builtin".into(), 1, node.span())),
+	}
 
-	shellenv::try_prompt()?;
-	result
+	Ok(RshWait::Success)
 }
 
 pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
@@ -978,7 +1002,7 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 }
 
 fn handle_command(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
-	let argv = expand::expand_arguments(&mut node)?;
+	let argv = node.get_argv()?;
 	let argv = argv.iter().map(|arg| CString::new(arg.text()).unwrap()).collect::<Vec<CString>>();
 	let redirs = node.get_redirs()?;
 

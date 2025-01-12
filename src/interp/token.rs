@@ -514,6 +514,7 @@ impl RshTokenizer {
 				';' | '\n' => {
 					self.advance();
 					self.tokens.push(Tk::cmdsep(&wd, self.span.end));
+					self.context = Command;
 					break
 				}
 				'#' => self.context = Comment,
@@ -592,7 +593,7 @@ impl RshTokenizer {
 			loop {
 				let mut deck = sub_tokenizer.tokenize_one()?;
 				if deck.is_empty() { break };
-				self.tokens.extend(deck.drain(..));
+				self.tokens.append(&mut deck);
 			}
 		} else if matches!(wd.text.as_str(), ";" | "\n") || self.char_stream.is_empty() {
 			let flags = match self.context {
@@ -938,10 +939,12 @@ impl RshTokenizer {
 				'\'' if !dub_quote => {
 					// Single quote handling
 					sng_quote = !sng_quote;
+					wd = wd.add_char(ch);
 				}
 				'"' if !sng_quote => {
 					// Double quote handling
 					dub_quote = !dub_quote;
+					wd = wd.add_char(ch);
 				}
 				_ if !bracket_stack.is_empty() || !paren_stack.is_empty() || dub_quote || sng_quote => {
 					// Inside a quoted string
@@ -950,6 +953,9 @@ impl RshTokenizer {
 				_ if !matches!(ch, ' ' | '\t' | '\n' | ';') => {
 					// Regular character
 					wd = wd.add_char(ch);
+				}
+				'\n' | ';' | ' ' | '\t' if !bracket_stack.is_empty() || !paren_stack.is_empty() || dub_quote || sng_quote => {
+					wd = wd.add_char(ch)
 				}
 				'\n' | ';' => {
 					// Preserve cmdsep for tokenizing
