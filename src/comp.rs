@@ -186,7 +186,6 @@ impl Validator for RshHelper {
 			Ok(true) => Ok(ValidationResult::Valid(None)), // Input is valid
 			Ok(false) => Ok(ValidationResult::Incomplete), // Input is incomplete
 			Err(err) => {
-				// Convert ShError to a user-friendly error message
 				let message = match err {
 					ShError::InvalidSyntax(msg, _) => msg,
 					_ => "Unknown syntax error".to_string(),

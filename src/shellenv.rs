@@ -334,7 +334,6 @@ impl Job {
 		}
 	}
 	pub fn display(&self, job_order: &[i32], flags: JobFlags) -> String {
-		dbg!(&self);
 		let long = flags.contains(JobFlags::LONG);
 		let init = flags.contains(JobFlags::INIT);
 		let pids = flags.contains(JobFlags::PIDS);
@@ -561,7 +560,6 @@ impl JobTable {
 		let job_id = self.jobs.len() + 1;
 		let job = Job::new(job_id as i32,pids,commands,pgid);
 		if job_id >= 1 {
-			dbg!(&job);
 			println!("{}",job.display(&self.job_order,JobFlags::INIT));
 		}
 		self.jobs.insert(job_id as i32, job);
@@ -1043,7 +1041,7 @@ pub fn source_file(path: PathBuf) -> RshResult<()> {
 	let mut tokenizer = RshTokenizer::new(&buffer);
 	loop {
 		let state = descend(&mut tokenizer)?;
-		if state.is_none() { break }
+		if state.clone().is_some_and(|ps| ps.tokens.is_empty()) { break }
 		let result = execute::traverse_ast(state.unwrap().ast)?;
 		if let RshWait::Fail { code, cmd } = result {
 			if code == 127 {

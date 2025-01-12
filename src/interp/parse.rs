@@ -9,7 +9,7 @@ use crate::shellenv::read_logic;
 use crate::{builtin, RshResult};
 
 use super::helper;
-use super::token::{Redir, WdFlags};
+use super::token::{Redir, TkizerCtx, WdFlags};
 
 bitflags! {
 	#[derive(Debug,Copy,Clone,PartialEq)]
@@ -302,7 +302,7 @@ pub fn descend(tokenizer: &mut RshTokenizer) -> RshResult<Option<ParseState>> {
 		}
 	};
 
-	let deck = tokenizer.tokenize_one()?;
+	let deck = tokenizer.tokenize_one(TkizerCtx::new())?;
 	state.tokens = deck.into();
 
 	state = parse(state)?;
@@ -527,6 +527,7 @@ pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
 							return Err(ShError::from_parse("The left side of this pipeline is invalid", node.span))
 						}
 						if !check_valid_operand(&right) {
+							dbg!(&right);
 							return Err(ShError::from_parse("The right side of this pipeline is invalid", node.span))
 						}
 						left.flags |= NdFlags::IN_PIPE;
@@ -1415,7 +1416,7 @@ pub fn build_func_def(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		};
 
 		loop {
-			let mut deck = tokenizer.tokenize_one()?;
+			let mut deck = tokenizer.tokenize_one(TkizerCtx::new())?;
 			if deck.is_empty() { break };
 			state.tokens.extend(deck.drain(..));
 		}
@@ -1573,7 +1574,6 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	if background {
 		node.flags |= NdFlags::BACKGROUND
 	}
-	dbg!(&node);
 	ctx.attach_node(node);
 	Ok(ctx)
 }

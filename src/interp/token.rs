@@ -55,6 +55,7 @@ bitflags! {
 	pub struct FnFlags: u32 {
 		const RECURSE = 0b0001;
 	}
+
 	#[derive(Debug,Hash,Clone,Copy,PartialEq,Eq)]
 	pub struct WdFlags: u32 {
 		const KEYWORD =    0b000000000000000001;
@@ -74,7 +75,27 @@ bitflags! {
 		const FROM_FUNC  = 0b000100000000000000;
 		const FROM_VAR   = 0b001000000000000000;
 	}
+}
+
+#[derive(Debug,Hash,Clone,PartialEq,Eq)]
+pub struct TkizerCtx {
+	alias_expansion: Option<String>
+}
+
+impl TkizerCtx {
+	pub fn new() -> Self {
+		Self { alias_expansion: None }
 	}
+	pub fn with_alias(name: &str) -> Self {
+		Self { alias_expansion: Some(name.to_string()) }
+	}
+	pub fn check_alias_exp(&self) -> bool {
+		self.alias_expansion.is_some()
+	}
+	pub fn get_alias_exp(&self) -> Option<String> {
+		self.alias_expansion.clone()
+	}
+}
 
 
 #[derive(Debug,Hash,Clone,PartialEq,Eq)]
@@ -493,7 +514,7 @@ impl RshTokenizer {
 		self.span.end += 1;
 		self.char_stream.pop_front()
 	}
-	pub fn tokenize_one(&mut self) -> RshResult<Vec<Tk>> {
+	pub fn tokenize_one(&mut self, ctx: TkizerCtx) -> RshResult<Vec<Tk>> {
 		use crate::interp::token::TkState::*;
 		let mut wd = WordDesc::empty();
 		while !self.char_stream.is_empty() {
@@ -537,7 +558,7 @@ impl RshTokenizer {
 				_ => { /* Do nothing */ }
 			}
 			match self.context {
-				Command => self.command_context(take(&mut wd))?,
+				Command => self.command_context(take(&mut wd),ctx.clone())?,
 				Arg => self.arg_context(take(&mut wd))?,
 				DQuote | SQuote => self.string_context(take(&mut wd))?,
 				VarDec => self.vardec_context(take(&mut wd))?,
@@ -558,7 +579,7 @@ impl RshTokenizer {
 		}
 		Ok(take(&mut self.tokens))
 	}
-	fn command_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
+	fn command_context(&mut self, mut wd: WordDesc, ctx: TkizerCtx) -> RshResult<()> {
 		use crate::interp::token::TkState::*;
 		wd = self.complete_word(wd);
 		if wd.text.ends_with("()") {
@@ -588,13 +609,19 @@ impl RshTokenizer {
 				"select" => self.tokens.push(Tk { tk_type: TkType::Select, wd }),
 				_ => unreachable!("text: {}", wd.text)
 			}
-		} else if let Some(content) = read_logic(|l| l.get_alias(wd.text.as_str())).unwrap() {
-			let mut sub_tokenizer = RshTokenizer::new(&content);
-			dbg!(&content);
-			loop {
-				let mut deck = sub_tokenizer.tokenize_one()?;
-				if deck.is_empty() { break };
-				self.tokens.append(&mut deck);
+		} else if !ctx.get_alias_exp().is_some_and(|name| name == wd.text) && read_logic(|l| l.get_alias(wd.text.as_str()))?.is_some()  {
+			if let Some(content) = read_logic(|l| l.get_alias(wd.text.as_str())).unwrap() {
+				let mut sub_tokenizer = RshTokenizer::new(&content);
+				loop {
+					let deck = sub_tokenizer.tokenize_one(TkizerCtx::with_alias(wd.text.as_str()))?;
+					if deck.is_empty() { break };
+					let mut deck = deck[1..].to_vec(); // Shave off the SOI/EOI tokens
+					for tk in deck.iter_mut() {
+						tk.wd.flags |= WdFlags::FROM_ALIAS
+					}
+
+					self.tokens.append(&mut deck);
+				}
 			}
 		} else if matches!(wd.text.as_str(), ";" | "\n") || self.char_stream.is_empty() {
 			let flags = match self.context {
@@ -897,7 +924,7 @@ impl RshTokenizer {
 			}
 			let mut body_tokenizer = RshTokenizer::new(&body);
 			let mut body_tokens = vec![];
-			while let Ok(mut block) = body_tokenizer.tokenize_one() {
+			while let Ok(mut block) = body_tokenizer.tokenize_one(TkizerCtx::new()) {
 				if !block.is_empty() {
 					body_tokens.extend(block.drain(..))
 				}

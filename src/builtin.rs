@@ -835,7 +835,6 @@ pub fn alias(node: Node) -> RshResult<RshWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front();
 	while let Some(arg) = argv.pop_front() {
-		dbg!(&arg.text());
 		if !token::REGEX["assignment"].is_match(arg.text()) {
 			return Err(ShError::from_syntax(&format!("Expected an assignment pattern in alias args, got {}",arg.text()), arg.span()))
 		}
@@ -990,7 +989,7 @@ pub fn source(node: Node) -> RshResult<RshWait> {
 		argv.pop_front();
 		for path in argv {
 			let file_path = Path::new(OsStr::from_bytes(path.as_bytes()));
-			shellenv::source_file(file_path.to_path_buf())?
+			shellenv::source_file(file_path.to_path_buf()).unwrap()
 		}
 		Ok(RshWait::Success )
 }
