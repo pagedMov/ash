@@ -346,7 +346,6 @@ pub fn expand_alias(alias: &str) -> RshResult<String> {
 }
 
 pub fn check_home_expansion(text: &str) -> bool {
-	dbg!(text.has_unescaped("~"), text.starts_with('~'), text.has_unescaped("~/"));
 	text.has_unescaped("~") && (
 		text.starts_with('~') ||
 		text.has_unescaped("~/")
@@ -375,7 +374,6 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 		}
 
 		let expand_home = check_home_expansion(token.text());
-		dbg!(&expand_home);
 		if expand_home {
 			// If this unwrap fails, god help you
 			let home = read_vars(|vars| vars.get_evar("HOME").unwrap())?;

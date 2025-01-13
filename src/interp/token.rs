@@ -339,7 +339,7 @@ impl Tk {
 	pub fn cmdsep(wd: &WordDesc, pos: usize) -> Self {
 		Tk {
 			tk_type: TkType::Cmdsep,
-			wd: WordDesc { text: wd.text.clone(), span: Span::from(pos + 1,pos + 1), flags: WdFlags::empty() }
+			wd: WordDesc { text: wd.text.clone(), span: Span::from(pos,pos), flags: WdFlags::empty() }
 		}
 	}
 	pub fn text(&self) -> &str {
@@ -394,37 +394,37 @@ pub enum TkState {
 	Arg, // Command arguments; only appear after commands
 	Command, // Starting point for the tokenizer
 	FuncDef, // defining a function like() { this }
-	FuncBody, // The stuff { inside braces }
-	Array, // Used in for loops and select statements
-	If, // If statement opener
-	For, // For loop opener
-	Loop, // While/Until opener
-	Case, // Case opener
-	Select, // Select opener
-	In, // Used in for, case, and select statements
-	CaseBlock, // this)kind of thing;;
-	CaseIn, // 'In' context used for case statements, signaling the tokenizer to look for stuff 'like)this;;esac'
-	CasePat, // the left side of this)kind of thing
-	CaseBody, // the right side of this)kind of thing
-	Elif, // Secondary if/then blocks
-	Else, // Else statements
-	Do, // Select, for, and while/until condition/body separator
-	Then, // If statement condition/body separator
-	Done, // Select, for, and while/until closer
-	Fi, // If statement closer
-	Esac, // Case statement closer
-	Subshell, // Subshells, look (like this)
-	SQuote, // 'Single quoted strings'
-	DQuote, // "Double quoted strings"
-	Escaped, // Used to denote an escaped character like \a
-	Redirect, // >, <, <<, <<<, 1>&2, 2>, etc.
-	Comment, // #Comments like this
-	Whitespace, // Space or tabs
-	CommandSub, // $(Command substitution)
-	Operator, // operators
-	Separator, // Semicolon or newline to end an invocation
-	DeadEnd, // Used for closing keywords like 'fi' and 'done' that demand a separator immediately after
-	Invalid // Used when an unexpected state is discovered
+FuncBody, // The stuff { inside braces }
+Array, // Used in for loops and select statements
+If, // If statement opener
+For, // For loop opener
+Loop, // While/Until opener
+Case, // Case opener
+Select, // Select opener
+In, // Used in for, case, and select statements
+CaseBlock, // this)kind of thing;;
+CaseIn, // 'In' context used for case statements, signaling the tokenizer to look for stuff 'like)this;;esac'
+CasePat, // the left side of this)kind of thing
+CaseBody, // the right side of this)kind of thing
+Elif, // Secondary if/then blocks
+Else, // Else statements
+Do, // Select, for, and while/until condition/body separator
+Then, // If statement condition/body separator
+Done, // Select, for, and while/until closer
+Fi, // If statement closer
+Esac, // Case statement closer
+Subshell, // Subshells, look (like this)
+SQuote, // 'Single quoted strings'
+DQuote, // "Double quoted strings"
+Escaped, // Used to denote an escaped character like \a
+Redirect, // >, <, <<, <<<, 1>&2, 2>, etc.
+Comment, // #Comments like this
+Whitespace, // Space or tabs
+CommandSub, // $(Command substitution)
+Operator, // operators
+Separator, // Semicolon or newline to end an invocation
+DeadEnd, // Used for closing keywords like 'fi' and 'done' that demand a separator immediately after
+Invalid // Used when an unexpected state is discovered
 }
 
 impl TkState {
@@ -528,7 +528,9 @@ impl RshTokenizer {
 		self.context.last().unwrap_or(&TkState::Command)
 	}
 	fn advance(&mut self) -> Option<char> {
-		self.span.end += 1;
+		if self.span.end != self.input.len() {
+			self.span.end += 1;
+		}
 		self.char_stream.pop_front()
 	}
 	pub fn tokenize_one(&mut self, ctx: TkizerCtx) -> RshResult<Vec<Tk>> {
@@ -586,7 +588,6 @@ impl RshTokenizer {
 				}
 				_ => { /* Do nothing */ }
 			}
-			eprintln!("{:?},{:?}",self.context,self.char_stream.iter().collect::<String>());
 			match *self.ctx() {
 				Command => self.command_context(take(&mut wd),ctx.clone())?,
 				Arg => self.arg_context(take(&mut wd))?,
@@ -627,18 +628,18 @@ impl RshTokenizer {
 				_ => self.push_ctx(DeadEnd)
 			}
 			match wd.text.as_str() {
-				"if" => self.tokens.push(Tk { tk_type: TkType::If, wd }),
-				"then" => self.tokens.push(Tk { tk_type: TkType::Then, wd }),
-				"elif" => self.tokens.push(Tk { tk_type: TkType::Elif, wd }),
-				"else" => self.tokens.push(Tk { tk_type: TkType::Else, wd }),
-				"fi" => self.tokens.push(Tk { tk_type: TkType::Fi, wd }),
-				"for" => self.tokens.push(Tk { tk_type: TkType::For, wd }),
-				"do" => self.tokens.push(Tk { tk_type: TkType::Do, wd }),
-				"done" => self.tokens.push(Tk { tk_type: TkType::Done, wd }),
-				"while" => self.tokens.push(Tk { tk_type: TkType::While, wd }),
-				"until" => self.tokens.push(Tk { tk_type: TkType::Until, wd }),
-				"case" => self.tokens.push(Tk { tk_type: TkType::Case, wd }),
-				"select" => self.tokens.push(Tk { tk_type: TkType::Select, wd }),
+				"if" => self.tokens.push(Tk { tk_type: TkType::If, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"then" => self.tokens.push(Tk { tk_type: TkType::Then, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"elif" => self.tokens.push(Tk { tk_type: TkType::Elif, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"else" => self.tokens.push(Tk { tk_type: TkType::Else, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"fi" => self.tokens.push(Tk { tk_type: TkType::Fi, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"for" => self.tokens.push(Tk { tk_type: TkType::For, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"do" => self.tokens.push(Tk { tk_type: TkType::Do, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"done" => self.tokens.push(Tk { tk_type: TkType::Done, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"while" => self.tokens.push(Tk { tk_type: TkType::While, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"until" => self.tokens.push(Tk { tk_type: TkType::Until, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"case" => self.tokens.push(Tk { tk_type: TkType::Case, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"select" => self.tokens.push(Tk { tk_type: TkType::Select, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				_ => unreachable!("text: {}", wd.text)
 			}
 		} else if ctx.get_alias_exp().is_none_or(|name| name != wd.text) && read_logic(|l| l.get_alias(wd.text.as_str()))?.is_some()  {
@@ -657,6 +658,7 @@ impl RshTokenizer {
 			}
 		} else if matches!(wd.text.as_str(), ";" | "\n") {
 			self.tokens.push(Tk::cmdsep(&wd, self.span.end));
+			self.span.start = self.span.end;
 			self.pop_ctx();
 		} else {
 			let flags = match *self.ctx() {
@@ -715,9 +717,11 @@ impl RshTokenizer {
 			}
 			";" | "\n" => {
 				self.tokens.push(Tk::cmdsep(&wd,wd.span.start));
+				self.span.start = self.span.end;
 				self.pop_ctx();
 			}
 			_ if REGEX["redirection"].is_match(&wd.text) => {
+				wd = wd.add_flag(WdFlags::IS_OP);
 				let mut fd_out;
 				let operator;
 				let fd_target;
@@ -805,7 +809,7 @@ impl RshTokenizer {
 					if !found {
 						return Err(ShError::from_parse("Did not find a variable for this statement", wd.span))
 					}
-					self.tokens.push(Tk { tk_type: TkType::In, wd });
+					self.tokens.push(Tk { tk_type: TkType::In, wd: wd.add_flag(WdFlags::KEYWORD) });
 					break
 				}
 				_ => {
@@ -837,7 +841,8 @@ impl RshTokenizer {
 				return Err(ShError::from_parse("Did not find any array elements for this statement", wd.span))
 			}
 			self.advance();
-			self.tokens.push(Tk::cmdsep(&wd,self.span.end + 1))
+			self.tokens.push(Tk::cmdsep(&wd,self.span.end));
+			self.span.start = self.span.end;
 		}
 		self.pop_ctx();
 		self.push_ctx(Command);
@@ -921,6 +926,7 @@ impl RshTokenizer {
 		if self.char_stream.front().is_some_and(|ch| matches!(*ch, ';' | '\n')) {
 			self.advance();
 			self.tokens.push(Tk::cmdsep(&wd,span.end + 1));
+			self.span.start = self.span.end;
 		}
 		while !self.char_stream.is_empty() {
 			// Get pattern
@@ -968,7 +974,9 @@ impl RshTokenizer {
 		while self.char_stream.front().is_some_and(|ch| ch.is_whitespace()) {
 			self.advance();
 		}
+		self.span.start = self.span.end;
 		while let Some(ch) = self.advance() {
+			wd = wd.set_span(self.span);
 			match ch {
 				'\\' => {
 					wd = wd.add_char(ch);
@@ -1023,6 +1031,8 @@ impl RshTokenizer {
 				' ' | '\t' => {
 					// Whitespace handling
 					self.char_stream.push_front(ch);
+					self.span.end -= 1;
+					wd.span.end -= 1;
 					while self.char_stream.front().is_some_and(|c| matches!(c, ' ' | '\t')) {
 						self.advance();
 					}
@@ -1045,5 +1055,377 @@ impl RshTokenizer {
 			}
 		}
 		self.tokens.extend(buffer.drain(..));
+	}
+}
+
+// TODO: Case tests, select tests
+#[cfg(test)]
+mod tests {
+	use nix::unistd::{getuid, User};
+
+	use crate::interp::token::TkizerCtx;
+
+	use super::*;
+	fn token(tk_type: TkType, text: &str, start: usize, end: usize, flags: WdFlags) -> Tk {
+		Tk {
+			tk_type,
+			wd: WordDesc {
+				text: text.to_string(),
+				span: Span::from(start,end),
+				flags
+			}
+		}
+	}
+
+	#[test]
+	fn tokenizer_simple() {
+		let input = "echo hello";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
+			token(TkType::String, "hello", 5, 10, WdFlags::IS_ARG),
+		];
+		pretty_assertions::assert_eq!(tokens,expected);
+	}
+
+	#[test]
+	fn tokenizer_multiple_args() {
+		let input = "ls -l /home/user";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(TkType::Ident, "ls", 0, 2, WdFlags::empty()),
+			token(TkType::String, "-l", 3, 5, WdFlags::IS_ARG),
+			token(TkType::String, "/home/user", 6, 16, WdFlags::IS_ARG),
+		];
+		pretty_assertions::assert_eq!(tokens, expected);
+	}
+
+	#[test]
+	fn tokenizer_quoted_arg() {
+		let input = "echo \"Hello, world!\"";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
+			token(TkType::String, "Hello, world!", 5, 20, WdFlags::IS_ARG),
+		];
+		pretty_assertions::assert_eq!(tokens, expected);
+	}
+
+	#[test]
+	fn tokenizer_single_quoted_arg() {
+		let input = "echo 'single quoted arg'";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
+			token(TkType::String, "single quoted arg", 5, 24, WdFlags::IS_ARG),
+		];
+		pretty_assertions::assert_eq!(tokens, expected);
+	}
+
+	#[test]
+	fn tokenizer_variable_expansion() {
+		let input = "echo $USER";
+		let user = User::from_uid(getuid()).unwrap().unwrap().name;
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
+			token(TkType::String, user.as_str(), 5, 10, WdFlags::IS_ARG),
+		];
+		pretty_assertions::assert_eq!(tokens, expected);
+	}
+
+	#[test]
+	fn tokenizer_pipeline() {
+		let input = "ls | grep file";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(TkType::Ident, "ls", 0, 2, WdFlags::empty()),
+			token(TkType::Pipe, "|", 3, 4, WdFlags::IS_OP),
+			token(TkType::Ident, "grep", 5, 9, WdFlags::empty()),
+			token(TkType::String, "file", 10, 14, WdFlags::IS_ARG),
+		];
+		pretty_assertions::assert_eq!(tokens, expected);
+	}
+
+
+	#[test]
+	fn tokenizer_redirection() {
+		let input = "echo hello > output.txt";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
+			token(TkType::String, "hello", 5, 10, WdFlags::IS_ARG),
+			token(TkType::Redirection { redir: Redir { fd_source: 1, op: RedirType::Output, fd_target: None, file_target: None } }, ">", 11, 12, WdFlags::IS_OP),
+			token(TkType::String, "output.txt", 13, 23, WdFlags::IS_ARG),
+		];
+		pretty_assertions::assert_eq!(tokens, expected);
+	}
+
+	#[test]
+	fn tokenizer_cmd_sub() {
+		let input = "echo $(ls -l)";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
+			token(TkType::CommandSub, "ls -l", 5, 13, WdFlags::empty()),
+		];
+		pretty_assertions::assert_eq!(tokens, expected);
+	}
+
+	#[test]
+	fn tokenizer_subshell() {
+		let input = "(echo hi)";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(TkType::Subshell, "echo hi", 0, 9, WdFlags::empty()),
+		];
+		pretty_assertions::assert_eq!(tokens, expected);
+	}
+
+	#[test]
+	fn tokenizer_subshell_multiline() {
+		let input = "(#!python
+print(\"hello world\")
+)";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(
+				TkType::Subshell,
+				"#!python\nprint(\"hello world\")\n",
+				0,
+				input.len(),
+				WdFlags::empty(),
+			),
+		];
+		pretty_assertions::assert_eq!(tokens, expected);
+	}
+
+	#[test]
+	fn tokenizer_func_def() {
+		let input = "func() {
+			echo hi
+			cat file.txt
+		}";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(TkType::FuncDef, "func", 0, 6, WdFlags::empty()),
+			token(TkType::FuncBody, "echo hi\n\t\t\tcat file.txt", 7, 39, WdFlags::empty()),
+		];
+		pretty_assertions::assert_eq!(tokens, expected);
+	}
+
+	#[test]
+	fn tokenizer_if() {
+		let input = "if true; then echo hi; elif false; then echo hello; else echo greetings; fi";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(TkType::If, "if", 0, 2, WdFlags::KEYWORD),
+			token(TkType::Ident, "true", 3, 7, WdFlags::empty()),
+			token(TkType::Cmdsep, "", 8, 8, WdFlags::empty()),
+			token(TkType::Then, "then", 9, 13, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 14, 18, WdFlags::BUILTIN),
+			token(TkType::String, "hi", 19, 21, WdFlags::IS_ARG),
+			token(TkType::Cmdsep, "", 22, 22, WdFlags::empty()),
+			token(TkType::Elif, "elif", 23, 27, WdFlags::KEYWORD),
+			token(TkType::Ident, "false", 28, 33, WdFlags::empty()),
+			token(TkType::Cmdsep, "", 34, 34, WdFlags::empty()),
+			token(TkType::Then, "then", 35, 39, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 40, 44, WdFlags::BUILTIN),
+			token(TkType::String, "hello", 45, 50, WdFlags::IS_ARG),
+			token(TkType::Cmdsep, "", 51, 51, WdFlags::empty()),
+			token(TkType::Else, "else", 52, 56, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 57, 61, WdFlags::BUILTIN),
+			token(TkType::String, "greetings", 62, 71, WdFlags::IS_ARG),
+			token(TkType::Cmdsep, "", 72, 72, WdFlags::empty()),
+			token(TkType::Fi, "fi", 73, 75, WdFlags::KEYWORD),
+			];
+		pretty_assertions::assert_eq!(tokens, expected);
+	}
+
+	#[test]
+	fn tokenizer_for_loop() {
+		let input = "for i in 1 2 3; do echo $i; done";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(TkType::For, "for", 0, 3, WdFlags::KEYWORD),
+			token(TkType::Ident, "i", 4, 5, WdFlags::empty()),
+			token(TkType::In, "in", 6, 8, WdFlags::KEYWORD),
+			token(TkType::Ident, "1", 9, 11, WdFlags::empty()),
+			token(TkType::Ident, "2", 11, 13, WdFlags::empty()),
+			token(TkType::Ident, "3", 13, 14, WdFlags::empty()),
+			token(TkType::Cmdsep, "", 15, 15, WdFlags::empty()),
+			token(TkType::Do, "do", 16, 18, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 19, 23, WdFlags::BUILTIN),
+			token(TkType::Cmdsep, "", 27, 27, WdFlags::empty()),
+			token(TkType::Done, "done", 28, 32, WdFlags::KEYWORD),
+		];
+		pretty_assertions::assert_eq!(tokens, expected);
+	}
+
+	#[test]
+	fn tokenizer_while_loop() {
+		let input = "while true; do echo working; done";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(TkType::While, "while", 0, 5, WdFlags::KEYWORD),
+			token(TkType::Ident, "true", 6, 10, WdFlags::empty()),
+			token(TkType::Cmdsep, "", 11, 11, WdFlags::empty()),
+			token(TkType::Do, "do", 12, 14, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 15, 19, WdFlags::BUILTIN),
+			token(TkType::String, "working", 20, 27, WdFlags::IS_ARG),
+			token(TkType::Cmdsep, "", 28, 28, WdFlags::empty()),
+			token(TkType::Done, "done", 29, 33, WdFlags::KEYWORD),
+		];
+		pretty_assertions::assert_eq!(tokens, expected);
+	}
+
+	#[test]
+	fn tokenizer_until_loop() {
+		let input = "until true; do echo waiting; done";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			token(TkType::Until, "until", 0, 5, WdFlags::KEYWORD),
+			token(TkType::Ident, "true", 6, 10, WdFlags::empty()),
+			token(TkType::Cmdsep, "", 11, 11, WdFlags::empty()),
+			token(TkType::Do, "do", 12, 14, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 15, 19, WdFlags::BUILTIN),
+			token(TkType::String, "waiting", 20, 27, WdFlags::IS_ARG),
+			token(TkType::Cmdsep, "", 28, 28, WdFlags::empty()),
+			token(TkType::Done, "done", 29, 33, WdFlags::KEYWORD),
+		];
+		pretty_assertions::assert_eq!(tokens, expected);
+	}
+
+	#[test]
+	fn tokenizer_final_boss() {
+		let input = "if while if true; then echo while condition; fi; do if true; then echo inside first while; fi; done; then echo wow; elif until while if true; then echo double loop; fi; do if true; then echo another double loop; fi; do echo; done; then echo again; else echo; fi";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let expected = vec![
+			Tk::start_of_input(),
+			// if while if true
+			token(TkType::If, "if", 0, 2, WdFlags::KEYWORD),
+			token(TkType::While, "while", 3, 8, WdFlags::KEYWORD),
+			token(TkType::If, "if", 9, 11, WdFlags::KEYWORD),
+			token(TkType::Ident, "true", 12, 16, WdFlags::empty()),
+			token(TkType::Cmdsep, "", 17, 17, WdFlags::empty()),
+			// then echo while condition
+			token(TkType::Then, "then", 18, 22, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 23, 27, WdFlags::BUILTIN),
+			token(TkType::String, "while", 28, 33, WdFlags::IS_ARG),
+			token(TkType::String, "condition", 34, 43, WdFlags::IS_ARG),
+			token(TkType::Cmdsep, "", 44, 44, WdFlags::empty()),
+			// fi
+			token(TkType::Fi, "fi", 45, 47, WdFlags::KEYWORD),
+			token(TkType::Cmdsep, "", 48, 48, WdFlags::empty()),
+			// do if true; then echo inside first while; fi; done
+			token(TkType::Do, "do", 49, 51, WdFlags::KEYWORD),
+			token(TkType::If, "if", 52, 54, WdFlags::KEYWORD),
+			token(TkType::Ident, "true", 55, 59, WdFlags::empty()),
+			token(TkType::Cmdsep, "", 60, 60, WdFlags::empty()),
+			token(TkType::Then, "then", 61, 65, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 66, 70, WdFlags::BUILTIN),
+			token(TkType::String, "inside", 71, 77, WdFlags::IS_ARG),
+			token(TkType::String, "first", 78, 83, WdFlags::IS_ARG),
+			token(TkType::String, "while", 84, 89, WdFlags::IS_ARG),
+			token(TkType::Cmdsep, "", 90, 90, WdFlags::empty()),
+			token(TkType::Fi, "fi", 91, 93, WdFlags::KEYWORD),
+			token(TkType::Cmdsep, "", 94, 94, WdFlags::empty()),
+			token(TkType::Done, "done", 95, 99, WdFlags::KEYWORD),
+			token(TkType::Cmdsep, "", 100, 100, WdFlags::empty()),
+			// then echo wow
+			token(TkType::Then, "then", 101, 105, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 106, 110, WdFlags::BUILTIN),
+			token(TkType::String, "wow", 111, 114, WdFlags::IS_ARG),
+			token(TkType::Cmdsep, "", 115, 115, WdFlags::empty()),
+			// elif until while if true; then echo double loop; fi; do if true; then echo another double loop; fi; do echo; done; then echo again
+			token(TkType::Elif, "elif", 116, 120, WdFlags::KEYWORD),
+			token(TkType::Until, "until", 121, 126, WdFlags::KEYWORD),
+			token(TkType::While, "while", 127, 132, WdFlags::KEYWORD),
+			token(TkType::If, "if", 133, 135, WdFlags::KEYWORD),
+			token(TkType::Ident, "true", 136, 140, WdFlags::empty()),
+			token(TkType::Cmdsep, "", 141, 141, WdFlags::empty()),
+			token(TkType::Then, "then", 142, 146, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 147, 151, WdFlags::BUILTIN),
+			token(TkType::String, "double", 152, 158, WdFlags::IS_ARG),
+			token(TkType::String, "loop", 159, 163, WdFlags::IS_ARG),
+			token(TkType::Cmdsep, "", 164, 164, WdFlags::empty()),
+			token(TkType::Fi, "fi", 165, 167, WdFlags::KEYWORD),
+			token(TkType::Cmdsep, "", 168, 168, WdFlags::empty()),
+			token(TkType::Do, "do", 169, 171, WdFlags::KEYWORD),
+			token(TkType::If, "if", 172, 174, WdFlags::KEYWORD),
+			token(TkType::Ident, "true", 175, 179, WdFlags::empty()),
+			token(TkType::Cmdsep, "", 180, 180, WdFlags::empty()),
+			token(TkType::Then, "then", 181, 185, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 186, 190, WdFlags::BUILTIN),
+			token(TkType::String, "another", 191, 198, WdFlags::IS_ARG),
+			token(TkType::String, "double", 199, 205, WdFlags::IS_ARG),
+			token(TkType::String, "loop", 206, 210, WdFlags::IS_ARG),
+			token(TkType::Cmdsep, "", 211, 211, WdFlags::empty()),
+			token(TkType::Fi, "fi", 212, 214, WdFlags::KEYWORD),
+			token(TkType::Cmdsep, "", 215, 215, WdFlags::empty()),
+			token(TkType::Do, "do", 216, 218, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 219, 223, WdFlags::BUILTIN),
+			token(TkType::Cmdsep, "", 224, 224, WdFlags::empty()),
+			token(TkType::Done, "done", 225, 229, WdFlags::KEYWORD),
+			token(TkType::Cmdsep, "", 230, 230, WdFlags::empty()),
+			token(TkType::Then, "then", 231, 235, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 236, 240, WdFlags::BUILTIN),
+			token(TkType::String, "again", 241, 246, WdFlags::IS_ARG),
+			token(TkType::Cmdsep, "", 247, 247, WdFlags::empty()),
+			// else echo
+			token(TkType::Else, "else", 248, 252, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 253, 257, WdFlags::BUILTIN),
+			token(TkType::Cmdsep, "", 258, 258, WdFlags::empty()),
+			// fi
+			token(TkType::Fi, "fi", 259, 261, WdFlags::KEYWORD),
+			];
+		pretty_assertions::assert_eq!(tokens, expected);
 	}
 }
