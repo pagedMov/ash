@@ -4,6 +4,17 @@ use std::{collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsR
 
 use super::{parse::{NdType, Node}, token::Tk};
 
+#[macro_export]
+macro_rules! deconstruct {
+	($type:path { $($field:ident),* }, $var:expr, $logic:block) => {
+		if let $type { $($field),* } = $var {
+			$logic
+		} else {
+			unreachable!()
+		}
+	};
+}
+
 pub trait VecExtension<T> {
 	fn extended(self, vec: Vec<T>) -> Vec<T>;
 }
@@ -18,80 +29,29 @@ impl<T> VecExtension<T> for Vec<T> {
 
 pub trait VecDequeExtension<T> {
 	fn to_vec(self) -> Vec<T>;
-	fn map_rotate<F>(&mut self, transform: F) where F: FnMut(T);
+	fn map_rotate<F>(&mut self, transform: F)
+	where
+			F: FnMut(T) -> T;
 }
 
 impl<T> VecDequeExtension<T> for VecDeque<T> {
 	fn to_vec(self) -> Vec<T> {
 		self.into_iter().collect::<Vec<T>>()
 	}
-	/// Applies a transformation function to each element of the `VecDeque`
-	/// while preserving the original order of elements.
-	///
-	/// This method "rotates" the `VecDeque` by repeatedly removing the element
-	/// at the front, applying the given transformation function to it, and
-	/// appending it to the back. The process ensures that all elements are
-	/// visited exactly once, and the final order remains unchanged.
-	///
-	/// # Type Parameters
-	/// - `T`: The type of elements in the `VecDeque`.
-	/// - `F`: A closure or function that takes a mutable reference to an element
-	///   and applies the desired transformation.
-	///
-	/// # Parameters
-	/// - `transform`: A closure or function of type `FnMut(&mut T)` that modifies
-	///   each element in place.
-	///
-	/// # Examples
-	///
-	/// ```rust
-	/// use std::collections::VecDeque;
-	///
-	/// trait VecDequeExtension<T> {
-	///     fn map_rotate<F>(&mut self, transform: F)
-	///     where
-	///         F: FnMut(&mut T);
-	/// }
-	///
-	/// impl<T> VecDequeExtension<T> for VecDeque<T> {
-	///     fn map_rotate<F>(&mut self, mut transform: F)
-	///     where
-	///         F: FnMut(&mut T),
-	///     {
-	///         let len = self.len();
-	///         for _ in 0..len {
-	///             if let Some(mut element) = self.pop_front() {
-	///                 transform(&mut element);
-	///                 self.push_back(element);
-	///             }
-	///         }
-	///     }
-	/// }
-	///
-	/// let mut deque: VecDeque<String> = VecDeque::from(vec![
-	///     String::from("hello"),
-	///     String::from("world"),
-	///     String::from("rust"),
-	/// ]);
-	///
-	/// // Capitalize all elements
-	/// deque.map_rotate(|text| *text = text.to_uppercase());
-	///
-	/// assert_eq!(deque, VecDeque::from(vec![
-	///     String::from("HELLO"),
-	///     String::from("WORLD"),
-	///     String::from("RUST"),
-	/// ]));
-	/// ```
+
 	fn map_rotate<F>(&mut self, mut transform: F)
-		where F: FnMut(T) {
-			let len = self.len();
-			for _ in 0..len {
-				if let Some(element) = self.pop_front() {
-					transform(element);
-				}
-			}
+	where F: FnMut(T) -> T,
+	{
+		let mut buffer = VecDeque::new();
+		while let Some(element) = self.pop_front() {
+			let transformed = transform(element);
+			buffer.push_back(transformed);
 		}
+
+		while let Some(element) = buffer.pop_front() {
+			self.push_back(element);
+		}
+	}
 }
 
 pub trait StrExtension {

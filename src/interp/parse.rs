@@ -527,7 +527,6 @@ pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
 							return Err(ShError::from_parse("The left side of this pipeline is invalid", node.span))
 						}
 						if !check_valid_operand(&right) {
-							dbg!(&right);
 							return Err(ShError::from_parse("The right side of this pipeline is invalid", node.span))
 						}
 						left.flags |= NdFlags::IN_PIPE;
@@ -864,6 +863,7 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let span_start = ctx.mark_start();
 
 	while let Some(tk) = ctx.next_tk() {
+		dbg!(&tk);
 		let err_span = ctx.mark_start();
 
 		match tk.class() {
@@ -937,6 +937,7 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 			TkType::Fi => {
 				closed = true;
 				if !matches!(if_context,TkType::Then | TkType::Else) {
+					dbg!(&if_context);
 					return Err(ShError::from_parse("Was expecting a `then` block, get an else block instead", Span::from(err_span,ctx.mark_end())))
 				}
 				if if_context == TkType::Else {
@@ -1528,6 +1529,13 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				));
 			}
 		}
+	}
+
+	while let Some(redir) = held_redirs.pop_back() {
+		// Push redirections back onto the queue, at the front
+		// This has the effect of moving all redirections to the right of the command node
+		// Which will be useful in join_at_operators()
+		ctx.tokens.push_front(redir);
 	}
 
 

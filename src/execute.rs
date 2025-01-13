@@ -609,6 +609,7 @@ fn handle_loop(node: Node, io: ProcIO) -> RshResult<RshWait> {
 	Ok(last_status)
 }
 
+
 fn handle_if(node: Node, io: ProcIO) -> RshResult<RshWait> {
 	let mut last_status = RshWait::new();
 	let cond_io = ProcIO::from(io.stdin,None,None);
@@ -618,9 +619,14 @@ fn handle_if(node: Node, io: ProcIO) -> RshResult<RshWait> {
 		while let Some(block) = cond_blocks.pop_front() {
 			let cond = *block.condition;
 			let body = *block.body;
-			last_status = traverse_root(cond, Some(false), cond_io.clone())?;
+
+			traverse(cond, cond_io.clone())?;
+			last_status = shellenv::await_fg_job()?;
+
 			if let RshWait::Success = last_status {
-				return traverse_root(body, None, body_io.clone())
+				traverse(body, body_io.clone())?;
+				last_status = shellenv::await_fg_job()?;
+				return Ok(last_status)
 			}
 		}
 		if let Some(block) = else_block {
@@ -635,9 +641,7 @@ fn handle_chain(node: Node) -> RshResult<RshWait> {
 
 	node_operation!(NdType::Chain { left, right, op }, node, {
 		traverse(*left, ProcIO::new())?;
-		let pgid = read_jobs(|j| *j.read_job(0).unwrap().pgid())?;
-		shellenv::await_job(pgid)?; // Park the thread while we wait for the previous command to exit
-		last_status = read_jobs(|j| j.read_job(0).unwrap().get_proc_statuses().first().unwrap().clone())?;
+		last_status = shellenv::await_fg_job()?;
 		if last_status == RshWait::Success {
 			if let NdType::And = op.nd_type {
 				traverse(*right,ProcIO::new())?;
@@ -992,7 +996,7 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 	Ok(last_status)
 }
 
-fn handle_command(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
+fn handle_command(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 	let argv = node.get_argv()?;
 	let argv = argv.iter().map(|arg| CString::new(arg.text()).unwrap()).collect::<Vec<CString>>();
 	let redirs = node.get_redirs()?;

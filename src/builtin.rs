@@ -103,31 +103,27 @@ pub fn r#type(node: Node) -> RshResult<RshWait> {
 	let index_re = Regex::new(r"(\w+)\[(\d+)\]").unwrap();
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `int`
+
 	while let Some(arg) = argv.pop_front() {
 		let text = arg.text();
-		if index_re.is_match(text) {
-			if let Some(caps) = index_re.captures(text) {
-				let var_name = caps.get(1).map_or("", |m| m.as_str());
-				let index = caps.get(2).map_or("", |m| m.as_str()).parse::<usize>().unwrap();
+		if let Some(caps) = index_re.captures(text) {
+			let var_name = caps.get(1).map_or("", |m| m.as_str());
+			let index = caps.get(2).map_or("", |m| m.as_str()).parse::<usize>().unwrap();
 
-				if let Some(var) = read_vars(|v| v.get_var(var_name))? {
-					if let RVal::Array(_) = var {
-						if let Ok(arr_element) = read_vars(|v| v.index_arr(var_name, index))? {
-							use crate::shellenv::RVal::*;
-							match arr_element {
-								String(_) => println!("string"),
-								Int(_) => println!("int"),
-								Float(_) => println!("float"),
-								Bool(_) => println!("bool"),
-								Array(_) => println!("array"),
-								Dict(_) => println!("dict"),
-							}
-						}
+			if let Some(RVal::Array(_)) = read_vars(|v| v.get_var(var_name))? {
+				if let Ok(arr_element) = read_vars(|v| v.index_arr(var_name, index))? {
+					use crate::shellenv::RVal::*;
+					match arr_element {
+						String(_) => println!("string"),
+						Int(_) => println!("int"),
+						Float(_) => println!("float"),
+						Bool(_) => println!("bool"),
+						Array(_) => println!("array"),
+						Dict(_) => println!("dict"),
 					}
 				}
 			}
-		}
-		if let Some(var) = read_vars(|v| v.get_var(text))? {
+		} else if let Some(var) = read_vars(|v| v.get_var(text))? {
 			use crate::shellenv::RVal::*;
 			match var {
 				String(_) => println!("string"),

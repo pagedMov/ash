@@ -345,6 +345,14 @@ pub fn expand_alias(alias: &str) -> RshResult<String> {
 	}
 }
 
+pub fn check_home_expansion(text: &str) -> bool {
+	dbg!(text.has_unescaped("~"), text.starts_with('~'), text.has_unescaped("~/"));
+	text.has_unescaped("~") && (
+		text.starts_with('~') ||
+		text.has_unescaped("~/")
+	)
+}
+
 pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 	let mut working_buffer: VecDeque<Tk> = VecDeque::new();
 	let mut product_buffer: VecDeque<Tk> = VecDeque::new();
@@ -366,7 +374,8 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 			continue
 		}
 
-		let expand_home = token.text().has_unescaped("~");
+		let expand_home = check_home_expansion(token.text());
+		dbg!(&expand_home);
 		if expand_home {
 			// If this unwrap fails, god help you
 			let home = read_vars(|vars| vars.get_evar("HOME").unwrap())?;
@@ -387,7 +396,6 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 			if helper::is_brace_expansion(token.text()) || token.text().has_unescaped("$") {
 				working_buffer.push_front(token);
 			} else {
-				let expand_home = token.text().has_unescaped("~");
 				if expand_home {
 					// If this unwrap fails, god help you
 					let home = read_vars(|vars| vars.get_evar("HOME").unwrap())?;
@@ -441,7 +449,6 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 				);
 			}
 		} else {
-			let expand_home = token.text().has_unescaped("~");
 			if expand_home {
 				// If this unwrap fails, god help you
 				let home = read_vars(|vars| vars.get_evar("HOME").unwrap())?;
@@ -451,12 +458,10 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 		}
 	}
 
-	let mut temp_buffer = VecDeque::new();
 	product_buffer.map_rotate(|mut elem| {
 		elem.wd.text = elem.wd.text.consume_escapes();
-		temp_buffer.push_back(elem);
+		elem
 	});
-	product_buffer.extend(temp_buffer.drain(..));
 	if split_words {
 		split_tokens(&mut product_buffer);
 	}

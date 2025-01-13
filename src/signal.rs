@@ -7,7 +7,8 @@ pub fn sig_handler_setup() {
 		signal(Signal::SIGCHLD, SigHandler::Handler(handle_sigchld)).unwrap();
 		signal(Signal::SIGQUIT, SigHandler::Handler(handle_sigquit)).unwrap();
 		signal(Signal::SIGTSTP, SigHandler::Handler(handle_sigtstp)).unwrap();
-		signal(Signal::SIGHUP, SigHandler::Handler(handle_sigtstp)).unwrap();
+		signal(Signal::SIGHUP, SigHandler::Handler(handle_sighup)).unwrap();
+		signal(Signal::SIGINT, SigHandler::Handler(handle_sigint)).unwrap();
 		signal(Signal::SIGTTIN, SigHandler::SigIgn).unwrap();
 		signal(Signal::SIGTTOU, SigHandler::SigIgn).unwrap();
 	}
@@ -36,7 +37,7 @@ extern "C" fn handle_sigquit(_: libc::c_int) {
 extern "C" fn handle_sigchld(_: libc::c_int) {
 	let flags = WaitPidFlag::WUNTRACED;
 	while let Ok(status) = waitpid(None, Some(flags)) {
-		match status {
+		let _ = match status {
 			WaitStatus::Exited(pid, _code) => handle_child_exit(pid, status),
 			WaitStatus::Signaled(pid, signal, _) => handle_child_signal(pid, signal),
 			WaitStatus::Stopped(pid, signal) => handle_child_stop(pid, signal),

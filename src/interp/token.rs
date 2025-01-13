@@ -75,12 +75,12 @@ bitflags! {
 		const FROM_FUNC  = 0b000100000000000000;
 		const FROM_VAR   = 0b001000000000000000;
 	}
-}
+	}
 
 #[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub struct TkizerCtx {
 	alias_expansion: Option<String>
-}
+	}
 
 impl TkizerCtx {
 	pub fn new() -> Self {
@@ -97,13 +97,19 @@ impl TkizerCtx {
 	}
 }
 
+impl Default for TkizerCtx {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 
 #[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub struct WordDesc {
 	pub text: String,
 	pub span: Span,
 	pub flags: WdFlags
-	}
+}
 
 impl WordDesc {
 	pub fn empty() -> Self {
@@ -378,7 +384,7 @@ pub enum RedirType {
 }
 
 
-#[derive(Eq,Hash,PartialEq)]
+#[derive(Eq,Debug,Hash,PartialEq)]
 pub enum TkState {
 	Root, // Outer contex, allows for anything and everything. Closed by the EOI token
 	ArrDec, // Used in arrays like for i in ArrDec1 ArrDec2
@@ -388,37 +394,37 @@ pub enum TkState {
 	Arg, // Command arguments; only appear after commands
 	Command, // Starting point for the tokenizer
 	FuncDef, // defining a function like() { this }
-FuncBody, // The stuff { inside braces }
-Array, // Used in for loops and select statements
-If, // If statement opener
-For, // For loop opener
-Loop, // While/Until opener
-Case, // Case opener
-Select, // Select opener
-In, // Used in for, case, and select statements
-CaseBlock, // this)kind of thing;;
-CaseIn, // 'In' context used for case statements, signaling the tokenizer to look for stuff 'like)this;;esac'
-CasePat, // the left side of this)kind of thing
-CaseBody, // the right side of this)kind of thing
-Elif, // Secondary if/then blocks
-Else, // Else statements
-Do, // Select, for, and while/until condition/body separator
-Then, // If statement condition/body separator
-Done, // Select, for, and while/until closer
-Fi, // If statement closer
-Esac, // Case statement closer
-Subshell, // Subshells, look (like this)
-SQuote, // 'Single quoted strings'
-DQuote, // "Double quoted strings"
-Escaped, // Used to denote an escaped character like \a
-Redirect, // >, <, <<, <<<, 1>&2, 2>, etc.
-Comment, // #Comments like this
-Whitespace, // Space or tabs
-CommandSub, // $(Command substitution)
-Operator, // operators
-Separator, // Semicolon or newline to end an invocation
-DeadEnd, // Used for closing keywords like 'fi' and 'done' that demand a separator immediately after
-Invalid // Used when an unexpected state is discovered
+	FuncBody, // The stuff { inside braces }
+	Array, // Used in for loops and select statements
+	If, // If statement opener
+	For, // For loop opener
+	Loop, // While/Until opener
+	Case, // Case opener
+	Select, // Select opener
+	In, // Used in for, case, and select statements
+	CaseBlock, // this)kind of thing;;
+	CaseIn, // 'In' context used for case statements, signaling the tokenizer to look for stuff 'like)this;;esac'
+	CasePat, // the left side of this)kind of thing
+	CaseBody, // the right side of this)kind of thing
+	Elif, // Secondary if/then blocks
+	Else, // Else statements
+	Do, // Select, for, and while/until condition/body separator
+	Then, // If statement condition/body separator
+	Done, // Select, for, and while/until closer
+	Fi, // If statement closer
+	Esac, // Case statement closer
+	Subshell, // Subshells, look (like this)
+	SQuote, // 'Single quoted strings'
+	DQuote, // "Double quoted strings"
+	Escaped, // Used to denote an escaped character like \a
+	Redirect, // >, <, <<, <<<, 1>&2, 2>, etc.
+	Comment, // #Comments like this
+	Whitespace, // Space or tabs
+	CommandSub, // $(Command substitution)
+	Operator, // operators
+	Separator, // Semicolon or newline to end an invocation
+	DeadEnd, // Used for closing keywords like 'fi' and 'done' that demand a separator immediately after
+	Invalid // Used when an unexpected state is discovered
 }
 
 impl TkState {
@@ -495,7 +501,7 @@ impl TkState {
 pub struct RshTokenizer {
 	input: String,
 	char_stream: VecDeque<char>,
-	context: TkState,
+	context: Vec<TkState>,
 	pub tokens: Vec<Tk>,
 	pub span: Span,
 }
@@ -505,10 +511,21 @@ impl RshTokenizer {
 		let input = input.trim().to_string();
 		let char_stream = input.chars().collect::<VecDeque<char>>();
 		let tokens = vec![Tk { tk_type: TkType::SOI, wd: WordDesc::empty() }];
-		Self { input, char_stream, context: TkState::Command, tokens, span: Span::new() }
+		Self { input, char_stream, context: vec![TkState::Command], tokens, span: Span::new() }
 	}
 	pub fn input(&self) -> String {
 		self.input.clone()
+	}
+	fn push_ctx(&mut self, ctx: TkState) {
+		self.context.push(ctx)
+	}
+	fn pop_ctx(&mut self) {
+		if self.context.len() > 1 {
+			self.context.pop();
+		}
+	}
+	fn ctx(&self) -> &TkState {
+		self.context.last().unwrap_or(&TkState::Command)
 	}
 	fn advance(&mut self) -> Option<char> {
 		self.span.end += 1;
@@ -520,7 +537,7 @@ impl RshTokenizer {
 		while !self.char_stream.is_empty() {
 			self.span.start = self.span.end;
 			wd = wd.set_span(self.span);
-			if self.context == DeadEnd && !matches!(self.char_stream.front().unwrap(), ';' | '\n') {
+			if *self.ctx() == DeadEnd && !matches!(self.char_stream.front().unwrap(), ';' | '\n') {
 				return Err(ShError::from_parse("Expected a semicolon or newline here", self.span))
 			}
 			match self.char_stream.front().unwrap() {
@@ -535,18 +552,30 @@ impl RshTokenizer {
 				';' | '\n' => {
 					self.advance();
 					self.tokens.push(Tk::cmdsep(&wd, self.span.end));
-					self.context = Command;
-					break
+					if *self.ctx() == DeadEnd {
+						while self.context.len() != 1 {
+							if !matches!(*self.ctx(), For | FuncDef | Loop | If | Case | Select) {
+								self.pop_ctx();
+							} else {
+								self.pop_ctx();
+								break
+							}
+						}
+					}
+					if *self.ctx() != Command {
+						self.pop_ctx();
+					}
+					if self.context.len() == 1 {
+						break
+					}
 				}
-				'#' => self.context = Comment,
-				'(' if self.context == Command => self.context = Subshell,
-				'{' if self.context == FuncDef => self.context = FuncBody,
-				'\'' if matches!(self.context, Command | Arg) => self.context = SQuote,
-				'"' if matches!(self.context, Command | Arg) => self.context = DQuote,
-				'$' if matches!(self.context, Command | Arg) => {
+				'#' => self.push_ctx(Comment),
+				'(' if *self.ctx() == Command => self.push_ctx(Subshell),
+				'{' if *self.ctx() == FuncDef => self.push_ctx(FuncBody),
+				'$' if matches!(*self.ctx(), Command | Arg) => {
 					let dollar = self.advance().unwrap();
 					if self.char_stream.front().is_some_and(|ch| *ch == '(') {
-						self.context = CommandSub
+						self.push_ctx(CommandSub)
 					}
 					self.char_stream.push_front(dollar);
 					self.span.end -= 1;
@@ -557,7 +586,8 @@ impl RshTokenizer {
 				}
 				_ => { /* Do nothing */ }
 			}
-			match self.context {
+			eprintln!("{:?},{:?}",self.context,self.char_stream.iter().collect::<String>());
+			match *self.ctx() {
 				Command => self.command_context(take(&mut wd),ctx.clone())?,
 				Arg => self.arg_context(take(&mut wd))?,
 				DQuote | SQuote => self.string_context(take(&mut wd))?,
@@ -572,9 +602,9 @@ impl RshTokenizer {
 						self.advance();
 					}
 					self.advance(); // Consume the newline too
-					self.context = Command
+					self.push_ctx(Command)
 				}
-				_ => unreachable!()
+				_ => unreachable!("{:?},{:?}",self.context,self.char_stream.iter().collect::<String>())
 			}
 		}
 		Ok(take(&mut self.tokens))
@@ -585,14 +615,16 @@ impl RshTokenizer {
 		if wd.text.ends_with("()") {
 			wd.text = wd.text.strip_suffix("()").unwrap().to_string();
 			self.tokens.push(Tk { tk_type: TkType::FuncDef, wd });
-			self.context = FuncDef;
+			self.push_ctx(FuncDef);
 		} else if KEYWORDS.contains(&wd.text.as_str()) {
 			match wd.text.as_str() {
-				"then" | "if" | "elif" | "else" | "do" | "while" | "until" => self.context = Command,
-				"for" => self.context = VarDec,
-				"case" => self.context = Case,
-				"select" => self.context = Select,
-				_ => self.context = DeadEnd
+				"then" | "elif" | "else" | "do" => { /* Do nothing, already in command ctx */ }
+				"if" => { self.push_ctx(If); self.push_ctx(Command); }
+				"while" | "until" => { self.push_ctx(Loop); self.push_ctx(Command); }
+				"for" => { self.push_ctx(For); self.push_ctx(VarDec); }
+				"case" => self.push_ctx(Case),
+				"select" => self.push_ctx(Select),
+				_ => self.push_ctx(DeadEnd)
 			}
 			match wd.text.as_str() {
 				"if" => self.tokens.push(Tk { tk_type: TkType::If, wd }),
@@ -609,7 +641,7 @@ impl RshTokenizer {
 				"select" => self.tokens.push(Tk { tk_type: TkType::Select, wd }),
 				_ => unreachable!("text: {}", wd.text)
 			}
-		} else if !ctx.get_alias_exp().is_some_and(|name| name == wd.text) && read_logic(|l| l.get_alias(wd.text.as_str()))?.is_some()  {
+		} else if ctx.get_alias_exp().is_none_or(|name| name != wd.text) && read_logic(|l| l.get_alias(wd.text.as_str()))?.is_some()  {
 			if let Some(content) = read_logic(|l| l.get_alias(wd.text.as_str())).unwrap() {
 				let mut sub_tokenizer = RshTokenizer::new(&content);
 				loop {
@@ -623,28 +655,11 @@ impl RshTokenizer {
 					self.tokens.append(&mut deck);
 				}
 			}
-		} else if matches!(wd.text.as_str(), ";" | "\n") || self.char_stream.is_empty() {
-			let flags = match self.context {
-				Arg => WdFlags::IS_ARG,
-				Command => {
-					if BUILTINS.contains(&wd.text.as_str()) {
-						WdFlags::BUILTIN
-					} else {
-						WdFlags::empty()
-					}
-				}
-				_ => unreachable!()
-			};
-			if wd.text.has_unescaped("=") {
-				self.tokens.push(Tk { tk_type: TkType::Assignment, wd });
-				self.context = Arg
-			} else {
-				self.tokens.push(Tk { tk_type: TkType::Ident, wd: wd.reset_flags().add_flag(flags) });
-				self.context = Arg
-			}
-			self.context = Command;
+		} else if matches!(wd.text.as_str(), ";" | "\n") {
+			self.tokens.push(Tk::cmdsep(&wd, self.span.end));
+			self.pop_ctx();
 		} else {
-			let flags = match self.context {
+			let flags = match *self.ctx() {
 				Arg => WdFlags::IS_ARG,
 				Command => {
 					if BUILTINS.contains(&wd.text.as_str()) {
@@ -657,15 +672,16 @@ impl RshTokenizer {
 			};
 			if wd.text.has_unescaped("=") {
 				self.tokens.push(Tk { tk_type: TkType::Assignment, wd });
-				self.context = Arg
+				self.push_ctx(Arg)
 			} else {
 				self.tokens.push(Tk { tk_type: TkType::Ident, wd: wd.reset_flags().add_flag(flags) });
-				self.context = Arg
+				self.push_ctx(Arg)
 			}
 		}
 		Ok(())
 	}
 	fn arg_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
+		use crate::interp::token::TkState::*;
 		wd = self.complete_word(wd);
 		match wd.text.as_str() {
 			"||" | "&&" | "|" | "|&" => {
@@ -679,27 +695,27 @@ impl RshTokenizer {
 		match wd.text.as_str() {
 			"||" => {
 				self.tokens.push(Tk { tk_type: TkType::LogicOr, wd: wd.add_flag(WdFlags::IS_OP) });
-				self.context = TkState::Command
+				self.push_ctx(Command)
 			}
 			"&&" => {
 				self.tokens.push(Tk { tk_type: TkType::LogicAnd, wd: wd.add_flag(WdFlags::IS_OP) });
-				self.context = TkState::Command
+				self.push_ctx(Command)
 			}
 			"|" => {
 				self.tokens.push(Tk { tk_type: TkType::Pipe, wd: wd.add_flag(WdFlags::IS_OP) });
-				self.context = TkState::Command
+				self.push_ctx(Command)
 			}
 			"|&" => {
 				self.tokens.push(Tk { tk_type: TkType::PipeBoth, wd: wd.add_flag(WdFlags::IS_OP) });
-				self.context = TkState::Command
+				self.push_ctx(Command)
 			}
 			"&" => {
 				self.tokens.push(Tk { tk_type: TkType::Background, wd: wd.add_flag(WdFlags::IS_OP) });
-				self.context = TkState::Command
+				self.push_ctx(Command)
 			}
 			";" | "\n" => {
 				self.tokens.push(Tk::cmdsep(&wd,wd.span.start));
-				self.context = TkState::Command
+				self.pop_ctx();
 			}
 			_ if REGEX["redirection"].is_match(&wd.text) => {
 				let mut fd_out;
@@ -739,6 +755,7 @@ impl RshTokenizer {
 		Ok(())
 	}
 	fn string_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
+		use crate::interp::token::TkState::*;
 		// Pop the opening quote
 		self.advance();
 		while let Some(ch) = self.advance() {
@@ -750,12 +767,12 @@ impl RshTokenizer {
 						wd = wd.add_char(ch)
 					}
 				}
-				'"' if self.context == TkState::DQuote => {
-					self.context = TkState::Arg;
+				'"' if *self.ctx() == TkState::DQuote => {
+					self.push_ctx(Arg);
 					break
 				}
-				'\'' if self.context == TkState::SQuote => {
-					self.context = TkState::Arg;
+				'\'' if *self.ctx() == TkState::SQuote => {
+					self.push_ctx(Arg);
 					break
 				}
 				_ => {
@@ -763,7 +780,7 @@ impl RshTokenizer {
 				}
 			}
 		}
-		if self.context == TkState::DQuote {
+		if *self.ctx() == DQuote {
 			wd.span = self.span;
 			let token = Tk { tk_type: TkType::String, wd };
 			let mut expanded = expand::expand_token(token, true)?;
@@ -771,9 +788,11 @@ impl RshTokenizer {
 		} else {
 			self.tokens.push(Tk { tk_type: TkType::String, wd });
 		}
+		self.pop_ctx();
 		Ok(())
 	}
 	fn vardec_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
+		use crate::interp::token::TkState::*;
 		let mut found = false;
 		loop {
 			let span = wd.span;
@@ -790,7 +809,7 @@ impl RshTokenizer {
 					break
 				}
 				_ => {
-					if self.context == TkState::SingleVarDec && found {
+					if *self.ctx() == SingleVarDec && found {
 						return Err(ShError::from_parse(format!("Only expected one variable in this statement, found: {}",wd.text).as_str(), wd.span))
 					}
 					found = true;
@@ -799,10 +818,12 @@ impl RshTokenizer {
 				}
 			}
 		}
-		self.context = TkState::ArrDec;
+		self.pop_ctx();
+		self.push_ctx(ArrDec);
 		Ok(())
 	}
 	fn arrdec_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
+		use crate::interp::token::TkState::*;
 		let mut found = false;
 		while self.char_stream.front().is_some_and(|ch| !matches!(ch, ';' | '\n')) {
 			found = true;
@@ -818,12 +839,14 @@ impl RshTokenizer {
 			self.advance();
 			self.tokens.push(Tk::cmdsep(&wd,self.span.end + 1))
 		}
-		self.context = TkState::Command;
+		self.pop_ctx();
+		self.push_ctx(Command);
 		Ok(())
 	}
 	fn subshell_context(&mut self, mut wd: WordDesc) {
+		use crate::interp::token::TkState::*;
 		self.advance();
-		if self.context == TkState::CommandSub { self.advance(); }
+		if *self.ctx() == CommandSub { self.advance(); }
 		let mut paren_stack = vec!['('];
 		while let Some(ch) = self.advance() {
 			match ch {
@@ -844,14 +867,14 @@ impl RshTokenizer {
 			}
 		}
 		wd.span = self.span;
-		let tk = match self.context {
-			TkState::Subshell => {
+		let tk = match *self.ctx() {
+			Subshell => {
 				Tk {
 					tk_type: TkType::Subshell,
 					wd
 				}
 			}
-			TkState::CommandSub => {
+			CommandSub => {
 				Tk {
 					tk_type: TkType::CommandSub,
 					wd
@@ -860,11 +883,12 @@ impl RshTokenizer {
 			_ => unreachable!()
 		};
 		self.tokens.push(tk);
-		self.context = TkState::Arg;
+		self.push_ctx(Arg);
 	}
 	fn func_context(&mut self, mut wd: WordDesc) {
+		use crate::interp::token::TkState::*;
 		self.advance();
-		if self.context == TkState::CommandSub { self.advance(); }
+		if *self.ctx() == CommandSub { self.advance(); }
 		let mut brace_stack = vec!['{'];
 		while let Some(ch) = self.advance() {
 			match ch {
@@ -886,12 +910,13 @@ impl RshTokenizer {
 		}
 		wd.span = self.span;
 		wd.text = wd.text.trim().to_string();
-		self.tokens.push(Tk { tk_type: TkType::FuncBody, wd })
+		self.tokens.push(Tk { tk_type: TkType::FuncBody, wd });
+		self.push_ctx(DeadEnd);
 	}
 	fn case_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
 		use crate::interp::token::TkState::*;
 		let span = wd.span;
-		self.context = SingleVarDec;
+		self.push_ctx(SingleVarDec);
 		self.vardec_context(take(&mut wd))?;
 		if self.char_stream.front().is_some_and(|ch| matches!(*ch, ';' | '\n')) {
 			self.advance();
@@ -926,13 +951,13 @@ impl RshTokenizer {
 			let mut body_tokens = vec![];
 			while let Ok(mut block) = body_tokenizer.tokenize_one(TkizerCtx::new()) {
 				if !block.is_empty() {
-					body_tokens.extend(block.drain(..))
+					body_tokens.append(&mut block);
 				}
 			}
-			self.tokens.extend(body_tokens);
+			self.tokens.append(&mut body_tokens);
 			wd = wd.set_span(span);
 		}
-		self.context = DeadEnd;
+		self.push_ctx(DeadEnd);
 		Ok(())
 	}
 	fn complete_word(&mut self, mut wd: WordDesc) -> WordDesc {
@@ -940,6 +965,9 @@ impl RshTokenizer {
 		let mut sng_quote = false;
 		let mut paren_stack = vec![];
 		let mut bracket_stack = vec![];
+		while self.char_stream.front().is_some_and(|ch| ch.is_whitespace()) {
+			self.advance();
+		}
 		while let Some(ch) = self.advance() {
 			match ch {
 				'\\' => {

@@ -818,6 +818,12 @@ impl TermCtl {
 	}
 }
 
+impl Default for TermCtl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn await_job(pgid: Pid) -> RshResult<()> {
 	let status_handle = read_jobs(|j| j.get_by_pgid(pgid).map(|job| job.get_status_handle()))?.unwrap();
 	let (lock,cvar) = &*status_handle;
@@ -828,10 +834,11 @@ pub fn await_job(pgid: Pid) -> RshResult<()> {
 	Ok(())
 }
 
-pub fn await_fg_job() -> RshResult<()> {
+pub fn await_fg_job() -> RshResult<RshWait> {
+	let mut last_status = RshWait::new();
 	let status_handle = read_jobs(|j| j.read_job(0).map(|job| job.get_status_handle()))?;
 	if status_handle.is_none() {
-		return Ok(())
+		return Ok(last_status)
 	}
 	let status_handle = status_handle.unwrap();
 	let (lock,cvar) = &*status_handle;
@@ -839,7 +846,8 @@ pub fn await_fg_job() -> RshResult<()> {
 	while !*is_complete {
 		is_complete = cvar.wait(is_complete).unwrap();
 	}
-	Ok(())
+	last_status = read_jobs(|j| j.read_job(0).unwrap().get_proc_statuses().first().unwrap().clone())?;
+	Ok(last_status)
 }
 
 pub fn notify_job_done(pgid: Pid) -> RshResult<()> {
@@ -1047,6 +1055,7 @@ pub fn source_file(path: PathBuf) -> RshResult<()> {
 			if code == 127 {
 				if let Some(cmd) = cmd {
 					eprintln!("Command not found: {}",cmd);
+					break
 				}
 			}
 		}

@@ -93,12 +93,12 @@ pub fn run() -> RshResult<String> {
 		}
 		Err(ReadlineError::Interrupted) => {
 			write_meta(|m| m.leave_prompt())?;
-			return Ok(String::new())
+			Ok(String::new())
 		}
 		Err(ReadlineError::Eof) => {
 			write_meta(|m| m.leave_prompt())?;
-			kill(Pid::this(), Signal::SIGQUIT);
-			return Ok(String::new())
+			kill(Pid::this(), Signal::SIGQUIT).map_err(|_| ShError::from_io())?;
+			Ok(String::new())
 		}
 		Err(e) => {
 			write_meta(|m| m.leave_prompt())?;
