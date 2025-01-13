@@ -22,6 +22,7 @@ bitflags! {
 		const IN_PIPE            = 0b00000000000000000000000000010000;
 		const FUNCTION           = 0b00000000000000000000000000100000;
 		const IN_CMD_SUB         = 0b00000000000000000000000001000000;
+		const FOR_BODY           = 0b00000000000000000000000010000000;
 	}
 }
 
@@ -148,6 +149,22 @@ impl Node {
 	}
 	pub fn set_span(&mut self,span: Span) {
 		self.span = span
+	}
+	pub fn is_executable(&self) -> bool {
+		use crate::interp::parse::NdType::*;
+		matches!(self.nd_type, Command {..} | Builtin {..} | Function {..} | Subshell {..})
+	}
+	pub fn set_argv(&mut self, new_argv: Vec<Tk>) -> RshResult<()> {
+		match &mut self.nd_type {
+			NdType::Command { argv } |
+				NdType::Builtin { argv } |
+				NdType::Subshell { body: _, argv } |
+				NdType::Function { body: _, argv } => {
+					*argv = new_argv.into();
+					Ok(())
+				}
+			_ => Err(ShError::from_internal("Attempt to call `set_argv()` on a non-command node")),
+		}
 	}
 	pub fn get_argv(&self) -> RshResult<Vec<Tk>> {
 		let mut arg_vec = vec![];
@@ -1084,7 +1101,7 @@ pub fn build_for(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		command: None,
 		nd_type: NdType::For { loop_vars, loop_arr, loop_body },
 		span,
-		flags: NdFlags::VALID_OPERAND,
+		flags: NdFlags::VALID_OPERAND | NdFlags::FOR_BODY,
 		redirs: VecDeque::new()
 	};
 	ctx.attach_node(node);
@@ -1156,6 +1173,10 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> RshResult<Descent
 	let span = Span::from(span_start,span_end);
 
 	if !closed {
+		dbg!(&cond_tokens);
+		dbg!(&cond_root);
+		dbg!(&body_tokens);
+		dbg!(&body_root);
 		return Err(ShError::from_parse(
 				"This loop is missing a `done`",
 				span)
@@ -1584,4 +1605,251 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	}
 	ctx.attach_node(node);
 	Ok(ctx)
+}
+
+// Turn back now if you value your sanity
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	#[test]
+	fn parser_simple() {
+		let input = "echo hello world";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let mut flat_nodes = Vec::new(); // Collect nodes directly
+		loop {
+			let state = descend(&mut tokenizer).unwrap().unwrap();
+			if state.tokens.is_empty() {
+				break;
+			}
+
+			// Extract the deck from the Root node while iterating
+			if let NdType::Root { deck } = state.ast.nd_type {
+				flat_nodes.extend(deck);
+			} else {
+				flat_nodes.push(state.ast);
+			}
+		}
+
+		insta::assert_debug_snapshot!(flat_nodes)
+	}
+
+	#[test]
+	fn parser_multiple_args() {
+		let input = "ls -l /home/user";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let mut flat_nodes = Vec::new();
+		loop {
+			let state = descend(&mut tokenizer).unwrap().unwrap();
+			if state.tokens.is_empty() {
+				break;
+			}
+
+			if let NdType::Root { deck } = state.ast.nd_type {
+				flat_nodes.extend(deck);
+			} else {
+				flat_nodes.push(state.ast);
+			}
+		}
+
+		insta::assert_debug_snapshot!(flat_nodes)
+	}
+
+	#[test]
+	fn parser_redirection_simple() {
+		let input = "echo hello world > file.txt";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let mut flat_nodes = Vec::new();
+		loop {
+			let state = descend(&mut tokenizer).unwrap().unwrap();
+			if state.tokens.is_empty() {
+				break;
+			}
+
+			if let NdType::Root { deck } = state.ast.nd_type {
+				flat_nodes.extend(deck);
+			} else {
+				flat_nodes.push(state.ast);
+			}
+		}
+
+		insta::assert_debug_snapshot!(flat_nodes)
+	}
+
+	#[test]
+	fn parser_redirection_complex() {
+		let input = "cat nonexistantfile.txt 1>&2 2> file.txt";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let mut flat_nodes = Vec::new();
+		loop {
+			let state = descend(&mut tokenizer).unwrap().unwrap();
+			if state.tokens.is_empty() {
+				break;
+			}
+
+			if let NdType::Root { deck } = state.ast.nd_type {
+				flat_nodes.extend(deck);
+			} else {
+				flat_nodes.push(state.ast);
+			}
+		}
+
+		insta::assert_debug_snapshot!(flat_nodes)
+	}
+
+	#[test]
+	fn parser_command_sub() {
+		let input = "echo $(echo hi)";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let mut flat_nodes = Vec::new();
+		loop {
+			let state = descend(&mut tokenizer).unwrap().unwrap();
+			if state.tokens.is_empty() {
+				break;
+			}
+
+			if let NdType::Root { deck } = state.ast.nd_type {
+				flat_nodes.extend(deck);
+			} else {
+				flat_nodes.push(state.ast);
+			}
+		}
+
+		insta::assert_debug_snapshot!(flat_nodes)
+	}
+	#[test]
+	fn parser_quoted_args() {
+		let input = "echo \"hello world\"";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let mut flat_nodes = Vec::new();
+		loop {
+			let state = descend(&mut tokenizer).unwrap().unwrap();
+			if state.tokens.is_empty() {
+				break;
+			}
+
+			if let NdType::Root { deck } = state.ast.nd_type {
+				flat_nodes.extend(deck);
+			} else {
+				flat_nodes.push(state.ast);
+			}
+		}
+
+		insta::assert_debug_snapshot!(flat_nodes)
+	}
+
+	#[test]
+	fn parser_for_loop() {
+		let input = "for i in 1 2 3; do echo $i; done";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let mut flat_nodes = Vec::new();
+		loop {
+			let state = descend(&mut tokenizer).unwrap().unwrap();
+			if state.tokens.is_empty() {
+				break;
+			}
+
+			if let NdType::Root { deck } = state.ast.nd_type {
+				flat_nodes.extend(deck);
+			} else {
+				flat_nodes.push(state.ast);
+			}
+		}
+
+		insta::assert_debug_snapshot!(flat_nodes)
+	}
+
+	#[test]
+	fn parser_while_loop() {
+		let input = "while true; do echo hi; done";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let mut flat_nodes = Vec::new();
+		loop {
+			let state = descend(&mut tokenizer).unwrap().unwrap();
+			if state.tokens.is_empty() {
+				break;
+			}
+
+			if let NdType::Root { deck } = state.ast.nd_type {
+				flat_nodes.extend(deck);
+			} else {
+				flat_nodes.push(state.ast);
+			}
+		}
+
+		insta::assert_debug_snapshot!(flat_nodes)
+	}
+
+	#[test]
+	fn parser_until_loop() {
+		let input = "until true; do echo waiting; done";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let mut flat_nodes = Vec::new();
+		loop {
+			let state = descend(&mut tokenizer).unwrap().unwrap();
+			if state.tokens.is_empty() {
+				break;
+			}
+
+			if let NdType::Root { deck } = state.ast.nd_type {
+				flat_nodes.extend(deck);
+			} else {
+				flat_nodes.push(state.ast);
+			}
+		}
+
+		insta::assert_debug_snapshot!(flat_nodes)
+	}
+
+	#[test]
+	fn parser_if_statement() {
+		let input = "if true; then echo hi; else echo bye; fi";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let mut flat_nodes = Vec::new();
+		loop {
+			let state = descend(&mut tokenizer).unwrap().unwrap();
+			if state.tokens.is_empty() {
+				break;
+			}
+
+			if let NdType::Root { deck } = state.ast.nd_type {
+				flat_nodes.extend(deck);
+			} else {
+				flat_nodes.push(state.ast);
+			}
+		}
+
+		insta::assert_debug_snapshot!(flat_nodes)
+	}
+	#[test]
+	fn parser_final_boss() {
+		let input = "if while if true; then echo while condition; fi; do if true; then echo inside first while; fi; done; then echo wow; elif until while if true; then echo double loop; fi; do if true; then echo another double loop; fi; done; do echo; done; then echo again; else echo; fi";
+		let mut tokenizer = RshTokenizer::new(input);
+
+		let mut flat_nodes = Vec::new();
+		loop {
+			let state = descend(&mut tokenizer).unwrap().unwrap();
+			if state.tokens.is_empty() {
+				break;
+			}
+
+			if let NdType::Root { deck } = state.ast.nd_type {
+				flat_nodes.extend(deck);
+			} else {
+				flat_nodes.push(state.ast);
+			}
+		}
+
+		insta::assert_debug_snapshot!(flat_nodes);
+	}
 }

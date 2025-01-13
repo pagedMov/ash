@@ -649,6 +649,28 @@ impl VarTable {
 		self.params.get(key).cloned().map(|param| param.to_string())
 	}
 	pub fn set_param(&mut self, key: String, value: String) {
+		if let Ok(index) = key.parse::<usize>() {
+			// Extract current positional parameters
+			let mut pos_params: Vec<String> = self.params
+				.get("@")
+				.unwrap_or(&String::new())
+				.split_whitespace()
+				.map(|s| s.to_string())
+				.collect();
+
+				// Ensure pos_params is large enough to accommodate the index
+				if index >= pos_params.len() {
+					pos_params.resize(index + 1, String::new());
+				}
+
+				// Update or set the value at the specified index
+				pos_params[index] = value.clone();
+
+				// Update "$@" with the joined positional parameters
+				self.params.insert("@".into(), pos_params.join(" "));
+		}
+
+		// Set the individual parameter as well
 		self.params.insert(key, value);
 	}
 	pub fn reset_params(&mut self) {
@@ -665,6 +687,7 @@ impl VarTable {
 		self.vars.remove(key);
 	}
 	pub fn get_var(&self, key: &str) -> Option<RVal> {
+		dbg!("getting var");
 		if let Some(var) = self.vars.get(key).cloned() {
 			Some(var)
 		} else if let Some(var) = self.params.get(key).cloned() {
@@ -819,9 +842,9 @@ impl TermCtl {
 }
 
 impl Default for TermCtl {
-    fn default() -> Self {
-        Self::new()
-    }
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 pub fn await_job(pgid: Pid) -> RshResult<()> {
@@ -1061,4 +1084,250 @@ pub fn source_file(path: PathBuf) -> RshResult<()> {
 		}
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use ctor::{dtor,ctor};
+	use rstest::{fixture, rstest};
+	use std::fs;
+	use pretty_assertions::assert_eq;
+	use super::*;
+
+
+	#[fixture]
+	fn mock_jobs() -> JobTable {
+		let mut job_table = JobTable::new();
+
+		// Add mock jobs
+		job_table.new_job(
+			vec![Pid::from_raw(100), Pid::from_raw(101)],
+			vec!["cmd1".to_string(), "cmd2".to_string()],
+			Pid::from_raw(100),
+		);
+		job_table.new_job(
+			vec![Pid::from_raw(200)],
+			vec!["cmd3".to_string()],
+			Pid::from_raw(200),
+		);
+
+		job_table
+	}
+
+	#[fixture]
+	fn mock_vars() -> VarTable {
+		VarTable::new()
+	}
+
+	#[fixture]
+	fn mock_logic() -> LogicTable {
+		LogicTable::new()
+	}
+
+
+	// Assume RVal, HashFloat, and VarTable are defined elsewhere in your code
+
+#[rstest]
+	fn shellenv_define_string(mut mock_vars: VarTable) {
+		let name = "string_var";
+		let value = RVal::String("Hello, World!".to_string());
+		mock_vars.set_var(name, value);
+		let return_val = mock_vars.get_var(name).unwrap();
+		let display = format!("{}", return_val);
+
+		assert_eq!(display, "Hello, World!".to_string());
+	}
+
+#[rstest]
+	fn shellenv_define_int(mut mock_vars: VarTable) {
+		let name = "integer";
+		let value = RVal::Int(5);
+		mock_vars.set_var(name, value);
+		let return_val = mock_vars.get_var(name).unwrap();
+		let display = format!("{}", return_val);
+
+		assert_eq!(display, "5".to_string());
+	}
+
+#[rstest]
+	fn shellenv_define_float(mut mock_vars: VarTable) {
+		let name = "float_var";
+		let value = RVal::Float(HashFloat(3.15)); // Assuming `HashFloat` wraps an `f64`.
+		mock_vars.set_var(name, value);
+		let return_val = mock_vars.get_var(name).unwrap();
+		let display = format!("{}", return_val);
+
+		assert_eq!(display, "3.15".to_string()); // Adjust formatting if `HashFloat` differs.
+	}
+
+#[rstest]
+	fn shellenv_define_bool(mut mock_vars: VarTable) {
+		let name = "bool_var";
+		let value = RVal::Bool(true);
+		mock_vars.set_var(name, value);
+		let return_val = mock_vars.get_var(name).unwrap();
+		let display = format!("{}", return_val);
+
+		assert_eq!(display, "true".to_string());
+	}
+
+	#[rstest]
+	fn shellenv_define_array(mut mock_vars: VarTable) {
+		let name = "array_var";
+		let value = RVal::Array(vec![
+			RVal::Int(1),
+			RVal::Int(2),
+			RVal::Int(3),
+			RVal::String("four".to_string()),
+		]);
+		mock_vars.set_var(name, value);
+		let return_val = mock_vars.get_var(name).unwrap();
+		let display = format!("{}", return_val);
+
+		// Assuming `RVal::Array` is formatted as `[1, 2, 3, "four"]`.
+		assert_eq!(display, "1 2 3 four".to_string());
+	}
+
+#[rstest]
+	fn logic_table_new_alias(mut mock_logic: LogicTable) {
+		mock_logic.new_alias("alias1", "value1".to_string());
+		let alias_value = mock_logic.get_alias("alias1");
+		assert_eq!(alias_value, Some("value1".to_string()));
+	}
+
+#[rstest]
+	fn logic_table_remove_alias(mut mock_logic: LogicTable) {
+		mock_logic.new_alias("alias1", "value1".to_string());
+		mock_logic.remove_alias("alias1");
+		let alias_value = mock_logic.get_alias("alias1");
+		assert_eq!(alias_value, None);
+	}
+
+#[rstest]
+	fn logic_table_get_alias(mut mock_logic: LogicTable) {
+		mock_logic.new_alias("alias1", "value1".to_string());
+		let alias_value = mock_logic.get_alias("alias1");
+		assert_eq!(alias_value, Some("value1".to_string()));
+		assert_eq!(mock_logic.get_alias("nonexistent"), None);
+	}
+
+#[rstest]
+	fn logic_table_new_func(mut mock_logic: LogicTable) {
+		let node = Node::new(); // Assuming a `Node::new()` exists for creating a dummy node.
+		mock_logic.new_func("func1", node.clone());
+		let retrieved_func = mock_logic.get_func("func1");
+		assert_eq!(retrieved_func, Some(node));
+	}
+
+#[rstest]
+	fn logic_table_get_func(mut mock_logic: LogicTable) {
+		let node = Node::new(); // Assuming a `Node::new()` exists for creating a dummy node.
+		mock_logic.new_func("func1", node.clone());
+		let retrieved_func = mock_logic.get_func("func1");
+		assert_eq!(retrieved_func, Some(node));
+
+		// Ensure retrieving a nonexistent function returns `None`
+		assert_eq!(mock_logic.get_func("nonexistent"), None);
+	}
+
+	#[rstest]
+	fn logic_table_remove_func(mut mock_logic: LogicTable) {
+		let node = Node::new(); // Assuming a `Node::new()` exists for creating a dummy node.
+		mock_logic.new_func("func1", node.clone());
+		mock_logic.remove_func("func1");
+		let retrieved_func = mock_logic.get_func("func1");
+		assert_eq!(retrieved_func, None);
+	}
+
+
+	#[rstest]
+	fn vartable_index_array(mut mock_vars: VarTable) {
+		// Create an array and add it to the variable table
+		let key = "my_array";
+		let array_value = RVal::Array(vec![
+			RVal::Int(10),
+			RVal::Int(20),
+			RVal::String("thirty".to_string()),
+		]);
+		mock_vars.set_var(key, array_value);
+
+		// Test valid indices
+		let first_element = mock_vars.index_arr(key, 0).unwrap();
+		assert_eq!(first_element, RVal::Int(10));
+
+		let second_element = mock_vars.index_arr(key, 1).unwrap();
+		assert_eq!(second_element, RVal::Int(20));
+
+		let third_element = mock_vars.index_arr(key, 2).unwrap();
+		assert_eq!(third_element, RVal::String("thirty".to_string()));
+
+		// Test invalid index (out of bounds)
+		let out_of_bounds = mock_vars.index_arr(key, 3);
+		assert!(out_of_bounds.is_err());
+		if let Err(err) = out_of_bounds {
+			assert_eq!(
+				err.to_string(),
+				"Index `3` out of range for array `my_array`"
+			);
+		}
+
+		// Test non-array variable
+		mock_vars.set_var("not_array", RVal::Int(42));
+		let not_an_array = mock_vars.index_arr("not_array", 0);
+		assert!(not_an_array.is_err());
+		if let Err(err) = not_an_array {
+			assert_eq!(err.to_string(), "not_array is not an array");
+		}
+
+		// Test nonexistent variable
+		let nonexistent = mock_vars.index_arr("does_not_exist", 0);
+		assert!(nonexistent.is_err());
+		if let Err(err) = nonexistent {
+			assert_eq!(err.to_string(), "does_not_exist is not a variable");
+		}
+	}
+
+
+	#[rstest]
+	fn jobtable_foreground_background(mut mock_jobs: JobTable) {
+		let fg_job = Job::new(0, vec![Pid::from_raw(400)], vec!["fg_cmd".to_string()], Pid::from_raw(400));
+		mock_jobs.new_fg(fg_job);
+
+		assert!(mock_jobs.is_fg(Pid::from_raw(400)));
+
+		// Move the job to the background
+		mock_jobs.to_background();
+		assert!(!mock_jobs.is_fg(Pid::from_raw(400)));
+
+		// Bring the job back to the foreground
+		mock_jobs.to_foreground(3);
+		assert!(mock_jobs.is_fg(Pid::from_raw(400)));
+	}
+
+	#[rstest]
+	fn jobtable_status_updates(mut mock_jobs: JobTable) {
+		let pgid = Pid::from_raw(100); // PGID of the first job in the mock_jobs fixture
+
+		// Update job status by PGID
+		mock_jobs.mut_by_pgid(pgid).unwrap().stop(Signal::SIGTSTP);
+		assert!(mock_jobs.read_job(1).unwrap().is_stopped());
+
+		// Update job status by ID
+		mock_jobs.update_by_id(2, Some(Pid::from_raw(200)), RshWait::Running);
+		assert!(mock_jobs.read_job(2).unwrap().is_running());
+	}
+
+	#[rstest]
+	fn jobtable_new_job(mut mock_jobs: JobTable) {
+		let pids = vec![Pid::from_raw(300)];
+		let commands = vec!["cmd4".to_string()];
+		let pgid = Pid::from_raw(300);
+
+		let job_id = mock_jobs.new_job(pids.clone(), commands.clone(), pgid);
+		let job = mock_jobs.read_job(job_id as i32).unwrap();
+
+		assert_eq!(job.job_id, job_id as i32);
+		assert_eq!(job.pids, pids);
+		assert_eq!(job.commands, commands);
+	}
 }

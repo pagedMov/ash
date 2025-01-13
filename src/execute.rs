@@ -381,26 +381,6 @@ impl Default for ProcIO {
 	}
 }
 
-pub struct ExecDispatcher {
-	inbox: Receiver<Vec<Node>>,
-}
-
-impl ExecDispatcher {
-	pub fn new(inbox: Receiver<Vec<Node>>) -> Self {
-		Self { inbox }
-	}
-	pub fn run(&self) -> RshResult<RshWait> {
-		let status = RshWait::new();
-		for deck in self.inbox.iter() {
-			for tree in deck {
-				shellenv::await_term_ctl()?;
-				traverse_ast(tree)?;
-			}
-		}
-		Ok(status)
-	}
-}
-
 pub fn traverse_ast(ast: Node) -> RshResult<RshWait> {
 	let saved_in = RustFd::from_stdin()?;
 	let saved_out = RustFd::from_stdout()?;
@@ -413,8 +393,14 @@ pub fn traverse_ast(ast: Node) -> RshResult<RshWait> {
 }
 
 
-fn traverse(node: Node, io: ProcIO) -> RshResult<RshWait> {
+fn traverse(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 	let last_status;
+
+	// We delay expanding variables in for loop bodies until now; this is done to give the variables time to be properly assigned before execution of the for loop body
+	if node.is_executable() && node.flags.contains(NdFlags::FOR_BODY) {
+		let new_argv = expand::expand_arguments(&mut node)?;
+		node.set_argv(new_argv)?;
+	}
 	match node.nd_type {
 		NdType::Command {..} => {
 			last_status = handle_command(node, io)?;
@@ -466,13 +452,13 @@ fn traverse(node: Node, io: ProcIO) -> RshResult<RshWait> {
 	Ok(last_status)
 }
 
-fn traverse_root(mut node: Node, break_condition: Option<bool>, io: ProcIO) -> RshResult<RshWait> {
+fn traverse_root(mut root_node: Node, break_condition: Option<bool>, io: ProcIO) -> RshResult<RshWait> {
 	let mut last_status = RshWait::new();
-	if !node.redirs.is_empty() {
-		node = parse::propagate_redirections(node)?;
+	if !root_node.redirs.is_empty() {
+		root_node = parse::propagate_redirections(root_node)?;
 	}
-	if let NdType::Root { deck } = node.nd_type {
-		for (index,node) in deck.iter().enumerate() {
+	if let NdType::Root { mut deck } = root_node.nd_type {
+		for (index,node) in deck.iter_mut().enumerate() {
 			// Map stdin to the first node, and map stdout/stderr to the last node
 			let node_io = if index == 0 {
 				io.clone() // Take all three FDs for the first node
@@ -480,6 +466,9 @@ fn traverse_root(mut node: Node, break_condition: Option<bool>, io: ProcIO) -> R
 				ProcIO::from(None, io.stdout.clone(), io.stderr.clone())
 			};
 
+			if root_node.flags.contains(NdFlags::FOR_BODY) {
+				node.flags |= NdFlags::FOR_BODY
+			}
 			last_status = traverse(node.clone(), node_io)?;
 			if let Some(condition) = break_condition {
 				match condition {
@@ -529,7 +518,8 @@ fn handle_for(node: Node,io: ProcIO) -> RshResult<RshWait> {
 			let redirs = node.get_redirs()?;
 			handle_redirs(redirs.into())?;
 
-			node_operation!(NdType::For { loop_vars, mut loop_arr, loop_body}, node, {
+			node_operation!(NdType::For { loop_vars, mut loop_arr, mut loop_body}, node, {
+				loop_body.flags |= NdFlags::FOR_BODY;
 				let var_count = loop_vars.len();
 				let mut var_index = 0;
 				let mut iteration_count = 0;
@@ -785,14 +775,12 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 			}
 			Ok(ForkResult::Parent { child }) => {
 				memfd.close()?;
-				if !node.flags.intersects(NdFlags::FUNCTION | NdFlags::IN_CMD_SUB) {
+				if !node.flags.contains(NdFlags::IN_CMD_SUB) {
 					setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
 					shellenv::attach_tty(child)?;
-				}
-				if !node.flags.contains(NdFlags::IN_CMD_SUB) {
 					let job = Job::new(0, vec![child], vec!["anonymous_subshell".into()], child);
-					write_jobs(|j| j.new_fg(job))?;
 					env_snapshot.restore_snapshot()?;
+					write_jobs(|j| j.new_fg(job))?;
 				}
 			}
 			Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_subshell".into(), 1, node.span())),
@@ -1124,3 +1112,62 @@ fn handle_autocd(node: Node, argv: Vec<Tk>,flags: WdFlags,io: ProcIO) -> RshResu
 	};
 	traverse(autocd,io)
 }
+
+//#[cfg(test)]
+//mod test {
+	//use ctor::{dtor,ctor};
+//use parse::descend;
+//use pretty_assertions::assert_eq;
+//use rstest::{fixture, rstest};
+	//use std::fs;
+	////use crate::{interp::token::RshTokenizer, signal};
+//
+//use super::*;
+//
+	//#[fixture]
+	//fn mock_environment() {
+		////fs::create_dir_all("/tmp/rsh_test_dir").unwrap();
+//
+		//fs::write("/tmp/rsh_test_dir/file1.txt", "This is the content of file1.").unwrap();
+//
+		//println!("Fake environment initialized successfully!");
+	//}
+	////#[dtor]
+	//fn teardown_fake_environment() {
+		//std::env::set_current_dir("/home").unwrap();
+		//fs::remove_dir_all("/tmp/rsh_test_dir");
+	//}
+//
+	////fn cap_output(expr: &str) -> String {
+		//let test_subshell = Node {
+			//command: None,
+			//nd_type: NdType::Subshell { body: expr.to_string(), argv: VecDeque::new() },
+			//flags: NdFlags::VALID_OPERAND,
+			//span: Span::new(),
+			////redirs: VecDeque::new()
+		//};
+		//let (r_pipe, mut w_pipe) = RustFd::pipe().unwrap();
+		//let io = ProcIO::from(None, Some(w_pipe.mk_shared()), None);
+		//handle_subshell(test_subshell, io).unwrap();
+		//r_pipe.read().unwrap()
+	////}
+//
+	//#[test]
+	//fn test_stdout() {
+		//std::fs::write("/tmp/file1.txt", "hi there");
+		//let body = "for i in 1 2 3; do echo $i; done".to_string();
+		////let test_subshell = Node {
+			//command: None,
+			//nd_type: NdType::Subshell { body, argv: VecDeque::new() },
+			//flags: NdFlags::VALID_OPERAND,
+			//span: Span::new(),
+			//redirs: VecDeque::new()
+		//};
+		//let (r_pipe, mut w_pipe) = RustFd::pipe().unwrap();
+		//let io = ProcIO::from(None, Some(w_pipe.mk_shared()), None);
+		//handle_subshell(test_subshell, io).unwrap();
+		//let output = r_pipe.read().unwrap();
+		//std::fs::remove_file("/tmp/file1.txt");
+		//assert_eq!(output,"1\n2\n3\n".to_string())
+	//}
+//}

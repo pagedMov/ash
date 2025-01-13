@@ -33,9 +33,10 @@ pub mod signal;
 use std::{env, fs::File, io::Read, os::fd::AsRawFd, path::PathBuf, sync::mpsc::{self, Receiver, Sender}, thread};
 
 use event::{ShError, ShEvent};
-use execute::{traverse_ast, ExecDispatcher, RshWait};
-use interp::{parse::{descend, Span}, token::RshTokenizer};
-use nix::{sys::{signal::{signal, SigHandler, Signal::{SIGTTIN, SIGTTOU}}, termios::{self, LocalFlags}}, unistd::isatty};
+use execute::{traverse_ast, RshWait, RustFd};
+use interp::{parse::{descend, NdType, Span}, token::RshTokenizer};
+use libc::{S_IRGRP, S_IRUSR};
+use nix::{fcntl::OFlag, sys::{signal::{signal, SigHandler, Signal::{SIGTTIN, SIGTTOU}}, stat::Mode, termios::{self, LocalFlags}}, unistd::isatty};
 use once_cell::sync::{Lazy, OnceCell};
 use shellenv::{read_vars, write_meta, write_vars, EnvFlags};
 use termios::Termios;
@@ -78,7 +79,7 @@ async fn main() {
 		let path = PathBuf::from(format!("{}/.rsh_profile",home));
 		shellenv::source_file(path).unwrap();
 	}
-	if !args.contains(&"--no-rc".into()) {
+	if !args.contains(&"--no-rc".into()) && !args.contains(&"--subshell".into()) {
 		let home = read_vars(|vars| vars.get_evar("HOME")).unwrap().unwrap();
 		let path = PathBuf::from(format!("{}/.rshrc",home));
 		if let Err(e) = shellenv::source_file(path) {
@@ -120,18 +121,15 @@ fn main_noninteractive(args: Vec<String>) -> RshResult<RshWait> {
 		input = args[2].clone(); // Store the command string
 	} else {
 		let script_name = &args[1];
+		let path = PathBuf::from(script_name);
 		if args.len() > 2 {
 			pos_params = args[2..].to_vec();
 		}
-		let file = File::open(script_name);
-		match file {
-			Ok(mut script) => {
-				let mut buffer = vec![];
-				if let Err(e) = script.read_to_end(&mut buffer) {
-					eprintln!("Error reading file: {}\n", e);
-					return Ok(RshWait::Fail { code: 1, cmd: None, });
-				}
-				input = String::from_utf8_lossy(&buffer).to_string(); // Convert file contents to String
+		let mode = Mode::S_IRUSR | Mode::S_IRGRP;
+		let file_desc = RustFd::open(&path, OFlag::O_RDONLY, mode);
+		match file_desc {
+			Ok(script) => {
+				input = script.read().expect("Failed to read from script FD");
 			}
 			Err(e) => {
 				eprintln!("Error opening file: {}\n", e);
@@ -143,8 +141,10 @@ fn main_noninteractive(args: Vec<String>) -> RshResult<RshWait> {
 	// Code Execution Logic
 	write_meta(|m| m.set_last_input(&input))?;
 	for (index,param) in pos_params.into_iter().enumerate() {
+		dbg!(index + 1,&param);
 		let key = format!("{}",index + 1);
 		write_vars(|v| v.set_param(key, param))?;
+		dbg!(read_vars(|v| v.get_param("1")).unwrap());
 	}
 	let mut tokenizer = RshTokenizer::new(&input);
 	let mut last_result = RshWait::new();
@@ -152,8 +152,9 @@ fn main_noninteractive(args: Vec<String>) -> RshResult<RshWait> {
 		let state = descend(&mut tokenizer);
 		match state {
 			Ok(Some(parse_state)) => {
-				let (sender,receiver) = mpsc::channel();
-				let dispatch = ExecDispatcher::new(receiver);
+				if deconstruct!(NdType::Root { deck }, &parse_state.ast.nd_type, {
+					deck.is_empty()
+				}) { break Ok(RshWait::Success) }
 				let result = traverse_ast(parse_state.ast);
 				match result {
 					Ok(code) => {

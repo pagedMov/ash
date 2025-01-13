@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::mem::take;
 
+use crate::interp::expand::expand_cmd_sub;
 use crate::interp::parse::Span;
 use crate::event::ShError;
 use crate::shellenv::read_logic;
@@ -595,7 +596,7 @@ impl RshTokenizer {
 				VarDec => self.vardec_context(take(&mut wd))?,
 				SingleVarDec => self.vardec_context(take(&mut wd))?,
 				ArrDec => self.arrdec_context(take(&mut wd))?,
-				Subshell | CommandSub => self.subshell_context(take(&mut wd)),
+				Subshell | CommandSub => self.subshell_context(take(&mut wd))?,
 				FuncBody => self.func_context(take(&mut wd)),
 				Case => self.case_context(take(&mut wd))?,
 				Comment => {
@@ -752,8 +753,13 @@ impl RshTokenizer {
 				// Now we will just expand the token here
 				// This catches variable subs, command subs, brace expansions, the whole nine yards
 				let token = Tk { tk_type: TkType::Ident, wd: wd.add_flag(WdFlags::IS_ARG) };
-				let mut expanded = expand::expand_token(token, true)?;
-				self.tokens.extend(expanded.drain(..));
+				// We will expand variables later for these contexts
+				if !self.context.contains(&For) && !self.context.contains(&Case) && !self.context.contains(&Select) {
+					let mut expanded = expand::expand_token(token, true)?;
+					self.tokens.extend(expanded.drain(..));
+				} else {
+					self.tokens.push(token);
+				}
 			}
 		}
 		Ok(())
@@ -848,7 +854,7 @@ impl RshTokenizer {
 		self.push_ctx(Command);
 		Ok(())
 	}
-	fn subshell_context(&mut self, mut wd: WordDesc) {
+	fn subshell_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
 		use crate::interp::token::TkState::*;
 		self.advance();
 		if *self.ctx() == CommandSub { self.advance(); }
@@ -872,7 +878,7 @@ impl RshTokenizer {
 			}
 		}
 		wd.span = self.span;
-		let tk = match *self.ctx() {
+		let mut tk = match *self.ctx() {
 			Subshell => {
 				Tk {
 					tk_type: TkType::Subshell,
@@ -887,8 +893,12 @@ impl RshTokenizer {
 			}
 			_ => unreachable!()
 		};
+		if *self.ctx() == CommandSub {
+			tk = expand_cmd_sub(tk)?;
+		}
+		self.pop_ctx();
 		self.tokens.push(tk);
-		self.push_ctx(Arg);
+		Ok(())
 	}
 	fn func_context(&mut self, mut wd: WordDesc) {
 		use crate::interp::token::TkState::*;
@@ -1063,7 +1073,7 @@ impl RshTokenizer {
 mod tests {
 	use nix::unistd::{getuid, User};
 
-	use crate::interp::token::TkizerCtx;
+	use crate::{interp::token::TkizerCtx, shellenv::write_vars};
 
 	use super::*;
 	fn token(tk_type: TkType, text: &str, start: usize, end: usize, flags: WdFlags) -> Tk {
@@ -1184,14 +1194,14 @@ mod tests {
 
 	#[test]
 	fn tokenizer_cmd_sub() {
-		let input = "echo $(ls -l)";
+		let input = "echo $(echo hi)";
 		let mut tokenizer = RshTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
-			token(TkType::CommandSub, "ls -l", 5, 13, WdFlags::empty()),
+			token(TkType::String, "hi", 5, 15, WdFlags::empty()),
 		];
 		pretty_assertions::assert_eq!(tokens, expected);
 	}
@@ -1248,6 +1258,20 @@ print(\"hello world\")
 	}
 
 	#[test]
+	fn tokenizer_expand_params() {
+		let input = "echo $@";
+		let mut tokenizer = RshTokenizer::new(input);
+		write_vars(|v| v.set_param("1".into(), "one".into())).unwrap();
+		write_vars(|v| v.set_param("2".into(), "two".into())).unwrap();
+		write_vars(|v| v.set_param("3".into(), "three".into())).unwrap();
+		write_vars(|v| v.set_param("4".into(), "four".into())).unwrap();
+
+		let tokenizer = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+
+		insta::assert_debug_snapshot!(tokenizer)
+	}
+
+	#[test]
 	fn tokenizer_if() {
 		let input = "if true; then echo hi; elif false; then echo hello; else echo greetings; fi";
 		let mut tokenizer = RshTokenizer::new(input);
@@ -1295,6 +1319,7 @@ print(\"hello world\")
 			token(TkType::Cmdsep, "", 15, 15, WdFlags::empty()),
 			token(TkType::Do, "do", 16, 18, WdFlags::KEYWORD),
 			token(TkType::Ident, "echo", 19, 23, WdFlags::BUILTIN),
+			token(TkType::Ident, "$i", 24, 26, WdFlags::IS_ARG),
 			token(TkType::Cmdsep, "", 27, 27, WdFlags::empty()),
 			token(TkType::Done, "done", 28, 32, WdFlags::KEYWORD),
 		];
@@ -1343,7 +1368,7 @@ print(\"hello world\")
 
 	#[test]
 	fn tokenizer_final_boss() {
-		let input = "if while if true; then echo while condition; fi; do if true; then echo inside first while; fi; done; then echo wow; elif until while if true; then echo double loop; fi; do if true; then echo another double loop; fi; do echo; done; then echo again; else echo; fi";
+		let input = "if while if true; then echo while condition; fi; do if true; then echo inside first while; fi; done; then echo wow; elif until while if true; then echo double loop; fi; do if true; then echo another double loop; fi; done; do echo; done; then echo again; else echo; fi";
 		let mut tokenizer = RshTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
@@ -1410,21 +1435,23 @@ print(\"hello world\")
 			token(TkType::Cmdsep, "", 211, 211, WdFlags::empty()),
 			token(TkType::Fi, "fi", 212, 214, WdFlags::KEYWORD),
 			token(TkType::Cmdsep, "", 215, 215, WdFlags::empty()),
-			token(TkType::Do, "do", 216, 218, WdFlags::KEYWORD),
-			token(TkType::Ident, "echo", 219, 223, WdFlags::BUILTIN),
-			token(TkType::Cmdsep, "", 224, 224, WdFlags::empty()),
-			token(TkType::Done, "done", 225, 229, WdFlags::KEYWORD),
+			token(TkType::Done, "done", 216, 220, WdFlags::KEYWORD),
+			token(TkType::Cmdsep, "", 221, 221, WdFlags::empty()),
+			token(TkType::Do, "do", 222, 224, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 225, 229, WdFlags::BUILTIN),
 			token(TkType::Cmdsep, "", 230, 230, WdFlags::empty()),
-			token(TkType::Then, "then", 231, 235, WdFlags::KEYWORD),
-			token(TkType::Ident, "echo", 236, 240, WdFlags::BUILTIN),
-			token(TkType::String, "again", 241, 246, WdFlags::IS_ARG),
-			token(TkType::Cmdsep, "", 247, 247, WdFlags::empty()),
+			token(TkType::Done, "done", 231, 235, WdFlags::KEYWORD),
+			token(TkType::Cmdsep, "", 236, 236, WdFlags::empty()),
+			token(TkType::Then, "then", 237, 241, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 242, 246, WdFlags::BUILTIN),
+			token(TkType::String, "again", 247, 252, WdFlags::IS_ARG),
+			token(TkType::Cmdsep, "", 253, 253, WdFlags::empty()),
 			// else echo
-			token(TkType::Else, "else", 248, 252, WdFlags::KEYWORD),
-			token(TkType::Ident, "echo", 253, 257, WdFlags::BUILTIN),
-			token(TkType::Cmdsep, "", 258, 258, WdFlags::empty()),
+			token(TkType::Else, "else", 254, 258, WdFlags::KEYWORD),
+			token(TkType::Ident, "echo", 259, 263, WdFlags::BUILTIN),
+			token(TkType::Cmdsep, "", 264, 264, WdFlags::empty()),
 			// fi
-			token(TkType::Fi, "fi", 259, 261, WdFlags::KEYWORD),
+			token(TkType::Fi, "fi", 265, 267, WdFlags::KEYWORD),
 			];
 		pretty_assertions::assert_eq!(tokens, expected);
 	}

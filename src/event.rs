@@ -1,4 +1,4 @@
-use std::{ffi::c_int, io, panic::Location, sync::mpsc::{self, Receiver, Sender}};
+use std::{ffi::c_int, fmt::Display, io, panic::Location, sync::mpsc::{self, Receiver, Sender}};
 use libc::{getpid, tcgetpgrp};
 use signal_hook::iterator::Signals;
 
@@ -59,6 +59,31 @@ impl ShError {
 			ShError::ParsingError(..) => false,
 			ShError::InvalidSyntax(..) => false,
 			ShError::InternalError(..) => false,
+		}
+	}
+}
+
+impl Display for ShError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			ShError::CommandNotFound(cmd, span) => {
+				write!(f, "{}", cmd)
+			}
+			ShError::InvalidSyntax(msg, span) => {
+				write!(f, "{}", msg)
+			}
+			ShError::ParsingError(msg, span) => {
+				write!(f, "{}", msg)
+			}
+			ShError::ExecFailed(cmd, code, span) => {
+				write!(f, "{}", cmd)
+			}
+			ShError::IoError(msg, code, path) => {
+				write!(f, "{}", msg)
+			}
+			ShError::InternalError(msg) => {
+				write!(f, "{}", msg)
+			}
 		}
 	}
 }
