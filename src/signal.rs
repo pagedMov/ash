@@ -21,6 +21,7 @@ extern "C" fn handle_sighup(_: libc::c_int) {
 
 extern "C" fn handle_sigtstp(_: libc::c_int) {
 	let fg_pgrp = shellenv::term_controller();
+	shellenv::notify_job(fg_pgrp, shellenv::JobState::Stopped).unwrap();
 	let _ = killpg(fg_pgrp, Signal::SIGTSTP);
 }
 
@@ -72,14 +73,15 @@ fn handle_child_stop(pid: Pid, signal: Signal) -> RshResult<()> {
 			}
 		}
 	})?;
+	shellenv::notify_job(pgid, shellenv::JobState::Stopped)?;
 	shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal
+	killpg(pid, Signal::SIGCONT).unwrap();
 	Ok(())
 }
 
 fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
 	let job = read_jobs(|j| j.get_by_pid(pid).cloned())?;
 	if job.is_none() {
-		shellenv::notify_job_done(pid)?;
 		shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
 		return Ok(())
 	}
@@ -90,17 +92,19 @@ fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
 		}
 	})?;
 	if read_jobs(|j| j.is_finished(pgid))? {
-		shellenv::notify_job_done(pgid)?;
+		shellenv::notify_job(pgid, shellenv::JobState::Done)?;
 		if read_jobs(|j| j.get_by_pgid(pgid).is_some())? {
-			shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
-		} else {
-			let job = read_jobs(|j| j.get_by_pgid(pgid).cloned().unwrap())?;
-			if job.id() == 0 {
-				return Ok(())
+			if read_jobs(|j| j.read_job(0).cloned())?.is_some_and(|job| *job.pgid() == pgid) {
+				shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
+			} else {
+				let job = read_jobs(|j| j.get_by_pgid(pgid).cloned().unwrap())?;
+				if job.id() == 0 {
+					return Ok(())
+				}
+				println!();
+				let job_order = read_jobs(|j| j.job_order().to_vec())?;
+				println!("{}",job.display(&job_order,JobFlags::PIDS))
 			}
-			println!();
-			let job_order = read_jobs(|j| j.job_order().to_vec())?;
-			println!("{}",job.display(&job_order,JobFlags::PIDS))
 		}
 	} else if read_jobs(|j| j.get_by_pgid(pgid).is_none())? {
 		shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
@@ -115,5 +119,6 @@ fn handle_child_continue(pid: Pid) -> RshResult<()> {
 			job.cont().unwrap();
 		}
 	})?;
+	shellenv::notify_job(pgid, shellenv::JobState::Running);
 	Ok(())
 }

@@ -1,4 +1,4 @@
-use std::{borrow::BorrowMut, collections::BTreeMap, env, ffi::{CString, OsStr}, fmt::{self, Debug, Display}, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, str::FromStr, sync::{Arc, Condvar, LazyLock, Mutex}};
+use std::{borrow::BorrowMut, collections::BTreeMap, env, ffi::{CString, OsStr}, fmt::{self, Debug, Display}, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, panic::Location, path::PathBuf, str::FromStr, sync::{Arc, Condvar, LazyLock, Mutex}};
 use std::collections::HashMap;
 
 use bitflags::bitflags;
@@ -95,6 +95,14 @@ bitflags! {
 		const STOPPED   = 0b00010000;
 		const INIT      = 0b00100000;
 	}
+}
+
+#[derive(Debug)]
+pub enum JobState {
+	Running,
+	Stopped,
+	Signaled,
+	Done
 }
 
 #[derive(Debug, Clone)]
@@ -230,7 +238,7 @@ pub struct Job {
 	pgid: Pid,
 	statuses: Vec<RshWait>,
 	saved_statuses: Vec<RshWait>,
-	finished: Arc<(Mutex<bool>, Condvar)>
+	job_state: Arc<(Mutex<JobState>, Condvar)>
 }
 
 impl Job {
@@ -243,29 +251,14 @@ impl Job {
 			commands,
 			statuses: vec![RshWait::Running;num_pids],
 			saved_statuses: vec![],
-			finished: Arc::new((Mutex::new(false), Condvar::new()))
+			job_state: Arc::new((Mutex::new(JobState::Running), Condvar::new()))
 		}
 	}
 
-	pub fn get_status_handle(&self) -> Arc<(Mutex<bool>,Condvar)> {
-		Arc::clone(&self.finished)
+	pub fn get_status_handle(&self) -> Arc<(Mutex<JobState>,Condvar)> {
+		Arc::clone(&self.job_state)
 	}
 
-	// These two methods allow other threads to stop and wait for specific jobs to finish
-	pub fn await_completion(&self) {
-		let (lock, cvar) = &*self.finished;
-		let mut is_finished = lock.lock().unwrap();
-		while !*is_finished {
-			is_finished = cvar.wait(is_finished).unwrap();
-		}
-	}
-	// This method notifies the job that it has completed
-	pub fn notify_completion(&self) {
-		let (lock, cvar) = &*self.finished;
-		let mut is_complete = lock.lock().unwrap();
-		*is_complete = true;
-		cvar.notify_all();
-	}
 	pub fn is_running(&self) -> bool {
 		self.statuses.iter().any(|stat| matches!(stat,RshWait::Running))
 	}
@@ -482,6 +475,9 @@ impl JobTable {
 		}
 		num_running
 	}
+	pub fn get_fg_pgid(&self) -> Option<Pid> {
+		self.jobs.get(&0).map(|job| *job.pgid())
+	}
 	pub fn new_fg(&mut self, job: Job) {
 		self.jobs.insert(0,job);
 	}
@@ -687,7 +683,6 @@ impl VarTable {
 		self.vars.remove(key);
 	}
 	pub fn get_var(&self, key: &str) -> Option<RVal> {
-		dbg!("getting var");
 		if let Some(var) = self.vars.get(key).cloned() {
 			Some(var)
 		} else if let Some(var) = self.params.get(key).cloned() {
@@ -850,9 +845,11 @@ impl Default for TermCtl {
 pub fn await_job(pgid: Pid) -> RshResult<()> {
 	let status_handle = read_jobs(|j| j.get_by_pgid(pgid).map(|job| job.get_status_handle()))?.unwrap();
 	let (lock,cvar) = &*status_handle;
-	let mut is_complete = lock.lock().unwrap();
-	while !*is_complete {
-		is_complete = cvar.wait(is_complete).unwrap();
+	let mut job_state = lock.lock().unwrap();
+	while !matches!(*job_state, JobState::Stopped | JobState::Done) {
+		println!("initial job_state in await_job: {:?}", job_state);
+		job_state = cvar.wait(job_state).unwrap();
+		println!("new job_state in await_job: {:?}", job_state);
 	}
 	Ok(())
 }
@@ -865,15 +862,18 @@ pub fn await_fg_job() -> RshResult<RshWait> {
 	}
 	let status_handle = status_handle.unwrap();
 	let (lock,cvar) = &*status_handle;
-	let mut is_complete = lock.lock().unwrap();
-	while !*is_complete {
-		is_complete = cvar.wait(is_complete).unwrap();
+	let mut job_state = lock.lock().unwrap();
+	while !matches!(*job_state, JobState::Stopped | JobState::Done) {
+		println!("initial job_state in await_job: {:?}", job_state);
+		job_state = cvar.wait(job_state).unwrap();
+		println!("new job_state in await_job: {:?}", job_state);
 	}
 	last_status = read_jobs(|j| j.read_job(0).unwrap().get_proc_statuses().first().unwrap().clone())?;
 	Ok(last_status)
 }
 
-pub fn notify_job_done(pgid: Pid) -> RshResult<()> {
+#[track_caller]
+pub fn notify_job(pgid: Pid, state: JobState) -> RshResult<()> {
 	let status_handle = read_jobs(|j| j.get_by_pgid(pgid).map(|job| job.get_status_handle()))?;
 	if status_handle.is_none() {
 		return Ok(())
@@ -881,9 +881,13 @@ pub fn notify_job_done(pgid: Pid) -> RshResult<()> {
 	let status_handle = status_handle.unwrap();
 
 	let (lock, cvar) = &*status_handle;
-	let mut is_complete = lock.lock().unwrap();
-	*is_complete = true;
+	let mut job_state = lock.lock().unwrap();
+	*job_state = state;
+	println!("new job_state in notify_job: {:?}", job_state);
+	std::mem::drop(job_state);
+	println!("notifying thread!");
 	cvar.notify_all();
+	println!("notified thread!");
 	Ok(())
 }
 

@@ -705,13 +705,13 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 		write_jobs(|j| j.new_fg(job))?;
 		write_jobs(|j| j.complete(0))?;
 		builtin_result?;
-		shellenv::notify_job_done(pgid)?;
+		shellenv::notify_job(pgid, shellenv::JobState::Done)?;
 	} else {
 		let pgid = nix::unistd::getpgrp();
 		let job = Job::new(0, vec![pgid], vec![argv.first().unwrap().text().into()], pgid);
 		write_jobs(|j| j.new_job(vec![pgid], vec![argv.first().unwrap().text().into()], pgid))?;
 		write_jobs(|j| j.complete(0))?;
-		shellenv::notify_job_done(pgid)?;
+		shellenv::notify_job(pgid, shellenv::JobState::Done)?;
 		builtin_result?;
 	}
 

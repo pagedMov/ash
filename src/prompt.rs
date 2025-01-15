@@ -67,7 +67,6 @@ fn init_prompt() -> RshResult<Editor<RshHelper, DefaultHistory>> {
 }
 
 pub fn run() -> RshResult<String> {
-	shellenv::await_fg_job()?;
 	write_meta(|m| m.enter_prompt())?;
 
 	let mut rl = init_prompt()?;
