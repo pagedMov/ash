@@ -1,6 +1,6 @@
-use crate::{interp::token::REGEX, shellenv::{read_logic, read_meta, read_vars, write_logic, write_vars, RVal }, RshResult};
+use crate::{event::ShError, interp::token::REGEX, shellenv::{read_logic, read_meta, read_vars, write_logic, write_vars, RVal }, RshResult};
 use nix::unistd::dup2;
-use std::{collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::Path};
+use std::{collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}};
 
 use super::{parse::{NdType, Node}, token::Tk};
 
@@ -40,7 +40,7 @@ impl<T> VecDequeExtension<T> for VecDeque<T> {
 	}
 
 	fn map_rotate<F>(&mut self, mut transform: F)
-	where F: FnMut(T) -> T,
+		where F: FnMut(T) -> T,
 	{
 		let mut buffer = VecDeque::new();
 		while let Some(element) = self.pop_front() {
@@ -210,7 +210,7 @@ pub fn parse_vec(input: &str) -> Result<Vec<RVal>,String> {
 	}
 }
 
-fn vec_by_type(str: &str) -> Option<Vec<RVal>> {
+pub fn vec_by_type(str: &str) -> Option<Vec<RVal>> {
 	str.split(',')
 		.map(str::trim)
 		.map(RVal::parse)
@@ -301,6 +301,194 @@ pub fn flatten_pipeline(left: Node, right: Node, mut flattened: VecDeque<Node>) 
 		flattened.push_front(left);
 	}
 	flattened
+}
+
+/// Handles octal escape sequences.
+pub fn escseq_octal_escape(chars: &mut VecDeque<char>, first_digit: char) -> RshResult<char> {
+	let mut octal_digits = String::new();
+	octal_digits.push(first_digit); // Add the first digit
+
+	for _ in 0..2 {
+		if let Some(next_c) = chars.front() {
+			if next_c.is_digit(8) {
+				octal_digits.push(chars.pop_front().unwrap());
+			} else {
+				break;
+			}
+		}
+	}
+
+	if let Ok(value) = u8::from_str_radix(&octal_digits, 8) {
+		Ok(value as char)
+	} else {
+		// Invalid sequence, treat as literal
+		Err(ShError::from_internal(&format!("Invalid octal sequence: \\{}", octal_digits)))
+	}
+}
+
+/// Handles ANSI escape sequences.
+pub fn escseq_ansi_escape(chars: &mut VecDeque<char>, result: &mut String) {
+	result.push('\x1B');
+	if chars.front().is_some_and(|&ch| ch == '[') {
+		result.push(chars.pop_front().unwrap()); // Consume '['
+		while let Some(ch) = chars.pop_front() {
+			result.push(ch);
+			if ch == 'm' {
+				break; // End of ANSI sequence
+			}
+		}
+	}
+}
+
+/// Handles non-printing sequences.
+pub fn escseq_non_printing_sequence(chars: &mut VecDeque<char>, result: &mut String) {
+	while let Some(ch) = chars.pop_front() {
+		if ch == ']' {
+			break; // Stop at the closing \]
+		}
+		result.push(ch); // Add non-printing content
+	}
+}
+
+/// Handles the current working directory.
+pub fn escseq_working_directory() -> RshResult<String> {
+	let mut cwd = read_vars(|vars| vars.get_evar("PWD").map_or(String::new(), |pwd| pwd.to_string()))?;
+	let home = read_vars(|vars| vars.get_evar("HOME").map_or("".into(), |home| home))?;
+	if cwd.starts_with(&home) {
+		cwd = cwd.replacen(&home, "~", 1); // Use `replacen` to replace only the first occurrence
+	}
+	let trunc_len = read_meta(|meta| meta.get_shopt("trunc_prompt_path").unwrap_or(0))?;
+	if trunc_len > 0 {
+		let mut path = PathBuf::from(cwd);
+		let mut cwd_components: Vec<_> = path.components().collect();
+		if cwd_components.len() > trunc_len {
+			cwd_components = cwd_components.split_off(cwd_components.len() - trunc_len);
+			path = cwd_components.iter().collect(); // Rebuild the PathBuf
+		}
+		cwd = path.to_string_lossy().to_string();
+	}
+	Ok(cwd)
+}
+
+/// Handles the basename of the current working directory.
+pub fn escseq_basename_working_directory() -> RshResult<String> {
+	let cwd = PathBuf::from(read_vars(|vars| vars.get_evar("PWD").map_or("".to_string(), |pwd| pwd.to_string()))?);
+	let mut cwd = cwd.components().last().map(|comp| comp.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
+	let home = read_vars(|vars| vars.get_evar("HOME").map_or("".into(), |home| home))?;
+	if cwd.starts_with(&home) {
+		cwd = cwd.replacen(&home, "~", 1); // Replace HOME with '~'
+	}
+	Ok(cwd)
+}
+
+/// Handles the full hostname.
+pub fn escseq_full_hostname() -> RshResult<String> {
+	let hostname: String = read_vars(|vars| vars.get_evar("HOSTNAME").map_or("unknown host".into(), |host| host))?;
+	Ok(hostname)
+}
+
+/// Handles the short hostname.
+pub fn escseq_short_hostname() -> RshResult<String> {
+	let hostname = read_vars(|vars| vars.get_evar("HOSTNAME").map_or("unknown host".into(), |host| host))?;
+	if let Some((hostname, _)) = hostname.split_once('.') {
+		Ok(hostname.to_string())
+	} else {
+		Ok(hostname) // No '.' found, use the full hostname
+	}
+}
+
+/// Handles the shell name.
+pub fn escseq_shell_name() -> RshResult<String> {
+	let sh_name = read_vars(|vars| vars.get_evar("SHELL").map_or("rsh".into(), |sh| sh))?;
+	Ok(sh_name)
+}
+
+/// Handles the username.
+pub fn escseq_username() -> RshResult<String> {
+	let user = read_vars(|vars| vars.get_evar("USER").map_or("unknown".into(), |user| user))?;
+	Ok(user)
+}
+
+/// Handles the prompt symbol based on the user ID.
+pub fn escseq_prompt_symbol() -> RshResult<char> {
+	let uid = read_vars(|vars| vars.get_evar("UID").map_or("0".into(), |uid| uid))?;
+	match uid.as_str() {
+		"0" => Ok('#'),
+		_ => Ok('$'),
+	}
+}
+
+pub fn process_ansi_escapes(input: &str) -> String {
+	let mut result = String::new();
+	let mut chars = input.chars().collect::<VecDeque<char>>();
+
+	while let Some(c) = chars.pop_front() {
+		if c == '\\' {
+			if let Some(next) = chars.pop_front() {
+				match next {
+					'a' => result.push('\x07'), // Bell
+					'b' => result.push('\x08'), // Backspace
+					't' => result.push('\t'),   // Tab
+					'n' => result.push('\n'),   // Newline
+					'r' => result.push('\r'),   // Carriage return
+					'e' | 'E' => result.push('\x1B'), // Escape (\033 in octal)
+					'0' => {
+						// Octal escape: \0 followed by up to 3 octal digits
+						let mut octal_digits = String::new();
+						while octal_digits.len() < 3 && chars.front().is_some_and(|ch| ch.is_digit(8)) {
+							octal_digits.push(chars.pop_front().unwrap());
+						}
+						if let Ok(value) = u8::from_str_radix(&octal_digits, 8) {
+							let character = value as char;
+							result.push(character);
+							// Check for ANSI sequence if the result is ESC (\033 or \x1B)
+							if character == '\x1B' && chars.front().is_some_and(|&ch| ch == '[') {
+								result.push(chars.pop_front().unwrap()); // Consume '['
+								while let Some(ch) = chars.pop_front() {
+									result.push(ch);
+									if ch == 'm' {
+										break; // Stop at the end of the ANSI sequence
+									}
+								}
+							}
+						}
+					}
+					_ => {
+						// Unknown escape, treat literally
+						result.push('\\');
+						result.push(next);
+					}
+				}
+			} else {
+				// Trailing backslash, treat literally
+				result.push('\\');
+			}
+		} else if c == '\x1B' {
+			// Handle raw ESC characters (e.g., \033 in octal or actual ESC char)
+			result.push(c);
+			if chars.front().is_some_and(|&ch| ch == '[') {
+				result.push(chars.pop_front().unwrap()); // Consume '['
+				while let Some(ch) = chars.pop_front() {
+					result.push(ch);
+					if ch == 'm' {
+						break; // Stop at the end of the ANSI sequence
+					}
+				}
+			}
+		} else {
+			result.push(c);
+		}
+	}
+
+	result
+}
+
+pub fn extract_deck_from_root(node: &Node) -> RshResult<VecDeque<Node>> {
+	if let NdType::Root { deck } = &node.nd_type {
+		Ok(deck.clone())
+	} else {
+		Err(ShError::from_internal(format!("Called extract_deck_from_root with non-root node: {:?}", node.nd_type).as_str()))
+	}
 }
 
 pub fn is_brace_expansion(text: &str) -> bool {

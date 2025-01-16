@@ -1169,7 +1169,7 @@ pub fn echo(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 	let argv = argv.into_iter().map(|tk| {
 		let text = tk.text();
 		if flags.contains(EchoFlags::USE_ESCAPE) {
-			CString::new(expand::process_ansi_escapes(text)).unwrap()
+			CString::new(helper::process_ansi_escapes(text)).unwrap()
 		} else {
 			CString::new(tk.text()).unwrap()
 		}

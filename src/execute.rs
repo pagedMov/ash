@@ -985,10 +985,11 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 }
 
 fn handle_command(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
-	let argv = node.get_argv()?;
-	let argv = argv.iter().map(|arg| CString::new(arg.text()).unwrap()).collect::<Vec<CString>>();
+	// Extract argv and redirs from the node
+	let argv = node.get_argv()?.iter().map(|arg| CString::new(arg.text()).unwrap()).collect::<Vec<CString>>();
 	let redirs = node.get_redirs()?;
 
+	// Handle autocd if applicable
 	if let NdType::Command { ref argv } = node.nd_type {
 		if helper::handle_autocd_check(&node, &argv.clone().to_vec())? {
 			let path_cand = argv.front().unwrap();
@@ -997,46 +998,48 @@ fn handle_command(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 		}
 	}
 
+	// Backup and route I/O
 	io.backup_fildescs()?;
 	io.route_io()?;
 
+	// Prepare the command and environment
 	let (command, envp) = prepare_execvpe(&argv)?;
 
+	// Handle redirections and execute the command if in a pipe
 	if node.flags.contains(NdFlags::IN_PIPE) {
-		let mut open_fds = VecDeque::new();
-		if !redirs.is_empty() {
-			open_fds.extend(handle_redirs(redirs.into())?);
-		}
 		execvpe(&command, &argv, &envp).unwrap();
 		unreachable!();
 	}
 
+	// Fork the process
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
-			let mut open_fds = VecDeque::new();
-			if !redirs.is_empty() {
-				open_fds.extend(handle_redirs(redirs.into())?);
-			}
 			execvpe(&command, &argv, &envp).unwrap();
 			unreachable!();
 		}
 		Ok(ForkResult::Parent { child }) => {
-			setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
-			if node.flags.contains(NdFlags::BACKGROUND) {
-				let job_id = write_jobs(|j| j.new_job(vec![child], vec![command.to_str().unwrap().to_string()], child))?;
-			} else {
-				if !node.flags.contains(NdFlags::FUNCTION) {
-					shellenv::attach_tty(child)?;
-				}
-				let job = Job::new(0, vec![child], vec![command.to_str().unwrap().to_string()], child);
-				write_jobs(|j| j.new_fg(job))?;
-			}
+			handle_parent_process(child, command, &node)?;
 		}
 		Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_command".into(), 1, node.span())),
 	}
 
+	// Restore I/O descriptors
 	io.restore_fildescs()?;
 	Ok(RshWait::Success)
+}
+
+fn handle_parent_process(child: Pid, command: CString, node: &Node) -> RshResult<()> {
+	setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
+	if node.flags.contains(NdFlags::BACKGROUND) {
+		let job_id = write_jobs(|j| j.new_job(vec![child], vec![command.to_str().unwrap().to_string()], child))?;
+	} else {
+		if !node.flags.contains(NdFlags::FUNCTION) {
+			shellenv::attach_tty(child)?;
+		}
+		let job = Job::new(0, vec![child], vec![command.to_str().unwrap().to_string()], child);
+		write_jobs(|j| j.new_fg(job))?;
+	}
+	Ok(())
 }
 
 fn handle_redirs(mut redirs: VecDeque<Node>) -> RshResult<VecDeque<RustFd>> {

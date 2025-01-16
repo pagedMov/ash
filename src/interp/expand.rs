@@ -2,20 +2,16 @@ use chrono::Local;
 use glob::glob;
 use regex::Regex;
 use std::collections::VecDeque;
-use std::io::{BufReader, Read};
-use std::mem::take;
-use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::PathBuf;
 use crate::event::ShError;
 use crate::execute::{self, ProcIO, RustFd};
 use crate::interp::parse::NdFlags;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
 use crate::interp::helper::{self,StrExtension, VecDequeExtension};
-use crate::shellenv::{read_logic, read_meta, read_vars, write_meta, EnvFlags, SavedEnv};
+use crate::shellenv::{read_logic, read_vars};
 use crate::RshResult;
 
-use super::parse::{self, NdType, Node, ParseState, Span};
-use super::token::RshTokenizer;
+use super::parse::{NdType, Node, Span};
 
 pub fn check_globs(string: String) -> bool {
 	string.has_unescaped("?") ||
@@ -120,27 +116,36 @@ pub fn expand_time(fmt: &str) -> String {
 }
 
 pub fn expand_prompt() -> RshResult<String> {
-	// TODO:
-	//\j - number of managed jobs
-	//\l - shell's terminal device name
-	//\v - rsh version
-	//\V - rsh release; version + patch level
-	//\! - history number of this command
-	//\# - command number of this command
+	// Determine the default color based on the user ID
 	let default_color = if read_vars(|vars| vars.get_evar("UID").is_some_and(|uid| uid == "0"))? {
 		"31" // Red if uid is 0, aka root user
 	} else {
 		"32" // Green if anyone else
 	};
+
+	// Get the current working directory
 	let cwd: String = read_vars(|vars| vars.get_evar("PWD").map_or("".into(), |cwd| cwd).to_string())?;
+
+	// Determine the default path color
 	let default_path = if cwd.as_str() == "/" {
 		"\\e[36m\\w\\e[0m".to_string()
 	} else {
-		format!("\\e[1;{}m\\w\\e[1;36m/\\e[0m",default_color)
+		format!("\\e[1;{}m\\w\\e[1;36m/\\e[0m", default_color)
 	};
-	let ps1: String = read_vars(|vars| vars.get_evar("PS1").map_or(format!("\\n{}\\n\\e[{}mdebug \\$\\e[36m>\\e[0m ",default_path,default_color), |ps1| ps1.clone()))?;
+
+	// Get the PS1 environment variable or use a default prompt
+	let ps1 = read_vars(|vars| vars.get_evar("PS1"))?;
+	let use_default = ps1.clone().is_none_or(|ps1| ps1.trim().is_empty());
+	let ps1 = if use_default {
+		format!("\\n{}\\n\\e[{}mdebug \\$\\e[36m>\\e[0m ", default_path, default_color)
+	} else {
+		ps1.unwrap()
+	};
+
+	// Process the PS1 string to expand escape sequences
 	let mut result = String::new();
 	let mut chars = ps1.chars().collect::<VecDeque<char>>();
+
 	while let Some(c) = chars.pop_front() {
 		match c {
 			'\\' => {
@@ -158,106 +163,19 @@ pub fn expand_prompt() -> RshResult<String> {
 						'A' => result.push_str(expand_time("%H:%M").as_str()),
 						'@' => result.push_str(expand_time("%I:%M %p").as_str()),
 						_ if esc_c.is_digit(8) => {
-							let mut octal_digits = String::new();
-							octal_digits.push(esc_c); // Add the first digit
-
-							for _ in 0..2 {
-								if let Some(next_c) = chars.front() {
-									if next_c.is_digit(8) {
-										octal_digits.push(chars.pop_front().unwrap());
-									} else {
-										break;
-									}
-								}
-							}
-
-							if let Ok(value) = u8::from_str_radix(&octal_digits, 8) {
-								result.push(value as char);
-							} else {
-								// Invalid sequence, treat as literal
-								result.push_str(&format!("\\{}", octal_digits));
-							}
+							let octal_char = helper::escseq_octal_escape(&mut chars, esc_c)?;
+							result.push(octal_char);
 						}
-						'e' => {
-							result.push('\x1B');
-							if chars.front().is_some_and(|&ch| ch == '[') {
-								result.push(chars.pop_front().unwrap()); // Consume '['
-								while let Some(ch) = chars.pop_front() {
-									result.push(ch);
-									if ch == 'm' {
-										break; // End of ANSI sequence
-									}
-								}
-							}
-						}
-						'[' => {
-							// Handle \[ (start of non-printing sequence)
-							while let Some(ch) = chars.pop_front() {
-								if ch == ']' {
-									break; // Stop at the closing \]
-								}
-								result.push(ch); // Add non-printing content
-							}
-						}
-						']' => {
-							// Handle \] (end of non-printing sequence)
-							// Do nothing, it's just a marker
-						}
-						'w' => {
-							let mut cwd = read_vars(|vars| vars.get_evar("PWD").map_or(String::new(), |pwd| pwd.to_string()))?;
-							let home = read_vars(|vars| vars.get_evar("HOME").map_or("".into(), |home| home))?;
-							if cwd.starts_with(&home) {
-								cwd = cwd.replacen(&home, "~", 1); // Use `replacen` to replace only the first occurrence
-							}
-							// TODO: unwrap is probably safe here since this option is initialized with the environment but it might still cause issues later if this is left unhandled
-							let trunc_len = read_meta(|meta| meta.get_shopt("trunc_prompt_path").unwrap_or(0))?;
-							if trunc_len > 0 {
-								let mut path = PathBuf::from(cwd);
-								let mut cwd_components: Vec<_> = path.components().collect();
-								if cwd_components.len() > trunc_len {
-									cwd_components = cwd_components.split_off(cwd_components.len() - trunc_len);
-									path = cwd_components.iter().collect(); // Rebuild the PathBuf
-								}
-								cwd = path.to_string_lossy().to_string();
-							}
-							result.push_str(&cwd);
-						}
-						'W' => {
-							let cwd = PathBuf::from(read_vars(|vars| vars.get_evar("PWD").map_or("".to_string(), |pwd| pwd.to_string()))?);
-							let mut cwd = cwd.components().last().map(|comp| comp.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
-							let home = read_vars(|vars| vars.get_evar("HOME").map_or("".into(), |home| home))?;
-							if cwd.starts_with(&home) {
-								cwd = cwd.replacen(&home, "~", 1); // Replace HOME with '~'
-							}
-							result.push_str(&cwd);
-						}
-						'H' => {
-							let hostname: String = read_vars(|vars| vars.get_evar("HOSTNAME").map_or("unknown host".into(), |host| host))?;
-							result.push_str(&hostname);
-						}
-						'h' => {
-							let hostname = read_vars(|vars| vars.get_evar("HOSTNAME").map_or("unknown host".into(), |host| host))?;
-							if let Some((hostname, _)) = hostname.split_once('.') {
-								result.push_str(hostname);
-							} else {
-								result.push_str(&hostname); // No '.' found, use the full hostname
-							}
-						}
-						's' => {
-							let sh_name = read_vars(|vars| vars.get_evar("SHELL").map_or("rsh".into(), |sh| sh))?;
-							result.push_str(&sh_name);
-						}
-						'u' => {
-							let user = read_vars(|vars| vars.get_evar("USER").map_or("unknown".into(), |user| user))?;
-							result.push_str(&user);
-						}
-						'$' => {
-							let uid = read_vars(|vars| vars.get_evar("UID").map_or("0".into(), |uid| uid))?;
-							match uid.as_str() {
-								"0" => result.push('#'),
-								_ => result.push('$'),
-							}
-						}
+						'e' => helper::escseq_ansi_escape(&mut chars, &mut result),
+						'[' => helper::escseq_non_printing_sequence(&mut chars, &mut result),
+						']' => (), // Do nothing, it's just a marker
+						'w' => result.push_str(&helper::escseq_working_directory()?),
+						'W' => result.push_str(&helper::escseq_basename_working_directory()?),
+						'H' => result.push_str(&helper::escseq_full_hostname()?),
+						'h' => result.push_str(&helper::escseq_short_hostname()?),
+						's' => result.push_str(&helper::escseq_shell_name()?),
+						'u' => result.push_str(&helper::escseq_username()?),
+						'$' => result.push(helper::escseq_prompt_symbol()?),
 						_ => {
 							result.push('\\');
 							result.push(esc_c);
@@ -273,70 +191,6 @@ pub fn expand_prompt() -> RshResult<String> {
 	Ok(result)
 }
 
-pub fn process_ansi_escapes(input: &str) -> String {
-	let mut result = String::new();
-	let mut chars = input.chars().collect::<VecDeque<char>>();
-
-	while let Some(c) = chars.pop_front() {
-		if c == '\\' {
-			if let Some(next) = chars.pop_front() {
-				match next {
-					'a' => result.push('\x07'), // Bell
-					'b' => result.push('\x08'), // Backspace
-					't' => result.push('\t'),   // Tab
-					'n' => result.push('\n'),   // Newline
-					'r' => result.push('\r'),   // Carriage return
-					'e' | 'E' => result.push('\x1B'), // Escape (\033 in octal)
-					'0' => {
-						// Octal escape: \0 followed by up to 3 octal digits
-						let mut octal_digits = String::new();
-						while octal_digits.len() < 3 && chars.front().is_some_and(|ch| ch.is_digit(8)) {
-							octal_digits.push(chars.pop_front().unwrap());
-						}
-						if let Ok(value) = u8::from_str_radix(&octal_digits, 8) {
-							let character = value as char;
-							result.push(character);
-							// Check for ANSI sequence if the result is ESC (\033 or \x1B)
-							if character == '\x1B' && chars.front().is_some_and(|&ch| ch == '[') {
-								result.push(chars.pop_front().unwrap()); // Consume '['
-								while let Some(ch) = chars.pop_front() {
-									result.push(ch);
-									if ch == 'm' {
-										break; // Stop at the end of the ANSI sequence
-									}
-								}
-							}
-						}
-					}
-					_ => {
-						// Unknown escape, treat literally
-						result.push('\\');
-						result.push(next);
-					}
-				}
-			} else {
-				// Trailing backslash, treat literally
-				result.push('\\');
-			}
-		} else if c == '\x1B' {
-			// Handle raw ESC characters (e.g., \033 in octal or actual ESC char)
-			result.push(c);
-			if chars.front().is_some_and(|&ch| ch == '[') {
-				result.push(chars.pop_front().unwrap()); // Consume '['
-				while let Some(ch) = chars.pop_front() {
-					result.push(ch);
-					if ch == 'm' {
-						break; // Stop at the end of the ANSI sequence
-					}
-				}
-			}
-		} else {
-			result.push(c);
-		}
-	}
-
-	result
-}
 
 pub fn expand_alias(alias: &str) -> RshResult<String> {
 	if let Some(alias_content) = read_logic(|log| log.get_alias(alias))? {
@@ -468,24 +322,24 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 }
 
 pub fn split_tokens(tk_buffer: &mut VecDeque<Tk>) {
-    let mut new_buffer = VecDeque::new();
+	let mut new_buffer = VecDeque::new();
 
-    while let Some(tk) = tk_buffer.pop_front() {
-			let split = tk.text().split_outside_quotes();
-			for word in split {
-				new_buffer.push_back(Tk {
-					tk_type: TkType::String,
-					wd: WordDesc {
-						text: word,
-						span: tk.span(),
-						flags: tk.flags(),
-					}
-				});
-			}
-    }
+	while let Some(tk) = tk_buffer.pop_front() {
+		let split = tk.text().split_outside_quotes();
+		for word in split {
+			new_buffer.push_back(Tk {
+				tk_type: TkType::String,
+				wd: WordDesc {
+					text: word,
+					span: tk.span(),
+					flags: tk.flags(),
+				}
+			});
+		}
+	}
 
-    // Replace the original buffer with the new one
-    *tk_buffer = new_buffer;
+	// Replace the original buffer with the new one
+	*tk_buffer = new_buffer;
 }
 
 pub fn clean_escape_chars(token_buffer: &mut VecDeque<Tk>) {
@@ -550,9 +404,9 @@ pub fn expand_braces(word: String, mut results: VecDeque<String>) -> VecDeque<St
 					results = expand_braces(expanded_word, results); // Recurse for nested braces
 				}
 			}
-		} else {
-			// Malformed brace: No closing `}` found
-			results.push_back(word);
+	} else {
+		// Malformed brace: No closing `}` found
+		results.push_back(word);
 	}
 } else {
 	// Base case: No more braces to expand
@@ -565,15 +419,15 @@ pub fn expand_amble(amble: String) -> VecDeque<String> {
 	let mut result = VecDeque::new();
 	if amble.contains("..") && amble.len() >= 4 {
 		let num_range = amble.chars().next().is_some_and(|ch| ch.is_ascii_digit())
-				&& amble.chars().last().is_some_and(|ch| ch.is_ascii_digit());
+			&& amble.chars().last().is_some_and(|ch| ch.is_ascii_digit());
 
 		let lower_alpha_range = amble.chars().next().is_some_and(|ch| ch.is_ascii_lowercase())
-				&& amble.chars().last().is_some_and(|ch| ch.is_ascii_lowercase())
-				&& amble.chars().next() <= amble.chars().last(); // Ensure valid range
+			&& amble.chars().last().is_some_and(|ch| ch.is_ascii_lowercase())
+			&& amble.chars().next() <= amble.chars().last(); // Ensure valid range
 
 		let upper_alpha_range = amble.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
-				&& amble.chars().last().is_some_and(|ch| ch.is_ascii_uppercase())
-				&& amble.chars().next() <= amble.chars().last(); // Ensure valid range
+			&& amble.chars().last().is_some_and(|ch| ch.is_ascii_uppercase())
+			&& amble.chars().next() <= amble.chars().last(); // Ensure valid range
 
 		if lower_alpha_range || upper_alpha_range {
 			let left = amble.chars().next().unwrap();
@@ -731,168 +585,168 @@ fn expand_params(token: Tk) -> RshResult<VecDeque<Tk>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::shellenv::{write_logic, write_vars, RVal};
-		use nix::unistd::{getuid, User};
-use pretty_assertions::assert_eq;
+	use crate::shellenv::{read_meta, write_logic, write_meta, write_vars, RVal};
+	use nix::unistd::{getuid, User};
+	use pretty_assertions::assert_eq;
 
-    use super::*;
+	use super::*;
 
-    fn token(tk_type: TkType, text: &str, span: Span, flags: WdFlags) -> Tk {
-        Tk {
-            tk_type,
-            wd: WordDesc {
-                text: text.to_string(),
-                span,
-                flags,
-            },
-        }
-    }
+	fn token(tk_type: TkType, text: &str, span: Span, flags: WdFlags) -> Tk {
+		Tk {
+			tk_type,
+			wd: WordDesc {
+				text: text.to_string(),
+				span,
+				flags,
+			},
+		}
+	}
 
-    #[test]
-    fn test_expand_shebang_no_shebang() {
-        let body = "print('Hello, World!')".to_string();
-        let expanded = expand_shebang(body).unwrap();
-        assert!(expanded.starts_with("#!"));
-        assert!(expanded.contains("--subshell"));
-    }
+	#[test]
+	fn test_expand_shebang_no_shebang() {
+		let body = "print('Hello, World!')".to_string();
+		let expanded = expand_shebang(body).unwrap();
+		assert!(expanded.starts_with("#!"));
+		assert!(expanded.contains("--subshell"));
+	}
 
-    #[test]
-    fn test_expand_shebang_abbreviated() {
-        write_logic(|logic| logic.new_alias("python", "/usr/bin/python".to_string())).unwrap();
-        let body = "#!python\nprint('Hello, World!')".to_string();
-        let expanded = expand_shebang(body).unwrap();
-				let real_path = helper::which("python").unwrap_or_default();
-				let real_path = format!("#!{}",real_path);
-        assert!(expanded.starts_with(&real_path));
-    }
+	#[test]
+	fn test_expand_shebang_abbreviated() {
+		write_logic(|logic| logic.new_alias("python", "/usr/bin/python".to_string())).unwrap();
+		let body = "#!python\nprint('Hello, World!')".to_string();
+		let expanded = expand_shebang(body).unwrap();
+		let real_path = helper::which("python").unwrap_or_default();
+		let real_path = format!("#!{}",real_path);
+		assert!(expanded.starts_with(&real_path));
+	}
 
-    #[test]
-    fn test_expand_var() {
-        let input = "$USER".to_string();
-				let user = User::from_uid(getuid()).unwrap().unwrap().name;
-        let expanded = expand_var(input).unwrap();
-        assert_eq!(expanded, user.to_string());
-    }
+	#[test]
+	fn test_expand_var() {
+		let input = "$USER".to_string();
+		let user = User::from_uid(getuid()).unwrap().unwrap().name;
+		let expanded = expand_var(input).unwrap();
+		assert_eq!(expanded, user.to_string());
+	}
 
-    #[test]
-    fn test_expand_var_indexed() {
-				let array = RVal::Array(vec![RVal::parse("first").unwrap(), RVal::parse("second").unwrap()]);
-        write_vars(|vars| { vars.set_var("arr", array); }).unwrap();
-        let input = "$arr[0]".to_string();
-        let expanded = expand_var(input).unwrap();
-        assert_eq!(expanded, "first");
-    }
+	#[test]
+	fn test_expand_var_indexed() {
+		let array = RVal::Array(vec![RVal::parse("first").unwrap(), RVal::parse("second").unwrap()]);
+		write_vars(|vars| { vars.set_var("arr", array); }).unwrap();
+		let input = "$arr[0]".to_string();
+		let expanded = expand_var(input).unwrap();
+		assert_eq!(expanded, "first");
+	}
 
-    #[test]
-    fn test_expand_token() {
-        let token = token(TkType::String, "~/projects", Span::new(), WdFlags::empty());
-        let expanded = expand_token(token, true).unwrap();
-				let user = User::from_uid(getuid()).unwrap().unwrap().name;
-        assert_eq!(expanded.len(), 1);
-        assert_eq!(expanded[0].text(), format!("/home/{}/projects",user).as_str());
-    }
+	#[test]
+	fn test_expand_token() {
+		let token = token(TkType::String, "~/projects", Span::new(), WdFlags::empty());
+		let expanded = expand_token(token, true).unwrap();
+		let user = User::from_uid(getuid()).unwrap().unwrap().name;
+		assert_eq!(expanded.len(), 1);
+		assert_eq!(expanded[0].text(), format!("/home/{}/projects",user).as_str());
+	}
 
-    #[test]
-    fn test_expand_braces() {
-        let input1 = "{1,2,3}".to_string();
-        let input2 = "{1..5}".to_string();
-        let input3 = "{a..c}{1..5}".to_string();
-        let expanded1 = expand_braces(input1, VecDeque::new());
-        let expanded2 = expand_braces(input2, VecDeque::new());
-        let expanded3 = expand_braces(input3, VecDeque::new());
-        assert_eq!(expanded1, VecDeque::from(vec!["1".into(), "2".into(), "3".into()]));
-        assert_eq!(expanded2, VecDeque::from(vec!["1".into(), "2".into(), "3".into(), "4".into(), "5".into()]));
-        assert_eq!(expanded3, VecDeque::from(vec!["a1".into(), "a2".into(), "a3".into(), "a4".into(), "a5".into(), "b1".into(), "b2".into(), "b3".into(), "b4".into(), "b5".into(), "c1".into(), "c2".into(), "c3".into(), "c4".into(), "c5".into(),]));
-    }
+	#[test]
+	fn test_expand_braces() {
+		let input1 = "{1,2,3}".to_string();
+		let input2 = "{1..5}".to_string();
+		let input3 = "{a..c}{1..5}".to_string();
+		let expanded1 = expand_braces(input1, VecDeque::new());
+		let expanded2 = expand_braces(input2, VecDeque::new());
+		let expanded3 = expand_braces(input3, VecDeque::new());
+		assert_eq!(expanded1, VecDeque::from(vec!["1".into(), "2".into(), "3".into()]));
+		assert_eq!(expanded2, VecDeque::from(vec!["1".into(), "2".into(), "3".into(), "4".into(), "5".into()]));
+		assert_eq!(expanded3, VecDeque::from(vec!["a1".into(), "a2".into(), "a3".into(), "a4".into(), "a5".into(), "b1".into(), "b2".into(), "b3".into(), "b4".into(), "b5".into(), "c1".into(), "c2".into(), "c3".into(), "c4".into(), "c5".into(),]));
+	}
 
-    #[test]
-    fn test_expand_arguments() {
-        let mut node = Node {
-            command: None,
-            nd_type: NdType::Builtin {
-                argv: VecDeque::from(vec![
-                    token(TkType::Ident, "echo", Span::new(), WdFlags::empty()),
-                    token(TkType::String, "hello", Span::new(), WdFlags::empty()),
-                ]),
-            },
-            span: Span::new(),
-            flags: NdFlags::empty(),
-            redirs: VecDeque::new(),
-        };
+	#[test]
+	fn test_expand_arguments() {
+		let mut node = Node {
+			command: None,
+			nd_type: NdType::Builtin {
+				argv: VecDeque::from(vec![
+								token(TkType::Ident, "echo", Span::new(), WdFlags::empty()),
+								token(TkType::String, "hello", Span::new(), WdFlags::empty()),
+				]),
+			},
+			span: Span::new(),
+			flags: NdFlags::empty(),
+			redirs: VecDeque::new(),
+		};
 
-        let expanded = expand_arguments(&mut node).unwrap();
-        assert_eq!(expanded.len(), 2);
-        assert_eq!(expanded[0].text(), "echo");
-        assert_eq!(expanded[1].text(), "hello");
-    }
+		let expanded = expand_arguments(&mut node).unwrap();
+		assert_eq!(expanded.len(), 2);
+		assert_eq!(expanded[0].text(), "echo");
+		assert_eq!(expanded[1].text(), "hello");
+	}
 
-    #[test]
-    fn test_expand_cmd_sub() {
-        let token = token(TkType::CommandSub, "echo hello", Span::new(), WdFlags::empty());
-        let expanded = expand_cmd_sub(token).unwrap();
-        assert_eq!(expanded.text(), "hello");
-    }
+	#[test]
+	fn test_expand_cmd_sub() {
+		let token = token(TkType::CommandSub, "echo hello", Span::new(), WdFlags::empty());
+		let expanded = expand_cmd_sub(token).unwrap();
+		assert_eq!(expanded.text(), "hello");
+	}
 
-    #[test]
-    fn test_expand_prompt() {
-			let default_color = if read_vars(|vars| vars.get_evar("UID").is_some_and(|uid| uid == "0")).unwrap() {
-				"31" // Red if uid is 0, aka root user
-			} else {
-				"32" // Green if anyone else
-			};
-			let mut cwd: String = read_vars(|vars| vars.get_evar("PWD").map_or("".into(), |cwd| cwd).to_string()).unwrap();
-			let trunc_backup = read_meta(|m| m.get_shopt("trunc_prompt_path")).unwrap().unwrap();
-			write_meta(|m| m.set_shopt("trunc_prompt_path", 0)).unwrap();
-			let default_path = if cwd.as_str() == "/" {
-				"\\e[36m\\w\\e[0m".to_string()
-			} else {
-				format!("\\e[1;{}m\\w\\e[1;36m/\\e[0m",default_color)
-			};
-			let home = read_vars(|v| v.get_evar("HOME").unwrap()).unwrap();
-			if cwd.starts_with(&home) {
-				cwd = cwd.replacen(&home, "~", 1);
-			}
-			let ps1: String = format!("\\n{}\\n\\e[{}mdebug \\$\\e[36m>\\e[0m ",default_path,default_color);
-			write_vars(|v| v.export_var("PS1", &ps1)).unwrap();
-			let prompt = expand_prompt().unwrap();
-			let expected = format!("\n\u{1b}[1;32m{}\u{1b}[1;36m/\u{1b}[0m\n\u{1b}[32mdebug $\u{1b}[36m>\u{1b}[0m ",cwd);
+	#[test]
+	fn test_expand_prompt() {
+		let default_color = if read_vars(|vars| vars.get_evar("UID").is_some_and(|uid| uid == "0")).unwrap() {
+			"31" // Red if uid is 0, aka root user
+		} else {
+			"32" // Green if anyone else
+		};
+		let mut cwd: String = read_vars(|vars| vars.get_evar("PWD").map_or("".into(), |cwd| cwd).to_string()).unwrap();
+		let trunc_backup = read_meta(|m| m.get_shopt("trunc_prompt_path")).unwrap().unwrap();
+		write_meta(|m| m.set_shopt("trunc_prompt_path", 0)).unwrap();
+		let default_path = if cwd.as_str() == "/" {
+			"\\e[36m\\w\\e[0m".to_string()
+		} else {
+			format!("\\e[1;{}m\\w\\e[1;36m/\\e[0m",default_color)
+		};
+		let home = read_vars(|v| v.get_evar("HOME").unwrap()).unwrap();
+		if cwd.starts_with(&home) {
+			cwd = cwd.replacen(&home, "~", 1);
+		}
+		let ps1: String = format!("\\n{}\\n\\e[{}mdebug \\$\\e[36m>\\e[0m ",default_path,default_color);
+		write_vars(|v| v.export_var("PS1", &ps1)).unwrap();
+		let prompt = expand_prompt().unwrap();
+		let expected = format!("\n\u{1b}[1;32m{}\u{1b}[1;36m/\u{1b}[0m\n\u{1b}[32mdebug $\u{1b}[36m>\u{1b}[0m ",cwd);
 
-			assert_eq!(prompt, expected);
-			write_meta(|m| m.set_shopt("trunc_prompt_path", trunc_backup)).unwrap();
-    }
+		assert_eq!(prompt, expected);
+		write_meta(|m| m.set_shopt("trunc_prompt_path", trunc_backup)).unwrap();
+	}
 
-    #[test]
-    fn test_process_ansi_escapes() {
-        let input = r"\033[31mRed Text\033[0m";
-        let processed = process_ansi_escapes(input);
-        assert_eq!(processed, "\x1B[31mRed Text\x1B[0m");
-    }
+	#[test]
+	fn test_process_ansi_escapes() {
+		let input = r"\033[31mRed Text\033[0m";
+		let processed = helper::process_ansi_escapes(input);
+		assert_eq!(processed, "\x1B[31mRed Text\x1B[0m");
+	}
 
-    #[test]
-    fn test_check_home_expansion() {
-        assert!(check_home_expansion("~/projects"));
-        assert!(!check_home_expansion("/projects"));
-    }
+	#[test]
+	fn test_check_home_expansion() {
+		assert!(check_home_expansion("~/projects"));
+		assert!(!check_home_expansion("/projects"));
+	}
 
-    #[test]
-    fn test_split_tokens() {
-        let mut tokens = VecDeque::from(vec![
-            token(TkType::String, "arg1 arg2", Span::new(), WdFlags::empty()),
-            token(TkType::String, "foo\"bar baz\"", Span::new(), WdFlags::empty()),
-        ]);
-        split_tokens(&mut tokens);
-        assert_eq!(tokens.len(), 3);
-        assert_eq!(tokens[0].text(), "arg1");
-        assert_eq!(tokens[1].text(), "arg2");
-        assert_eq!(tokens[2].text(), "foobar baz");
-    }
+	#[test]
+	fn test_split_tokens() {
+		let mut tokens = VecDeque::from(vec![
+			token(TkType::String, "arg1 arg2", Span::new(), WdFlags::empty()),
+			token(TkType::String, "foo\"bar baz\"", Span::new(), WdFlags::empty()),
+		]);
+		split_tokens(&mut tokens);
+		assert_eq!(tokens.len(), 3);
+		assert_eq!(tokens[0].text(), "arg1");
+		assert_eq!(tokens[1].text(), "arg2");
+		assert_eq!(tokens[2].text(), "foobar baz");
+	}
 
-    #[test]
-    fn test_clean_escape_chars() {
-        let mut tokens = VecDeque::from(vec![
-            token(TkType::String, r"arg\ with\ space", Span::new(), WdFlags::empty()),
-        ]);
-        clean_escape_chars(&mut tokens);
-        assert_eq!(tokens[0].text(), "arg with space");
-    }
+	#[test]
+	fn test_clean_escape_chars() {
+		let mut tokens = VecDeque::from(vec![
+			token(TkType::String, r"arg\ with\ space", Span::new(), WdFlags::empty()),
+		]);
+		clean_escape_chars(&mut tokens);
+		assert_eq!(tokens[0].text(), "arg with space");
+	}
 }

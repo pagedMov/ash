@@ -847,9 +847,7 @@ pub fn await_job(pgid: Pid) -> RshResult<()> {
 	let (lock,cvar) = &*status_handle;
 	let mut job_state = lock.lock().unwrap();
 	while !matches!(*job_state, JobState::Stopped | JobState::Done) {
-		println!("initial job_state in await_job: {:?}", job_state);
 		job_state = cvar.wait(job_state).unwrap();
-		println!("new job_state in await_job: {:?}", job_state);
 	}
 	Ok(())
 }
@@ -864,9 +862,7 @@ pub fn await_fg_job() -> RshResult<RshWait> {
 	let (lock,cvar) = &*status_handle;
 	let mut job_state = lock.lock().unwrap();
 	while !matches!(*job_state, JobState::Stopped | JobState::Done) {
-		println!("initial job_state in await_job: {:?}", job_state);
 		job_state = cvar.wait(job_state).unwrap();
-		println!("new job_state in await_job: {:?}", job_state);
 	}
 	last_status = read_jobs(|j| j.read_job(0).unwrap().get_proc_statuses().first().unwrap().clone())?;
 	Ok(last_status)
@@ -883,11 +879,8 @@ pub fn notify_job(pgid: Pid, state: JobState) -> RshResult<()> {
 	let (lock, cvar) = &*status_handle;
 	let mut job_state = lock.lock().unwrap();
 	*job_state = state;
-	println!("new job_state in notify_job: {:?}", job_state);
 	std::mem::drop(job_state);
-	println!("notifying thread!");
 	cvar.notify_all();
-	println!("notified thread!");
 	Ok(())
 }
 
