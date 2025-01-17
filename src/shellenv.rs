@@ -368,7 +368,6 @@ impl Job {
 				}
 			}
 		}
-
 		Ok(statuses)
 	}
 	pub fn display(&self, job_order: &[usize], flags: JobCmdFlags) -> String {

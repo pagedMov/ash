@@ -293,18 +293,21 @@ pub fn unset_var_conflicts(key: &str) -> RshResult<()> {
 	Ok(())
 }
 
-pub fn flatten_pipeline(left: Node, right: Node) -> VecDeque<Node> {
+pub fn flatten_tree(left: Node, right: Node) -> VecDeque<Node> {
 	let mut flattened = VecDeque::new();
 	let mut stack = vec![(left, right)];
 
 	while let Some((current_left, current_right)) = stack.pop() {
 		flattened.push_front(current_right);
 
-		if let NdType::PipelineBranch { left, right, both: _ } = current_left.nd_type {
-			stack.push((*left, *right));
-		} else {
+		match current_left.nd_type {
+    NdType::PipelineBranch { left, right, both: _ } | NdType::ChainTree { left, right, op: _ } => {
+			    stack.push((*left, *right));
+		    }
+    _ => {
 			flattened.push_front(current_left);
 		}
+}
 	}
 
 	flattened

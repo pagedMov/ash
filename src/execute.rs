@@ -4,7 +4,7 @@ use libc::{memfd_create, MFD_CLOEXEC};
 use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
 use std::sync::Mutex;
 
-use crate::{builtin, event::ShError, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, disable_reaping, enable_reaping, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, RshResult};
+use crate::{builtin, event::ShError, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, RshResult};
 
 macro_rules! node_operation {
 	($node_type:path { $($field:tt)* }, $node:expr, $node_op:block) => {
@@ -642,30 +642,33 @@ fn handle_if(node: Node, io: ProcIO) -> RshResult<RshWait> {
 }
 
 fn handle_chain(node: Node) -> RshResult<RshWait> {
-	node_operation!(NdType::Chain { left, right, op }, node, {
-		traverse(*left, ProcIO::new())?;
+	node_operation!(NdType::Chain { commands, op }, node, {
+		let mut commands = commands;
+		while let Some(cmd) = commands.pop_front() {
+			traverse(cmd, ProcIO::new())?;
 
-		// Use the new waiting logic to fetch statuses
-		let statuses = write_jobs(|j| {
-			if let Some(job) = j.get_fg_mut() {
-				job.wait_pgrp().unwrap()
-			} else {
-				vec![]
+			// Use the new waiting logic to fetch statuses
+			let statuses = write_jobs(|j| {
+				if let Some(job) = j.get_fg_mut() {
+					job.get_statuses()
+				} else {
+					vec![]
+				}
+			})?;
+
+			// Determine the result of the left side
+			let is_success = statuses.iter().all(|stat| matches!(stat, WaitStatus::Exited(_, 0)));
+
+			// Traverse the right side based on the chain operator and status
+			match op.nd_type {
+				NdType::And if !is_success => {
+					break
+				},
+				NdType::Or if is_success => {
+					break
+				},
+				_ => { /* Do nothing */ }
 			}
-		})?;
-
-		// Determine the result of the left side
-		let is_success = statuses.iter().all(|stat| matches!(stat, WaitStatus::Exited(_, 0)));
-
-		// Traverse the right side based on the chain operator and status
-		match op.nd_type {
-			NdType::And if is_success => {
-				traverse(*right, ProcIO::new())?;
-			},
-			NdType::Or if !is_success => {
-				traverse(*right, ProcIO::new())?;
-			},
-			_ => { /* Do nothing */ }
 		}
 	});
 

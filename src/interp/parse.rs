@@ -8,7 +8,7 @@ use crate::interp::token::{RedirType, RshTokenizer, Tk, TkType};
 use crate::shellenv::read_logic;
 use crate::{builtin, RshResult};
 
-use super::helper;
+use super::helper::{self, flatten_tree};
 use super::token::{Redir, TkizerCtx, WdFlags};
 
 bitflags! {
@@ -205,7 +205,8 @@ pub enum NdType {
 	Select { select_var: Tk, opts: VecDeque<Tk>, body: Box<Node> },
 	PipelineBranch { left: Box<Node>, right: Box<Node>, both: bool }, // Intermediate value
 	Pipeline { commands: VecDeque<Node>, both: bool }, // After being flattened
-	Chain { left: Box<Node>, right: Box<Node>, op: Box<Node> },
+	ChainTree { left: Box<Node>, right: Box<Node>, op: Box<Node> },
+	Chain { commands: VecDeque<Node>, op: Box<Node> },
 	BraceGroup { body: Box<Node> },
 	Subshell { body: String, argv: VecDeque<Tk> }, // It's a string because we're going to parse it in a subshell later
 	FuncDef { name: String, body: Box<Node> },
@@ -577,7 +578,7 @@ pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		let redirs = node.redirs.clone();
 		let span = node.span();
 		if let NdType::PipelineBranch { left, right, both } = node.nd_type {
-			let commands = helper::flatten_pipeline(*left, *right);
+			let commands = helper::flatten_tree(*left, *right);
 			let flattened_pipeline = Node {
 				command: None,
 				nd_type: NdType::Pipeline { commands, both },
@@ -604,12 +605,11 @@ pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
 						if !check_valid_operand(&right) {
 							return Err(ShError::from_parse("The right side of this chain is invalid", node.span))
 						}
-						let left = left.boxed();
-						let right = right.boxed();
+						let commands = flatten_tree(left, right);
 						let op = node.boxed();
 						let chain = Node {
 							command: None,
-							nd_type: NdType::Chain { left, right, op },
+							nd_type: NdType::Chain { commands, op },
 							span: Span::from(0,0),
 							flags: NdFlags::empty(),
 							redirs: VecDeque::new()

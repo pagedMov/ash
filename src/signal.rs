@@ -114,6 +114,7 @@ pub fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
 	 * We can reasonably assume that if it is not a foreground job, then it exists in the job table
 	 * If this assumption is incorrect, the code has gone wrong somewhere.
 	 */
+	dbg!(&status);
 	let (
 		pgid,
 		is_fg,
