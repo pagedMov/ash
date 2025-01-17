@@ -18,7 +18,7 @@ use crate::interp::helper::{self, StrExtension};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType, WdFlags};
-use crate::shellenv::{self, read_jobs, read_logic, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, HashFloat, JobFlags, RVal};
+use crate::shellenv::{self, read_jobs, read_logic, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, HashFloat, JobCmdFlags, JobID, RVal};
 use crate::event::ShError;
 use crate::RshResult;
 
@@ -876,43 +876,64 @@ pub fn cd(node: Node) -> RshResult<RshWait> {
 		Ok(RshWait::Success )
 }
 
+/// Brings a background or stopped job to the foreground and manages its execution.
+///
+/// Logic:
+/// 1. Parse the command arguments:
+///    - Retrieve the job ID from the arguments (default to `0` if none is provided).
+///    - Job ID `0` indicates the "current job" (the most recently backgrounded or stopped job).
+///
+/// 2. Resolve the job to foreground:
+///    - If job ID is `0`, fetch the most recent job from the job table (`job_order.last()`).
+///    - Otherwise, retrieve the job corresponding to the provided job ID.
+///    - If no job is found, return an error or indicate failure.
+///
+/// 3. Bring the job to the foreground:
+///    - Update the job state in the job table (e.g., mark it as foregrounded and continue it).
+///    - If the job is stopped, send it a `SIGCONT` signal to resume execution.
+///
+/// 4. Reattach the terminal to the job's process group:
+///    - Use `attach_tty` to give the job control of the terminal.
+///    - Handle any errors that may occur during this step.
+///
+/// 5. Return the result:
+///    - If the job was successfully foregrounded, return `RshWait::Success`.
+///    - If the job does not exist or cannot be foregrounded, return `RshWait::Fail` with appropriate details.
+///
+/// Key Considerations:
+/// - Ensure the `job_order` in the job table reflects the correct order of jobs for determining the "current job."
+/// - Handle cases where no jobs exist gracefully.
+/// - Carefully manage the interaction between the job table and the process group state.
+/// - Ensure terminal attachment and signal handling are robust to avoid leaving the shell in an inconsistent state.
 pub fn fg(node: Node) -> RshResult<RshWait> {
 	let argv = node.get_argv()?;
 	let mut argv = VecDeque::from(argv);
 	argv.pop_front(); // Ignore 'fg'
 
+	if read_jobs(|j| j.get_fg().is_some())? {
+		return Err(ShError::from_internal("Somehow called `fg()` when a foreground process already exists"))
+	}
+
+	let curr_job_id = read_jobs(|j| j.curr_job())?;
+	if curr_job_id.is_none() {
+		return Err(ShError::from_execf("Did not find a task to move to the foreground", 1, node.span()))
+	}
 	let job_id = match argv.pop_front() {
 		Some(arg) => parse_job_id(arg.text(), node.span())?,
-		None => 0,
+		None => curr_job_id.unwrap(),
 	};
-
-	let job = if job_id == 0 {
-		let job_order = read_jobs(|j| j.job_order().to_vec())?;
-		if let Some(id) = job_order.last() {
-			read_jobs(|j| j.read_job(*id).cloned())?
+	write_jobs(|j| {
+		let id = JobID::TableID(job_id);
+		let query_result = j.query(id.clone());
+		if let Some(job) = query_result {
+			job.killpg(Signal::SIGCONT).map_err(|_| ShError::from_internal("Failed to send SIGCONT to the job"))?;
+			j.bg_to_fg(id);
 		} else {
-			return Err(ShError::from_internal("Attempted to foreground with no current process"));
+			return Err(ShError::from_execf(format!("Job ID {} not found", job_id).as_str(), 1, node.span()));
 		}
-	} else {
-		read_jobs(|j| j.read_job(job_id).cloned())?
-	};
-
-	if let Some(job) = job {
-		write_jobs(|j| {
-			if let Some(job) = j.get_job(job_id) {
-				job.cont().unwrap();
-			}
-		})?;
-
-		if job.is_stopped() {
-			killpg(*job.pgid(), Signal::SIGCONT).map_err(|_| ShError::from_io())?;
-		}
-
-		shellenv::attach_tty(*job.pgid())?;
-		Ok(RshWait::Success)
-	} else {
-		Ok(RshWait::Fail { code: 1, cmd: Some("fg".into()) })
-	}
+		Ok(())
+	})?;
+	Ok(RshWait::Success)
 }
 
 pub fn bg(node: Node) -> RshResult<RshWait> {
@@ -920,60 +941,76 @@ pub fn bg(node: Node) -> RshResult<RshWait> {
 	let mut argv = VecDeque::from(argv);
 	argv.pop_front(); // Ignore 'bg'
 
+	// Determine the job ID to move to the background
+	let curr_job_id = read_jobs(|j| j.curr_job())?;
+	if curr_job_id.is_none() {
+		return Err(ShError::from_execf("Did not find a task to move to the background", 1, node.span()));
+	}
 	let job_id = match argv.pop_front() {
 		Some(arg) => parse_job_id(arg.text(), node.span())?,
-		None => {
-			let job_order = read_jobs(|j| j.job_order().to_vec())?;
-			*job_order.last().unwrap_or(&0)
-		}
+		None => curr_job_id.unwrap(),
 	};
 
-	let job = read_jobs(|j| j.read_job(job_id).cloned())?;
-	if let Some(job) = job {
-		write_jobs(|j| {
-			if let Some(job) = j.get_job(job_id) {
-				job.cont().unwrap();
-			}
-		})?;
-
-		if job.is_stopped() {
-			killpg(*job.pgid(), Signal::SIGCONT).map_err(|_| ShError::from_io())?;
+	// Perform the job transition
+	read_jobs(|j| {
+		let id = JobID::TableID(job_id);
+		let query_result = j.query(id.clone());
+		if let Some(job) = query_result {
+			job.killpg(Signal::SIGCONT).map_err(|_| ShError::from_internal("Failed to send SIGCONT to the job"))?;
+		} else {
+			return Err(ShError::from_execf(format!("Job ID {} not found", job_id).as_str(), 1, node.span()));
 		}
+		Ok(())
+	})?;
 
-		let job = read_jobs(|j| j.read_job(job_id).cloned().unwrap())?;
-		let job_order = read_jobs(|j| j.job_order().to_vec())?;
-		println!("{}", job.display(&job_order, JobFlags::PIDS));
-		Ok(RshWait::Success)
-	} else {
-		eprintln!("No such job: {}", job_id);
-		Ok(RshWait::Fail { code: 1, cmd: Some("bg".into()) })
-	}
+	// Print job details
+	read_jobs(|j| {
+		if let Some(job) = j.query(JobID::TableID(job_id)) {
+			let job_order = j.job_order().to_vec();
+			println!("{}", job.display(&job_order, JobCmdFlags::PIDS));
+		}
+	})?;
+
+	Ok(RshWait::Success)
 }
 
-fn parse_job_id(arg: &str, span: Span) -> RshResult<i32> {
+fn parse_job_id(arg: &str, span: Span) -> RshResult<usize> {
 	if arg.starts_with('%') {
 		let arg = arg.strip_prefix('%').unwrap();
 		if arg.chars().all(|ch| ch.is_ascii_digit()) {
-			return Ok(arg.parse::<i32>().unwrap());
+			return Ok(arg.parse::<usize>().unwrap());
 		} else {
-			let matches = read_jobs(|j| j.read_by_command(arg))?;
-			if matches.len() > 1 {
-				eprintln!("Warning: Multiple matches found for `{}`. Resuming the first match.", arg);
-			}
-			if let Some(job) = matches.first() {
-				return Ok(job.id());
+			let result = write_jobs(|j| {
+				let query_result = j.query(JobID::Command(arg.into()));
+				query_result.map(|job| job.table_id().unwrap())
+			})?;
+			match result {
+				None => return Err(ShError::from_internal("Found a job but no table id in parse_job_id")),
+				Some(id) => return Ok(id),
 			}
 		}
 	} else if arg.chars().all(|ch| ch.is_ascii_digit()) {
-		let job_candidate = read_jobs(|j| j.get_by_pgid(Pid::from_raw(arg.parse::<i32>().unwrap())).cloned())?;
-		if let Some(job) = job_candidate {
-			return Ok(job.id());
+		let result = write_jobs(|j| {
+			let pgid_query_result = j.query(JobID::Pgid(Pid::from_raw(arg.parse::<i32>().unwrap())));
+			if let Some(job) = pgid_query_result {
+				return Some(job.table_id().unwrap());
+			}
+
+			if arg.parse::<i32>().unwrap() > 0 {
+				let table_id_query_result = j.query(JobID::TableID(arg.parse::<usize>().unwrap()));
+				return table_id_query_result.map(|job| job.table_id().unwrap());
+			}
+
+			None
+		})?;
+
+		match result {
+			None => return Err(ShError::from_internal("Found a job but no table id in parse_job_id")),
+			Some(id) => return Ok(id),
 		}
 	} else {
 		return Err(ShError::from_syntax(format!("Invalid argument: {}", arg).as_str(), span));
 	}
-
-	Err(ShError::from_syntax(format!("Invalid argument: {}", arg).as_str(), span))
 }
 
 pub fn source(node: Node) -> RshResult<RshWait> {
@@ -1067,7 +1104,7 @@ pub fn export(node: Node) -> RshResult<RshWait> {
 pub fn jobs(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
 	argv.pop_front();
-	let mut flags = JobFlags::empty();
+	let mut flags = JobCmdFlags::empty();
 	while let Some(arg) = argv.pop_front() {
 		let mut chars = arg.text().chars().collect::<VecDeque<char>>();
 		if chars.front().is_none_or(|ch| *ch != '-') {
@@ -1076,11 +1113,11 @@ pub fn jobs(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 		chars.pop_front(); // Ignore the leading hyphen
 		while let Some(ch) = chars.pop_front() {
 			let flag = match ch {
-				'l' => JobFlags::LONG,
-				'p' => JobFlags::PIDS,
-				'n' => JobFlags::NEW_ONLY,
-				'r' => JobFlags::RUNNING,
-				's' => JobFlags::STOPPED,
+				'l' => JobCmdFlags::LONG,
+				'p' => JobCmdFlags::PIDS,
+				'n' => JobCmdFlags::NEW_ONLY,
+				'r' => JobCmdFlags::RUNNING,
+				's' => JobCmdFlags::STOPPED,
 				_ => return Err(ShError::from_execf("Invalid flag in `jobs` invocation", 1, node.span()))
 			};
 			flags |= flag;

@@ -1,4 +1,4 @@
-use crate::{comp::RshHelper, event::{self, ShError, ShEvent}, interp::token::RshTokenizer, shellenv::{self, await_term_ctl, read_meta, read_vars, write_meta}, RshResult};
+use crate::{comp::RshHelper, event::{self, ShError, ShEvent}, interp::token::RshTokenizer, shellenv::{self, read_meta, read_vars, write_meta}, RshResult};
 use std::{path::{Path, PathBuf}, sync::mpsc::Receiver};
 use nix::{sys::signal::{kill, Signal}, unistd::Pid};
 use signal_hook::consts::signal::*;

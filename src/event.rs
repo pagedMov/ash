@@ -3,7 +3,7 @@ use libc::{getpid, tcgetpgrp};
 use signal_hook::iterator::Signals;
 
 
-use crate::{deconstruct, execute::{self, RshWait}, interp::{helper, parse::{descend, NdType, Node, Span}, token::RshTokenizer}, prompt, shellenv::{self, read_jobs, read_meta, write_meta}, signal::{self, }, RshResult, GLOBAL_EVENT_CHANNEL};
+use crate::{deconstruct, execute::{self, RshWait}, interp::{helper, parse::{descend, NdType, Node, Span}, token::RshTokenizer}, prompt, shellenv::{self, read_jobs, read_meta, write_jobs, write_meta}, signal::{self, }, RshResult, GLOBAL_EVENT_CHANNEL};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShError {
@@ -110,10 +110,11 @@ pub fn main_loop() -> RshResult<()> {
 				let result = descend(&mut tokenizer);
 				match result {
 					Ok(Some(state)) => {
-						let fg_pgid = read_jobs(|j| j.get_fg_pgid())?;
-						if let Some(fg) = fg_pgid {
-							shellenv::await_job(fg)?;
-						}
+						write_jobs(|j| {
+							if let Some(job) = j.get_fg_mut() {
+								job.wait_pgrp();
+							}
+						});
 						let deck = helper::extract_deck_from_root(&state.ast)?;
 						if !deck.is_empty() {
 							// Send each deck immediately for execution

@@ -1,6 +1,10 @@
+use std::{collections::VecDeque, sync::Mutex};
+
 use nix::{sys::{signal::{killpg, signal, SigHandler, Signal} , wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{getpgid, tcgetpgrp, Pid}};
 
-use crate::{execute::RshWait, shellenv::{self, read_jobs, write_jobs, JobFlags, RSH_PGRP}, RshResult};
+use crate::{event::ShError, execute::RshWait, shellenv::{self, read_jobs, write_jobs, JobCmdFlags, JobID, RSH_PGRP}, RshResult};
+
+static DEFERRED_SIGNALS: Mutex<VecDeque<Pid>> = Mutex::new(VecDeque::new());
 
 pub fn sig_handler_setup() {
 	unsafe {
@@ -15,27 +19,52 @@ pub fn sig_handler_setup() {
 }
 
 extern "C" fn handle_sighup(_: libc::c_int) {
-	write_jobs(|j| j.kill_all()).unwrap();
+	write_jobs(|j| {
+		for item in j.mut_jobs() {
+			if let Some(job) = item {
+				job.killpg(Signal::SIGTERM);
+			}
+		}
+	}).unwrap();
 	std::process::exit(0);
 }
 
 extern "C" fn handle_sigtstp(_: libc::c_int) {
-	let fg_pgrp = shellenv::term_controller();
-	shellenv::notify_job(fg_pgrp, shellenv::JobState::Stopped).unwrap();
-	let _ = killpg(fg_pgrp, Signal::SIGTSTP);
+	write_jobs(|j| {
+		if let Some(job) = j.get_fg_mut() {
+			job.killpg(Signal::SIGTSTP);
+		}
+	});
 }
 
 extern "C" fn handle_sigint(_: libc::c_int) {
-	// Send SIGINT to the foreground process group
-	let fg_pgrp = shellenv::term_controller();
-	let _ = killpg(fg_pgrp, Signal::SIGINT);
+	write_jobs(|j| {
+		if let Some(job) = j.get_fg_mut() {
+			job.killpg(Signal::SIGINT);
+		}
+	});
+}
+
+pub extern "C" fn ignore_sigchld(_: libc::c_int) {
+	// Do nothing
+	// This function exists because using SIGIGN to ignore SIGCHLD
+	// will cause the kernel to reap the child process implicitly
+	// which will prevents the code from being able to reap it elsewhere
+	// which is the entire point of shellenv::disable_reaping()
 }
 
 extern "C" fn handle_sigquit(_: libc::c_int) {
+	write_jobs(|j| {
+		for item in j.mut_jobs() {
+			if let Some(job) = item {
+				job.killpg(Signal::SIGTERM);
+			}
+		}
+	}).unwrap();
 	std::process::exit(0);
 }
 
-extern "C" fn handle_sigchld(_: libc::c_int) {
+pub extern "C" fn handle_sigchld(_: libc::c_int) {
 	let flags = WaitPidFlag::WUNTRACED;
 	while let Ok(status) = waitpid(None, Some(flags)) {
 		let _ = match status {
@@ -49,11 +78,12 @@ extern "C" fn handle_sigchld(_: libc::c_int) {
 	}
 }
 
-fn handle_child_signal(pid: Pid, sig: Signal) -> RshResult<()> {
+pub fn handle_child_signal(pid: Pid, sig: Signal) -> RshResult<()> {
 	let pgid = getpgid(Some(pid)).unwrap_or(pid);
 	write_jobs(|j| {
-		if let Some(job) = j.mut_by_pgid(pgid) {
-			job.update_status(Some(pid), RshWait::Signaled { sig })
+		if let Some(job) = j.query_mut(JobID::Pgid(pgid)) {
+			let child = job.get_children_mut().iter_mut().find(|chld| pid == chld.pid()).unwrap();
+			child.set_status(WaitStatus::Signaled(pid, sig, false));
 		}
 	})?;
 	if matches!(sig,Signal::SIGINT) {
@@ -62,63 +92,66 @@ fn handle_child_signal(pid: Pid, sig: Signal) -> RshResult<()> {
 	Ok(())
 }
 
-fn handle_child_stop(pid: Pid, signal: Signal) -> RshResult<()> {
+pub fn handle_child_stop(pid: Pid, signal: Signal) -> RshResult<()> {
 	let pgid = getpgid(Some(pid)).unwrap_or(pid);
 	write_jobs(|j| {
-		if let Some(job) = j.mut_by_pgid(pgid) {
-			job.stop(signal);
-			killpg(pgid, signal).unwrap();
-			if j.is_fg(pgid) {
-				j.to_background();
+		if let Some(job) = j.query_mut(JobID::Pgid(pgid)) {
+			let child = job.get_children_mut().iter_mut().find(|chld| pid == chld.pid()).unwrap();
+			child.set_status(WaitStatus::Stopped(pid, signal));
+			if j.get_fg_mut().is_some_and(|fg| fg.pgid() == pgid) {
+				j.fg_to_bg().unwrap();
 			}
 		}
 	})?;
-	shellenv::notify_job(pgid, shellenv::JobState::Stopped)?;
 	shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal
 	killpg(pid, Signal::SIGCONT).unwrap();
 	Ok(())
 }
 
-fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
-	let job = read_jobs(|j| j.get_by_pid(pid).cloned())?;
-	if job.is_none() {
-		shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
-		return Ok(())
-	}
-	let pgid = *job.unwrap().pgid();
-	write_jobs(|j| {
-		if let Some(job) = j.mut_by_pgid(pgid) {
-			job.update_status(Some(pid), RshWait::from_wait(status, None));
+pub fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
+	let (
+		pgid,
+		is_fg,
+		is_finished
+	) = write_jobs(|j| {
+		let fg_pgid = j.get_fg().map(|job| job.pgid());
+		if let Some(job) = j.query_mut(JobID::Pid(pid)) {
+			let pgid = job.pgid();
+			let is_fg = fg_pgid.is_some_and(|fg| fg == pgid);
+			job.update_by_id(JobID::Pid(pid), status).unwrap();
+			let is_finished = !job.is_alive();
+
+			if let Some(child) = job.get_children_mut().iter_mut().find(|chld| pid == chld.pid()) {
+				child.set_status(status);
+			}
+
+			Ok((pgid, is_fg, is_finished))
+		} else {
+			Err(ShError::from_internal("Job not found"))
 		}
-	})?;
-	if read_jobs(|j| j.is_finished(pgid))? {
-		shellenv::notify_job(pgid, shellenv::JobState::Done)?;
-		if read_jobs(|j| j.get_by_pgid(pgid).is_some())? {
-			if read_jobs(|j| j.read_job(0).cloned())?.is_some_and(|job| *job.pgid() == pgid) {
-				shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
-			} else {
-				let job = read_jobs(|j| j.get_by_pgid(pgid).cloned().unwrap())?;
-				if job.id() == 0 {
-					return Ok(())
-				}
-				println!();
-				let job_order = read_jobs(|j| j.job_order().to_vec())?;
-				println!("{}",job.display(&job_order,JobFlags::PIDS))
+	})??;
+
+	if is_finished {
+		if is_fg {
+			shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
+		} else {
+			println!();
+			let job_order = read_jobs(|j| j.job_order().to_vec())?;
+			let result = read_jobs(|j| j.query(JobID::Pgid(pgid)).cloned())?;
+			if let Some(job) = result {
+				println!("{}",job.display(&job_order,JobCmdFlags::PIDS))
 			}
 		}
-	} else if read_jobs(|j| j.get_by_pgid(pgid).is_none())? {
-		shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
 	}
 	Ok(())
 }
 
-fn handle_child_continue(pid: Pid) -> RshResult<()> {
+pub fn handle_child_continue(pid: Pid) -> RshResult<()> {
 	let pgid = getpgid(Some(pid)).unwrap_or(pid);
 	write_jobs(|j| {
-		if let Some(job) = j.mut_by_pgid(pgid) {
-			job.cont().unwrap();
+		if let Some(job) = j.query_mut(JobID::Pgid(pgid)) {
+			job.killpg(Signal::SIGCONT).unwrap();
 		}
 	})?;
-	shellenv::notify_job(pgid, shellenv::JobState::Running);
 	Ok(())
 }

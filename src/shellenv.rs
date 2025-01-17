@@ -1,22 +1,48 @@
-use std::{borrow::BorrowMut, collections::BTreeMap, env, ffi::{CString, OsStr}, fmt::{self, Debug, Display}, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, panic::Location, path::PathBuf, str::FromStr, sync::{Arc, Condvar, LazyLock, Mutex}};
+use std::{collections::BTreeMap, env, ffi::{CString, OsStr}, fmt, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, sync::{Arc, LazyLock}};
 use std::collections::HashMap;
 
 use bitflags::bitflags;
-use nix::{sys::signal::{self, kill, killpg, Signal}, unistd::{gethostname, getpgrp, isatty, tcgetpgrp, tcsetpgrp, Pid, User}};
+use nix::{sys::{signal::{kill, killpg, signal, SigHandler, Signal}, wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{gethostname, getpgid, isatty, setpgid, tcgetpgrp, tcsetpgrp, Pid, User}};
 use once_cell::sync::Lazy;
 use std::{fs::File, sync::RwLock};
 
-use crate::{event::{self, ShError}, execute::{self, RshWait}, interp::{helper, parse::{descend, Node, Span}, token::RshTokenizer}, RshResult};
+
+use crate::{event::ShError, execute::{self, RshWait}, interp::{parse::{descend, Node, Span}, token::RshTokenizer}, RshResult};
+
+pub struct DisplayWaitStatus(pub WaitStatus);
+
+impl fmt::Display for DisplayWaitStatus {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match &self.0 {
+			WaitStatus::Exited(_, code) => {
+				match code {
+					0 => write!(f, "done"),
+					_ => write!(f, "failed: {}", code),
+				}
+			}
+			WaitStatus::Signaled(_, signal, _) => {
+				write!(f, "signaled: {:?}", signal)
+			}
+			WaitStatus::Stopped(_, signal) => {
+				write!(f, "stopped: {:?}", signal)
+			}
+			WaitStatus::PtraceEvent(_, signal, _) => {
+				write!(f, "ptrace event: {:?}", signal)
+			}
+			WaitStatus::PtraceSyscall(_) => {
+				write!(f, "ptrace syscall")
+			}
+			WaitStatus::Continued(_) => {
+				write!(f, "continued")
+			}
+			WaitStatus::StillAlive => {
+				write!(f, "running")
+			}
+		}
+	}
+}
 
 pub static RSH_PGRP: Lazy<Pid> = Lazy::new(Pid::this);
-
-pub static TERM_CTL: LazyLock<Arc<RwLock<TermCtl>>> = LazyLock::new(|| {
-	Arc::new(
-		RwLock::new(
-			TermCtl::new()
-		)
-	)
-});
 
 pub static JOBS: LazyLock<Arc<RwLock<JobTable>>> = LazyLock::new(|| {
 	Arc::new(
@@ -65,7 +91,6 @@ bitflags! {
 		const CLEAN            = 0b00000000000000000000000000100000; // Do not inherit env vars from parent
 		const NO_RC            = 0b00000000000000000000000001000000;
 		const IN_SUBSH         = 0b00000000000000000000000010000000; // In a subshell
-																																 // Options set by 'set' command
 		const EXPORT_ALL_VARS  = 0b00000000000000000000000100000000; // set -a
 		const REPORT_JOBS_ASAP = 0b00000000000000000000001000000000; // set -b
 		const EXIT_ON_ERROR    = 0b00000000000000000000010000000000; // set -e
@@ -87,7 +112,7 @@ bitflags! {
 		const INHERIT_RET      = 0b00000100000000000000000000000000; // set -T
 	}
 	#[derive(Debug,Copy,Clone)]
-	pub struct JobFlags: i8 {
+	pub struct JobCmdFlags: i8 { // Options for the jobs builtin
 		const LONG      = 0b00000001;
 		const PIDS      = 0b00000010;
 		const NEW_ONLY  = 0b00000100;
@@ -98,11 +123,559 @@ bitflags! {
 }
 
 #[derive(Debug)]
-pub enum JobState {
+pub enum JobState { // Actual internal job state
 	Running,
 	Stopped,
 	Signaled,
 	Done
+}
+
+#[derive(Debug,Clone)]
+pub enum JobID { // Possible arguments for query_jobs(), each of these can find a job somehow
+	Pgid(Pid),
+	Pid(Pid),
+	TableID(usize),
+	Command(String)
+}
+
+#[derive(Debug,PartialEq,Clone)]
+pub struct ChildProc {
+	pgid: Pid,
+	pid: Pid,
+	command: Option<String>,
+	status: WaitStatus
+}
+
+impl ChildProc {
+	pub fn new(pid: Pid, command: Option<&str>) -> RshResult<Self> {
+		let command = command.map(|str| str.to_string());
+    let status = if kill(pid, None).is_ok() {
+        WaitStatus::StillAlive // The process is still running
+    } else {
+        WaitStatus::Exited(pid, 0) // Default to exited
+    };
+		Ok(Self { pgid: pid, pid, command, status })
+	}
+	pub fn pid(&self) -> Pid {
+		self.pid
+	}
+	pub fn pgid(&self) -> Pid {
+		self.pgid
+	}
+	pub fn command(&self) -> Option<String> {
+		self.command.clone()
+	}
+	pub fn status(&self) -> WaitStatus {
+		self.status
+	}
+	pub fn waitpid(&mut self, flags: Option<WaitPidFlag>) -> Result<WaitStatus, nix::errno::Errno>  {
+		let result = waitpid(self.pid(), flags);
+		if let Ok(status) = result {
+			self.status = status
+		}
+		result
+	}
+	pub fn setpgid(&mut self, pgid: Pid) -> RshResult<()> {
+		self.pgid = pgid;
+		setpgid(self.pid, pgid).map_err(|_| ShError::from_io())
+	}
+	pub fn set_status(&mut self, status: WaitStatus) {
+		self.status = status;
+	}
+	pub fn kill(&self, signal: Signal) -> RshResult<()> {
+		kill(self.pid, Some(signal))
+			.map_err(|_| ShError::from_io())
+	}
+	pub fn is_alive(&self) -> bool {
+		matches!(self.status, WaitStatus::StillAlive)
+	}
+	pub fn is_stopped(&self) -> bool {
+		matches!(self.status, WaitStatus::Stopped(_, _))
+	}
+	pub fn is_done(&self) -> bool {
+		matches!(self.status, WaitStatus::Exited(_, _))
+	}
+}
+
+pub struct JobBuilder {
+	table_id: Option<usize>,
+	pgid: Option<Pid>,
+	children: Vec<ChildProc>
+}
+
+impl Default for JobBuilder {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+impl JobBuilder {
+	pub fn new() -> Self {
+		Self { table_id: None, pgid: None, children: vec![] }
+	}
+	pub fn with_id(self, id: usize) -> Self {
+		Self {
+			table_id: Some(id),
+			pgid: self.pgid,
+			children: self.children
+		}
+	}
+	pub fn with_pgid(self, pgid: Pid) -> Self {
+		Self {
+			table_id: self.table_id,
+			pgid: Some(pgid),
+			children: self.children
+		}
+	}
+	pub fn with_children(self, children: Vec<ChildProc>) -> Self {
+		Self {
+			table_id: self.table_id,
+			pgid: self.pgid,
+			children
+		}
+	}
+	pub fn build(self) -> Job {
+		Job {
+			table_id: self.table_id,
+			pgid: self.pgid.unwrap(),
+			children: self.children
+		}
+	}
+}
+
+#[derive(Debug, Clone)]
+pub struct Job {
+	table_id: Option<usize>,
+	pgid: Pid,
+	children: Vec<ChildProc>,
+}
+
+impl Job {
+	pub fn set_table_id(&mut self, id: usize) {
+		self.table_id = Some(id)
+	}
+	pub fn is_alive(&self) -> bool {
+		!self.children.iter().all(|chld| chld.is_done())
+	}
+	pub fn table_id(&self) -> Option<usize> {
+		self.table_id
+	}
+	pub fn pgid(&self) -> Pid {
+		self.pgid
+	}
+	pub fn get_commands(&self) -> Vec<String> {
+		let mut cmds = vec![];
+		for child in &self.children {
+			cmds.push(child.command().clone().unwrap_or_default())
+		}
+		cmds
+	}
+	pub fn set_statuses(&mut self, status: WaitStatus) {
+		for child in self.children.iter_mut() {
+			child.set_status(status);
+		}
+	}
+	pub fn get_pids(&self) -> Vec<Pid> {
+		self.children.iter().map(|chld| chld.pid()).collect::<Vec<Pid>>()
+	}
+	pub fn update_by_id(&mut self, id: JobID, status: WaitStatus) -> RshResult<()> {
+		match id {
+    JobID::Pid(pid) => {
+			let query_result = self.children.iter_mut().find(|chld| chld.pid() == pid);
+			if let Some(child) = query_result {
+				child.set_status(status);
+			}
+		}
+    JobID::Command(cmd) => {
+			let query_result = self.children
+				.iter_mut()
+				.find(|chld| chld.command().is_some_and(|chld_cmd| chld_cmd.contains(&cmd)));
+			if let Some(child) = query_result {
+				child.set_status(status);
+			}
+		}
+    JobID::Pgid(pgid) => {
+			if pgid == self.pgid {
+				for child in self.children.iter_mut() {
+					child.set_status(status);
+				}
+			}
+		}
+    JobID::TableID(id) => {
+			if self.table_id.is_some_and(|tbl_id| tbl_id == id) {
+				for child in self.children.iter_mut() {
+					child.set_status(status);
+				}
+			}
+		}
+}
+		Ok(())
+	}
+	pub fn poll_children(&mut self) -> RshResult<()> {
+		for child in self.children.iter_mut() {
+			let pid = child.pid();
+			match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+				Ok(status) => {
+					child.set_status(status);
+					match status {
+						WaitStatus::Exited(pid, _) => crate::signal::handle_child_exit(pid, status)?,
+						WaitStatus::Signaled(pid, sig, _) => crate::signal::handle_child_signal(pid, sig)?,
+						WaitStatus::Stopped(pid, signal) => crate::signal::handle_child_stop(pid, signal)?,
+						WaitStatus::Continued(pid) => crate::signal::handle_child_continue(pid)?,
+						WaitStatus::StillAlive => { /* Do nothing */ },
+						_ => unimplemented!()
+					};
+				}
+				Err(_) => {
+					attach_tty(*RSH_PGRP)?
+				}
+			}
+		}
+		Ok(())
+	}
+	pub fn get_statuses(&self) -> Vec<WaitStatus> {
+		self.children.iter().map(|chld| chld.status()).collect::<Vec<WaitStatus>>()
+	}
+	pub fn get_children(&self) -> &[ChildProc] {
+		&self.children
+	}
+	pub fn get_children_mut(&mut self) -> &mut Vec<ChildProc> {
+		&mut self.children
+	}
+	pub fn new_child(&mut self, child: ChildProc) {
+		self.children.push(child);
+	}
+	pub fn to_fg(&self) -> RshResult<()> {
+		attach_tty(self.pgid)
+	}
+	pub fn killpg(&self, signal: Signal) -> RshResult<()> {
+		killpg(self.pgid, Some(signal)).map_err(|_| ShError::from_io())
+	}
+	pub fn wait_pgrp(&mut self) -> RshResult<Vec<WaitStatus>> {
+		let pgid = Pid::from_raw(self.pgid.as_raw());
+		let mut statuses = Vec::new();
+
+		if kill(pgid, None).is_err() {
+		} else {
+			for child in &self.children {
+				let child_pgid = getpgid(Some(child.pid()));
+				let pid = child.pid();
+				if child_pgid.is_ok_and(|pgid| pgid == self.pgid) {
+				}
+			}
+		}
+
+
+		for child in self.children.iter_mut() {
+			let result = child.waitpid(None);
+			match result {
+				Ok(status) => {
+					statuses.push(status);
+				}
+				Err(nix::errno::Errno::ECHILD) => {
+					// No more child processes in the group
+					attach_tty(*RSH_PGRP)?;
+					break;
+				}
+				Err(_) => {
+					return Err(ShError::from_io());
+				}
+			}
+		}
+
+		Ok(statuses)
+	}
+	pub fn display(&self, job_order: &[usize], flags: JobCmdFlags) -> String {
+		let long = flags.contains(JobCmdFlags::LONG);
+		let init = flags.contains(JobCmdFlags::INIT);
+		let pids = flags.contains(JobCmdFlags::PIDS);
+		let current = job_order.last();
+		let prev = if job_order.len() > 2 {
+			job_order.get(job_order.len() - 2)
+		} else { None };
+		let mut output = String::new();
+
+		const GREEN: &str = "\x1b[32m";
+		const RED: &str = "\x1b[31m";
+		const CYAN: &str = "\x1b[35m";
+		const RESET: &str = "\x1b[0m";
+
+		// TODO: Handle this unwrap more safely
+		let id = self.table_id.unwrap();
+
+		// Add job ID and status
+		let symbol = if current.is_some_and(|cur| *cur == id) {
+			"+"
+		} else if prev.is_some_and(|prev| *prev == id) {
+			"-"
+		} else {
+			" "
+		};
+		output.push_str(&format!("[{}]{} ", id + 1, symbol));
+		let padding_num = symbol.len() + id.to_string().len() + 3;
+		let padding: String = " ".repeat(padding_num);
+
+		// Add commands and PIDs
+		for (i, cmd) in self.get_commands().iter().enumerate() {
+			let pid = if pids || init {
+				let mut pid = self.get_pids().get(i).unwrap().to_string();
+				pid.push(' ');
+				pid
+			} else {
+				"".to_string()
+			};
+			let cmd = cmd.clone();
+			let mut status0 = if init { "".into() } else { DisplayWaitStatus(*self.get_statuses().get(i).unwrap()).to_string() };
+			if status0.len() < 6 && !status0.is_empty() {
+				// Pad out the length so that formatting is uniform
+				let diff = 6 - status0.len();
+				let pad = " ".repeat(diff);
+				status0.push_str(&pad);
+			}
+			let status1 = format!("{}{}",pid,status0);
+			let status2 = format!("{}\t{}",status1,cmd);
+			let mut status_final = if status0.starts_with("done") {
+				format!("{}{}{}",GREEN,status2,RESET)
+			} else if status0.starts_with("exit") || status0.starts_with("stopped") {
+				format!("{}{}{}",RED,status2,RESET)
+			} else {
+				format!("{}{}{}",CYAN,status2,RESET)
+			};
+			if i != self.get_commands().len() - 1 {
+				status_final.push_str(" |");
+			}
+			status_final.push('\n');
+			let status_line = if long {
+				// Long format includes PIDs
+				format!(
+					"{}{} {}",
+					if i != 0 { padding.clone() } else { "".into() },
+					self.get_pids().get(i).unwrap(),
+					status_final
+				)
+			} else {
+				format!(
+					"{}{}",
+					if i != 0 { padding.clone() } else { "".into() },
+					status_final
+				)
+			};
+			output.push_str(&status_line);
+		}
+
+		output
+	}
+}
+
+pub struct JobTable {
+	fg: Option<Job>,
+	jobs: Vec<Option<Job>>,
+	order: Vec<usize>,
+	new_updates: Vec<usize>
+}
+
+impl JobTable {
+	pub fn new() -> Self {
+		Self { fg: None, jobs: vec![], order: vec![], new_updates: vec![] }
+	}
+	fn next_open_pos(&self) -> usize {
+		if let Some(open_position) = self.jobs.iter().position(|slot| slot.is_none()) {
+			open_position
+		} else {
+			self.jobs.len()
+		}
+	}
+	pub fn mut_jobs(&mut self) -> &mut Vec<Option<Job>> {
+		&mut self.jobs
+	}
+	pub fn curr_job(&self) -> Option<usize> {
+		self.order.last().copied()
+	}
+	pub fn prev_job(&self) -> Option<usize> {
+		let len = self.order.len();
+		if len > 1 {
+			self.order.get(len - 2).copied()
+		} else {
+			None
+		}
+	}
+	pub fn insert_job(&mut self, mut job: Job) -> RshResult<usize> {
+		self.prune_jobs();
+		let table_position = self.next_open_pos();
+		job.set_table_id(table_position);
+		self.order.push(table_position);
+
+		println!("{}", job.display(self.job_order(), JobCmdFlags::INIT));
+		if table_position == self.jobs.len() {
+			self.jobs.push(Some(job)); // Append if no open position is found
+		} else {
+			self.jobs[table_position] = Some(job); // Insert job at the open position
+		}
+		Ok(table_position)
+	}
+	pub fn job_order(&self) -> &[usize] {
+		&self.order
+	}
+	pub fn new_fg(&mut self, job: Job) -> RshResult<()> {
+		let pgid = job.pgid();
+		self.fg = Some(job);
+		attach_tty(pgid)?;
+		self.fg.as_mut().unwrap().wait_pgrp()?;
+		attach_tty(*RSH_PGRP)?;
+		Ok(())
+	}
+
+	pub fn fg_to_bg(&mut self) -> RshResult<()> {
+		attach_tty(*RSH_PGRP)?;
+		if self.fg.is_none() {
+			return Ok(())
+		}
+		let fg = take(&mut self.fg);
+		if let Some(job) = fg {
+			// Find the first open position (None)
+			self.insert_job(job)?;
+		}
+		Ok(())
+	}
+	pub fn bg_to_fg(&mut self, id: JobID) -> RshResult<()> {
+		if let Some(job) = self.query(id) {
+			let table_id = job.table_id();
+			if table_id.is_none() {
+				return Err(ShError::from_internal("Called `bg_to_fg()` on a job with no table_id"))
+			}
+
+			// Safely remove the job and replace with None
+			let job = self.jobs.get_mut(table_id.unwrap()).and_then(Option::take);
+
+			if job.is_some() {
+				if self.fg.is_some() {
+					self.fg_to_bg()?;
+				}
+				self.fg = job;
+				self.order.pop();
+			} else {
+				return Ok(()); // Job was already None or invalid ID
+			}
+		}
+		Ok(())
+	}
+	pub fn get_fg(&self) -> Option<&Job> {
+		self.fg.as_ref()
+	}
+	pub fn get_fg_mut(&mut self) -> Option<&mut Job> {
+		self.fg.as_mut()
+	}
+	pub fn query(&self, identifier: JobID) -> Option<&Job> {
+		match identifier {
+			// Match by process group ID
+			JobID::Pgid(pgid) => {
+				self.jobs.iter().find_map(|job| {
+					job.as_ref().filter(|j| j.pgid == pgid)
+				})
+			}
+			// Match by process ID
+			JobID::Pid(pid) => {
+				self.jobs.iter().find_map(|job| {
+					job.as_ref().filter(|j| j.children.iter().any(|child| child.pid == pid))
+				})
+			}
+			// Match by table ID (index in the job table)
+			JobID::TableID(id) => {
+				self.jobs.get(id).and_then(|job| job.as_ref())
+			}
+			// Match by command name (partial match)
+			JobID::Command(cmd) => {
+				self.jobs.iter().find_map(|job| {
+					job.as_ref().filter(|j| {
+						j.children.iter().any(|child| {
+							child.command.as_ref().is_some_and(|c| c.contains(&cmd))
+						})
+					})
+				})
+			}
+		}
+	}
+	pub fn query_mut(&mut self, identifier: JobID) -> Option<&mut Job> {
+		match identifier {
+			// Match by process group ID
+			JobID::Pgid(pgid) => {
+				self.jobs.iter_mut().find_map(|job| {
+					job.as_mut().filter(|j| j.pgid == pgid)
+				})
+			}
+			// Match by process ID
+			JobID::Pid(pid) => {
+				self.jobs.iter_mut().find_map(|job| {
+					job.as_mut().filter(|j| j.children.iter().any(|child| child.pid == pid))
+				})
+			}
+			// Match by table ID (index in the job table)
+			JobID::TableID(id) => {
+				self.jobs.get_mut(id).and_then(|job| job.as_mut())
+			}
+			// Match by command name (partial match)
+			JobID::Command(cmd) => {
+				self.jobs.iter_mut().find_map(|job| {
+					job.as_mut().filter(|j| {
+						j.children.iter().any(|child| {
+							child.command.as_ref().is_some_and(|c| c.contains(&cmd))
+						})
+					})
+				})
+			}
+		}
+	}
+	pub fn prune_jobs(&mut self) {
+		while let Some(job) = self.jobs.last() {
+			if job.is_none() {
+				self.jobs.pop();
+			} else {
+				break;
+			}
+		}
+	}
+	pub fn prune_finished(&mut self) {
+		self.jobs.retain(|job| job.as_ref().is_some_and(|job| job.is_alive()));
+	}
+	pub fn reset_recents(&mut self) {
+		self.new_updates.clear()
+	}
+	pub fn print_jobs(&self, flags: &JobCmdFlags) {
+		let jobs = if flags.contains(JobCmdFlags::NEW_ONLY) {
+			self.jobs
+				.clone()
+				.into_iter()
+				.filter(|job| job.as_ref().is_some_and(|job| self.new_updates.contains(&job.table_id().unwrap())))
+				.collect::<Vec<Option<Job>>>()
+		} else {
+			self.jobs.clone()
+		};
+		for job in jobs.into_iter().flatten() {
+			// Skip foreground job
+			let id = job.table_id().unwrap();
+			// Filter jobs based on flags
+			if flags.contains(JobCmdFlags::RUNNING) && !matches!(job.get_statuses().get(id).unwrap(), WaitStatus::StillAlive | WaitStatus::Continued(_)) {
+				continue;
+			}
+			if flags.contains(JobCmdFlags::STOPPED) && !matches!(job.get_statuses().get(id).unwrap(), WaitStatus::Stopped(_,_)) {
+				continue;
+			}
+			// Print the job in the selected format
+			println!("{}", job.display(&self.order,*flags));
+		}
+	}
+	pub fn update_job_statuses(&mut self) -> RshResult<()> {
+		for job in self.jobs.iter_mut().flatten() {
+			job.poll_children()?;
+		}
+		Ok(())
+	}
+}
+
+impl Default for JobTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -230,379 +803,8 @@ impl fmt::Display for RVal {
 	}
 }
 
-#[derive(Debug,Clone)]
-pub struct Job {
-	job_id: i32,
-	pids: Vec<Pid>,
-	commands: Vec<String>,
-	pgid: Pid,
-	statuses: Vec<RshWait>,
-	saved_statuses: Vec<RshWait>,
-	job_state: Arc<(Mutex<JobState>, Condvar)>
-}
-
-impl Job {
-	pub fn new(job_id: i32, pids: Vec<Pid>, commands: Vec<String>, pgid: Pid) -> Self {
-		let num_pids = pids.len();
-		Self {
-			job_id,
-			pgid,
-			pids,
-			commands,
-			statuses: vec![RshWait::Running;num_pids],
-			saved_statuses: vec![],
-			job_state: Arc::new((Mutex::new(JobState::Running), Condvar::new()))
-		}
-	}
-
-	pub fn get_status_handle(&self) -> Arc<(Mutex<JobState>,Condvar)> {
-		Arc::clone(&self.job_state)
-	}
-
-	pub fn is_running(&self) -> bool {
-		self.statuses.iter().any(|stat| matches!(stat,RshWait::Running))
-	}
-	pub fn is_stopped(&self) -> bool {
-		self.statuses.iter().all(|stat| matches!(stat,RshWait::Stopped {..} | RshWait::Success | RshWait::Fail {..}))
-	}
-	pub fn stop(&mut self,signal: Signal) {
-		self.saved_statuses = take(&mut self.statuses);
-		for i in 0..self.saved_statuses.len() {
-			if self.saved_statuses.get(i).is_some_and(|stat| matches!(stat, RshWait::Success | RshWait::Fail {..})) {
-				self.statuses.push(self.saved_statuses.get(i).unwrap().clone());
-			} else {
-				self.statuses.push(RshWait::Stopped { sig: signal })
-			}
-		}
-	}
-	pub fn cont(&mut self) -> RshResult<()> {
-		if self.saved_statuses.is_empty() {
-			// Most likely just foregrounding a background process that's already running
-			return Ok(())
-		}
-		if self.statuses.iter().any(|stat| !matches!(stat,RshWait::Stopped {..} | RshWait::Success | RshWait::Fail {..})) {
-			return Err(ShError::from_internal("Attempted to continue a job that is already running"))
-		}
-		self.statuses = take(&mut self.saved_statuses);
-		Ok(())
-	}
-	pub fn is_foreground(&self) -> bool {
-		unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)).unwrap() == self.pgid }
-	}
-	pub fn update_status(&mut self, pid: Option<Pid>, new_stat: RshWait) {
-		if let Some(pid) = pid {
-			let child = self.pids().iter().position(|job_pid| *job_pid == pid).unwrap();
-			self.statuses[child] = new_stat;
-		} else {
-			let pids: Vec<Pid> = self.pids().to_vec();
-			for (index, _) in pids.into_iter().enumerate() {
-				self.statuses[index] = new_stat.clone();
-			}
-		}
-	}
-	pub fn pids(&self) -> &[Pid] {
-		&self.pids
-	}
-	pub fn pgid(&self) -> &Pid {
-		&self.pgid
-	}
-	pub fn set_id(&mut self, id: i32) {
-		self.job_id = id
-	}
-	pub fn get_proc_statuses(&self) -> &[RshWait] {
-		&self.statuses
-	}
-	pub fn id(&self) -> i32 {
-		self.job_id
-	}
-	pub fn commands(&self) -> Vec<String> {
-		self.commands.clone()
-	}
-	pub fn signal_proc(&self, sig: Signal) -> RshResult<()> {
-		if self.pids().len() == 1 {
-			let pid = *self.pids().first().unwrap();
-			signal::kill(pid, sig).map_err(|_| ShError::from_io())
-		} else {
-			signal::killpg(self.pgid, sig).map_err(|_| ShError::from_io())
-		}
-	}
-	pub fn display(&self, job_order: &[i32], flags: JobFlags) -> String {
-		let long = flags.contains(JobFlags::LONG);
-		let init = flags.contains(JobFlags::INIT);
-		let pids = flags.contains(JobFlags::PIDS);
-		let current = job_order.last();
-		let prev = if job_order.len() > 2 {
-			job_order.get(job_order.len() - 2)
-		} else { None };
-		let mut output = String::new();
-
-		const GREEN: &str = "\x1b[32m";
-		const RED: &str = "\x1b[31m";
-		const CYAN: &str = "\x1b[35m";
-		const RESET: &str = "\x1b[0m";
-
-		// Add job ID and status
-		let symbol = if current.is_some_and(|cur| *cur == self.job_id) {
-			"+"
-		} else if prev.is_some_and(|prev| *prev == self.job_id) {
-			"-"
-		} else {
-			" "
-		};
-		output.push_str(&format!("[{}]{} ", self.job_id, symbol));
-		let padding_num = symbol.len() + self.job_id.to_string().len() + 3;
-		let padding: String = " ".repeat(padding_num);
-
-		// Add commands and PIDs
-		for (i, cmd) in self.commands.iter().enumerate() {
-			let pid = if pids || init {
-				let mut pid = self.pids.get(i).unwrap().to_string();
-				pid.push(' ');
-				pid
-			} else {
-				"".to_string()
-			};
-			let cmd = cmd.clone();
-			let mut status0 = if init { "".into() } else { self.statuses.get(i).unwrap().to_string() };
-			if status0.len() < 6 && !status0.is_empty() {
-				// Pad out the length so that formatting is uniform
-				let diff = 6 - status0.len();
-				let pad = " ".repeat(diff);
-				status0.push_str(&pad);
-			}
-			let status1 = format!("{}{}",pid,status0);
-			let status2 = format!("{}\t{}",status1,cmd);
-			let mut status_final = if status0.starts_with("done") {
-				format!("{}{}{}",GREEN,status2,RESET)
-			} else if status0.starts_with("exit") || status0.starts_with("stopped") {
-				format!("{}{}{}",RED,status2,RESET)
-			} else {
-				format!("{}{}{}",CYAN,status2,RESET)
-			};
-			if i != self.commands.len() - 1 {
-				status_final.push_str(" |");
-			}
-			status_final.push('\n');
-			let status_line = if long {
-				// Long format includes PIDs
-				format!(
-					"{}{} {}",
-					if i != 0 { padding.clone() } else { "".into() },
-					self.pids().get(i).unwrap(),
-					status_final
-				)
-			} else {
-				format!(
-					"{}{}",
-					if i != 0 { padding.clone() } else { "".into() },
-					status_final
-				)
-			};
-			output.push_str(&status_line);
-		}
-
-		output
-	}
-
-}
 
 
-#[derive(Clone,Debug)]
-pub struct JobTable {
-	jobs: HashMap<i32,Job>,
-	job_order: Vec<i32>,
-	updated_since_check: Vec<i32>,
-}
-
-impl JobTable {
-	fn new() -> Self {
-		Self {
-			jobs: HashMap::new(),
-			job_order: Vec::new(),
-			updated_since_check: Vec::new(),
-
-		}
-	}
-	pub fn kill_all(&mut self) {
-		for job in self.jobs.values_mut() {
-			let pgid = job.pgid();
-			let _ = killpg(*pgid, Signal::SIGTERM);
-
-			// Iterate over statuses mutably and update them
-			for status in &mut job.statuses {
-				*status = RshWait::Terminated { signal: 15 };
-			}
-		}
-	}
-	pub fn update_fg_status(&mut self, pid: Option<Pid>, wait: RshWait) {
-		if let Some(ref mut fg_job) = self.get_job(0) {
-			fg_job.update_status(pid, wait);
-		}
-	}
-	pub fn update_current(&mut self, id: i32) {
-		if let Some(index) = self.job_order.iter().position(|job_id| *job_id == id) {
-			self.job_order.remove(index);
-		}
-		self.job_order.push(id)
-	}
-	pub fn is_fg(&self,pid: Pid) -> bool {
-		self.jobs.get(&0).is_some_and(|job| *job.pgid() == pid)
-	}
-	pub fn job_order(&self) -> &[i32] {
-		&self.job_order
-	}
-	pub fn num_jobs(&self) -> usize {
-		self.jobs.len()
-	}
-	pub fn update_by_pgid(&mut self, pgid: Pid, pid: Option<Pid>, wait: RshWait) {
-		if let Some(job) = self.mut_by_pgid(pgid) {
-			job.update_status(pid, wait);
-		}
-	}
-	pub fn update_by_id(&mut self, id: i32, pid: Option<Pid>, wait: RshWait) {
-		if let Some(job) = self.jobs.get_mut(&id) {
-			job.update_status(pid, wait);
-		}
-	}
-	pub fn num_running(&self) -> usize {
-		let mut num_running = 0;
-		for job in self.jobs.keys() {
-			for status in &self.jobs.get(job).unwrap().statuses {
-				if *status == RshWait::Running {
-					num_running += 1;
-				}
-			}
-		}
-		num_running
-	}
-	pub fn get_fg_pgid(&self) -> Option<Pid> {
-		self.jobs.get(&0).map(|job| *job.pgid())
-	}
-	pub fn new_fg(&mut self, job: Job) {
-		self.jobs.insert(0,job);
-	}
-	pub fn to_background(&mut self) -> usize {
-		let job_id = self.num_jobs();
-		let job = self.jobs.remove(&0);
-		if let Some(mut fg_job) = job {
-			self.update_current(job_id as i32);
-			fg_job.set_id(job_id as i32);
-			println!("{}",fg_job.display(&self.job_order, JobFlags::PIDS));
-			self.jobs.insert(job_id as i32,fg_job);
-		}
-		job_id
-	}
-	pub fn to_foreground(&mut self, job_id: i32) {
-		if let Some(mut job) = self.jobs.remove(&job_id) {
-			job.set_id(0);
-			self.new_fg(job);
-		}
-	}
-	pub fn mark_updated(&mut self, id: i32) {
-		self.updated_since_check.push(id)
-	}
-	pub fn read_by_command(&self, string: &str) -> Vec<Job> {
-		let mut matches = vec![];
-		for id in self.jobs.keys() {
-			let job = self.jobs.get(id).unwrap();
-			for command in job.commands() {
-				if command.to_lowercase().contains(&string.to_lowercase()) {
-					matches.push(job.clone());
-				}
-			}
-		}
-		matches
-	}
-	pub fn borrow_jobs(&self) -> &HashMap<i32,Job> {
-		&self.jobs
-	}
-	pub fn get_job(&mut self, id: i32) -> Option<&mut Job> {
-		self.jobs.get_mut(&id)
-	}
-	pub fn read_job(&self, id: i32) -> Option<&Job> {
-		self.jobs.get(&id)
-	}
-	pub fn get_by_pgid(&self, pgid: Pid) -> Option<&Job> {
-		self.jobs.values()
-			.find(|job| pgid == job.pgid)
-	}
-	pub fn get_by_pid(&self, pid: Pid) -> Option<&Job> {
-		self.jobs.values().find(|job| {
-			job.pids.contains(&pid)
-		})
-	}
-	pub fn mut_by_pgid(&mut self, pgid: Pid) -> Option<&mut Job> {
-		self.jobs.iter_mut()
-			.map(|(_, job)| job)
-			.find(|job| pgid == job.pgid)
-	}
-	pub fn is_finished(&self, pgid: Pid) -> bool {
-		let job = self.get_by_pgid(pgid);
-		if let Some(job) = job {
-			for status in &job.statuses {
-				if *status == RshWait::Running {
-					return false
-				}
-			}
-		}
-		true
-	}
-	pub fn complete(&mut self, job_id: usize) {
-		if let Some(job) = self.jobs.get_mut(&(job_id as i32)) {
-			job.statuses.iter_mut().for_each(|stat| *stat = RshWait::Success);
-		}
-	}
-	pub fn new_job(&mut self, pids: Vec<Pid>, commands: Vec<String>, pgid: Pid) -> usize {
-		let job_id = self.jobs.len() + 1;
-		let job = Job::new(job_id as i32,pids,commands,pgid);
-		if job_id >= 1 {
-			println!("{}",job.display(&self.job_order,JobFlags::INIT));
-		}
-		self.jobs.insert(job_id as i32, job);
-		self.update_current(job_id as i32);
-		job_id
-	}
-	pub fn reset_recents(&mut self) {
-		self.updated_since_check.clear()
-	}
-	pub fn is_a_job(&self, pid: &Pid) -> bool {
-		for job in &self.jobs {
-			for job_pid in &job.1.pids {
-				if pid == job_pid {
-					return true
-				}
-			}
-		}
-		false
-	}
-	pub fn print_jobs(&self, flags: &JobFlags) {
-		let mut jobs = if flags.contains(JobFlags::NEW_ONLY) {
-			self.jobs
-				.values()
-				.filter(|job| self.updated_since_check.contains(&job.job_id))
-				.collect::<Vec<&Job>>()
-		} else {
-			self.jobs.values().collect::<Vec<&Job>>()
-		};
-		jobs.sort_by_key(|job| job.job_id);
-		for job in jobs {
-			// Skip foreground job
-			if job.id() == 0 {
-				continue
-			}
-			let id = job.job_id;
-			// Filter jobs based on flags
-			if flags.contains(JobFlags::RUNNING) && !matches!(job.statuses.get(id as usize).unwrap(), RshWait::Running) {
-				continue;
-			}
-			if flags.contains(JobFlags::STOPPED) && !matches!(job.statuses.get(id as usize).unwrap(), RshWait::Stopped {..}) {
-				continue;
-			}
-			// Print the job in the selected format
-			println!("{}", job.display(&self.job_order,*flags));
-		}
-	}
-}
 
 
 #[derive(Debug,Clone)]
@@ -797,112 +999,14 @@ impl EnvMeta {
 	}
 }
 
-pub struct TermCtl {
-	rsh_pgrp: Pid,
-	term_ctl_status: Arc<(Mutex<bool>, Condvar)>
+pub fn disable_reaping() {
+	unsafe { signal(Signal::SIGCHLD, SigHandler::Handler(crate::signal::ignore_sigchld)) }.unwrap();
 }
 
-impl TermCtl {
-	pub fn new() -> Self {
-		let rsh_pgrp = getpgrp();
-		let term_ctl_status = Arc::new((Mutex::new(false), Condvar::new()));
-		Self { rsh_pgrp, term_ctl_status }
-	}
-
-	pub fn wait_for_terminal_control(&self) {
-		let (lock, cvar) = &*self.term_ctl_status;
-		let mut has_control = lock.lock().unwrap();
-
-		while !*has_control {
-			if term_controller() == self.rsh_pgrp {
-				*has_control = true;
-				break;
-			}
-			// Pass the MutexGuard directly (remove the `&mut`)
-			has_control = cvar.wait(has_control).unwrap();
-		}
-	}
-
-	pub fn notify_terminal_control(&self) {
-		let (lock, cvar) = &*self.term_ctl_status;
-		let mut has_control = lock.lock().unwrap();
-		*has_control = true;
-		cvar.notify_all();
-	}
-
-
-	pub fn my_pgrp(&self) -> Pid {
-		self.rsh_pgrp
-	}
-}
-
-impl Default for TermCtl {
-	fn default() -> Self {
-		Self::new()
-	}
-}
-
-pub fn await_job(pgid: Pid) -> RshResult<()> {
-	let status_handle = read_jobs(|j| j.get_by_pgid(pgid).map(|job| job.get_status_handle()))?.unwrap();
-	let (lock,cvar) = &*status_handle;
-	let mut job_state = lock.lock().unwrap();
-	while !matches!(*job_state, JobState::Stopped | JobState::Done) {
-		job_state = cvar.wait(job_state).unwrap();
-	}
+pub fn enable_reaping() -> RshResult<()> {
+	write_jobs(|j| j.update_job_statuses())??;
+	unsafe { signal(Signal::SIGCHLD, SigHandler::Handler(crate::signal::handle_sigchld)) }.unwrap();
 	Ok(())
-}
-
-pub fn await_fg_job() -> RshResult<RshWait> {
-	let mut last_status = RshWait::new();
-	let status_handle = read_jobs(|j| j.read_job(0).map(|job| job.get_status_handle()))?;
-	if status_handle.is_none() {
-		return Ok(last_status)
-	}
-	let status_handle = status_handle.unwrap();
-	let (lock,cvar) = &*status_handle;
-	let mut job_state = lock.lock().unwrap();
-	while !matches!(*job_state, JobState::Stopped | JobState::Done) {
-		job_state = cvar.wait(job_state).unwrap();
-	}
-	last_status = read_jobs(|j| j.read_job(0).unwrap().get_proc_statuses().first().unwrap().clone())?;
-	Ok(last_status)
-}
-
-#[track_caller]
-pub fn notify_job(pgid: Pid, state: JobState) -> RshResult<()> {
-	let status_handle = read_jobs(|j| j.get_by_pgid(pgid).map(|job| job.get_status_handle()))?;
-	if status_handle.is_none() {
-		return Ok(())
-	}
-	let status_handle = status_handle.unwrap();
-
-	let (lock, cvar) = &*status_handle;
-	let mut job_state = lock.lock().unwrap();
-	*job_state = state;
-	std::mem::drop(job_state);
-	cvar.notify_all();
-	Ok(())
-}
-
-pub fn attach_tty(pgid: Pid) -> RshResult<()> {
-	// Ensure stdin (fd 0) is a tty before proceeding
-	if !isatty(0).unwrap_or(false) {
-		return Ok(());
-	}
-
-	if pgid == my_pgrp()? {
-		notify_term_ctl()?
-	}
-
-	// Attempt to set the process group for the terminal
-	unsafe {
-		tcsetpgrp(BorrowedFd::borrow_raw(0), pgid)
-			.map_err(|e| ShError::from_internal(format!("Failed to attach tty to pgid {}: {}", pgid, e).as_str()))
-	}
-}
-
-pub fn term_controller() -> Pid {
-	unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) }.unwrap()
 }
 
 pub fn read_jobs<F,T>(f: F) -> RshResult<T>
@@ -947,23 +1051,22 @@ where F: FnOnce(&mut EnvMeta) -> T {
 	let mut lock = META.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
 }
-pub fn await_term_ctl() -> RshResult<()> {
-	let term_ctl = TERM_CTL.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
-	term_ctl.wait_for_terminal_control();
-	Ok(())
-}
-pub fn notify_term_ctl() -> RshResult<()> {
-	let term_ctl = TERM_CTL.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
-	term_ctl.notify_terminal_control();
-	Ok(())
-}
-pub fn my_pgrp() -> RshResult<Pid> {
-	let term_ctl = TERM_CTL.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
-	Ok(term_ctl.my_pgrp())
+#[track_caller]
+pub fn attach_tty(pgid: Pid) -> RshResult<()> {
+	// Ensure stdin (fd 0) is a tty before proceeding
+	if !isatty(0).unwrap_or(false) {
+		return Ok(());
+	}
+
+	// Attempt to set the process group for the terminal
+	unsafe {
+		tcsetpgrp(BorrowedFd::borrow_raw(0), pgid)
+			.map_err(|e| ShError::from_internal(format!("Failed to attach tty to pgid {}: {}", pgid, e).as_str()))
+	}
 }
 
-pub fn is_interactive() -> RshResult<bool> {
-	read_meta(|m| m.flags.contains(EnvFlags::INTERACTIVE))
+pub fn term_controller() -> Pid {
+	unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) }.unwrap()
 }
 
 fn init_shopts() -> HashMap<String,usize> {
@@ -1085,9 +1188,7 @@ pub fn source_file(path: PathBuf) -> RshResult<()> {
 
 #[cfg(test)]
 mod tests {
-	use ctor::{dtor,ctor};
 	use rstest::{fixture, rstest};
-	use std::fs;
 	use pretty_assertions::assert_eq;
 	use super::*;
 
@@ -1096,19 +1197,29 @@ mod tests {
 	fn mock_jobs() -> JobTable {
 		let mut job_table = JobTable::new();
 
-		// Add mock jobs
-		job_table.new_job(
-			vec![Pid::from_raw(100), Pid::from_raw(101)],
-			vec!["cmd1".to_string(), "cmd2".to_string()],
-			Pid::from_raw(100),
-		);
-		job_table.new_job(
-			vec![Pid::from_raw(200)],
-			vec!["cmd3".to_string()],
-			Pid::from_raw(200),
-		);
+		let children1 = vec![
+			ChildProc::new(Pid::from_raw(100), Some("cmd1")).unwrap(),
+			ChildProc::new(Pid::from_raw(101), Some("cmd2")).unwrap()
+		];
+		let job1 = JobBuilder::new()
+			.with_id(1)
+			.with_pgid(Pid::from_raw(100))
+			.with_children(children1)
+			.build();
 
-		job_table
+			let children2 = vec![
+				ChildProc::new(Pid::from_raw(200), Some("cmd3")).unwrap(),
+			];
+			let job2 = JobBuilder::new()
+				.with_id(2)
+				.with_pgid(Pid::from_raw(200))
+				.with_children(children2)
+				.build();
+
+			job_table.insert_job(job1).unwrap();
+			job_table.insert_job(job2).unwrap();
+
+			job_table
 	}
 
 	#[fixture]
@@ -1287,44 +1398,49 @@ mod tests {
 
 	#[rstest]
 	fn jobtable_foreground_background(mut mock_jobs: JobTable) {
-		let fg_job = Job::new(0, vec![Pid::from_raw(400)], vec!["fg_cmd".to_string()], Pid::from_raw(400));
-		mock_jobs.new_fg(fg_job);
+		let fg_children = vec![
+			ChildProc::new(Pid::from_raw(400), Some("fg_cmd")).unwrap()
+		];
+		let fg_job = JobBuilder::new()
+			.with_pgid(Pid::from_raw(400))
+			.with_children(fg_children)
+			.build();
+			mock_jobs.new_fg(fg_job).unwrap();
 
-		assert!(mock_jobs.is_fg(Pid::from_raw(400)));
+			let fg = mock_jobs.get_fg();
 
-		// Move the job to the background
-		mock_jobs.to_background();
-		assert!(!mock_jobs.is_fg(Pid::from_raw(400)));
+			assert!(fg.is_some_and(|job| job.pgid().as_raw() == 400));
 
-		// Bring the job back to the foreground
-		mock_jobs.to_foreground(3);
-		assert!(mock_jobs.is_fg(Pid::from_raw(400)));
-	}
+			// Move the job to the background
+			mock_jobs.fg_to_bg().unwrap();
+			let fg = mock_jobs.get_fg();
+			assert!(fg.is_none());
 
-	#[rstest]
-	fn jobtable_status_updates(mut mock_jobs: JobTable) {
-		let pgid = Pid::from_raw(100); // PGID of the first job in the mock_jobs fixture
-
-		// Update job status by PGID
-		mock_jobs.mut_by_pgid(pgid).unwrap().stop(Signal::SIGTSTP);
-		assert!(mock_jobs.read_job(1).unwrap().is_stopped());
-
-		// Update job status by ID
-		mock_jobs.update_by_id(2, Some(Pid::from_raw(200)), RshWait::Running);
-		assert!(mock_jobs.read_job(2).unwrap().is_running());
+			// Bring the job back to the foreground
+			mock_jobs.bg_to_fg(JobID::TableID(3)).unwrap();
+			let fg = mock_jobs.get_fg();
+			assert!(fg.is_some_and(|job| job.pgid().as_raw() == 400));
 	}
 
 	#[rstest]
 	fn jobtable_new_job(mut mock_jobs: JobTable) {
-		let pids = vec![Pid::from_raw(300)];
 		let commands = vec!["cmd4".to_string()];
 		let pgid = Pid::from_raw(300);
 
-		let job_id = mock_jobs.new_job(pids.clone(), commands.clone(), pgid);
-		let job = mock_jobs.read_job(job_id as i32).unwrap();
+		let children = vec![
+			ChildProc::new(Pid::from_raw(300), Some("cmd4")).unwrap()
+		];
 
-		assert_eq!(job.job_id, job_id as i32);
-		assert_eq!(job.pids, pids);
-		assert_eq!(job.commands, commands);
+		let new_job = JobBuilder::new()
+			.with_pgid(pgid)
+			.with_children(children.clone())
+			.build();
+
+			let job_id = mock_jobs.insert_job(new_job).unwrap();
+			let job = mock_jobs.query(JobID::TableID(job_id)).unwrap();
+
+			assert_eq!(job.table_id().unwrap(), job_id);
+			assert_eq!(job.get_children().iter().next(), children.first());
+			assert_eq!(job.get_commands(), commands);
 	}
 }

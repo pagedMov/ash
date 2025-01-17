@@ -1,11 +1,10 @@
-use std::{collections::{HashMap, VecDeque}, ffi::CString, fmt::{self, Display}, os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd}, panic::Location, path::Path, sync::{mpsc::Receiver, Arc}, thread};
+use std::{collections::{HashMap, VecDeque}, ffi::CString, fmt::{self, Display}, os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd}, path::Path, sync::Arc};
 
-use std::time::Duration;
 use libc::{memfd_create, MFD_CLOEXEC};
-use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::{waitpid, WaitStatus}}, unistd::{close, dup, dup2, execve, execvpe, fork, getpid, pipe, setpgid, tcgetpgrp, tcsetpgrp, ForkResult, Pid}, NixPath};
+use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, setpgid, ForkResult, Pid}};
 use std::sync::Mutex;
 
-use crate::{builtin, event::{self, ShError, ShEvent}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node, Span}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, read_jobs, read_logic, read_meta, read_vars, term_controller, write_jobs, write_logic, write_meta, write_vars, EnvFlags, Job, RVal, SavedEnv, RSH_PGRP}, RshResult, GLOBAL_EVENT_CHANNEL};
+use crate::{builtin, event::ShError, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, disable_reaping, enable_reaping, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, RshResult};
 
 macro_rules! node_operation {
 	($node_type:path { $($field:tt)* }, $node:expr, $node_op:block) => {
@@ -241,7 +240,7 @@ impl RshWait {
 			}
 			WaitStatus::Signaled(_, sig, _) => RshWait::Signaled { sig },
 			WaitStatus::Stopped(_, sig) => RshWait::Stopped { sig },
-			WaitStatus::PtraceEvent(_, signal, _) => todo!(),
+			WaitStatus::PtraceEvent(_, _, _) => todo!(),
 			WaitStatus::PtraceSyscall(_) => todo!(),
 			WaitStatus::Continued(_) => RshWait::Continued,
 			WaitStatus::StillAlive => RshWait::Running
@@ -550,14 +549,25 @@ fn handle_for(node: Node,io: ProcIO) -> RshResult<RshWait> {
 		}
 		Ok(ForkResult::Parent { child }) => {
 			setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
+			let children = vec![
+				ChildProc::new(child,Some("for"))?,
+			];
+			let job = JobBuilder::new()
+				.with_pgid(child)
+				.with_children(children)
+				.build();
+
 			if node.flags.contains(NdFlags::BACKGROUND) {
-				let job_id = write_jobs(|j| j.new_job(vec![child], vec!["for".into()], child))?;
+				write_jobs(|j| j.insert_job(job))??;
+
 			} else {
 				if !node.flags.contains(NdFlags::FUNCTION) {
 					shellenv::attach_tty(child)?;
 				}
-				let job = Job::new(0, vec![child], vec!["for".into()], child);
-				write_jobs(|j| j.new_fg(job))?;
+				disable_reaping();
+				write_jobs(|j| j.new_fg(job))??;
+				enable_reaping()?;
+				write_jobs(|j| j.update_job_statuses())??;
 			}
 		}
 		Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_for".into(), 1, node.span())),
@@ -601,7 +611,7 @@ fn handle_loop(node: Node, io: ProcIO) -> RshResult<RshWait> {
 
 
 fn handle_if(node: Node, io: ProcIO) -> RshResult<RshWait> {
-	let mut last_status = RshWait::new();
+	let last_status = RshWait::new();
 	let cond_io = ProcIO::from(io.stdin,None,None);
 	let body_io = ProcIO::from(None,io.stdout,io.stderr);
 
@@ -611,11 +621,17 @@ fn handle_if(node: Node, io: ProcIO) -> RshResult<RshWait> {
 			let body = *block.body;
 
 			traverse(cond, cond_io.clone())?;
-			last_status = shellenv::await_fg_job()?;
+			let statuses = write_jobs(|j| {
+				if let Some(job) = j.get_fg_mut() {
+					job.wait_pgrp().unwrap()
+				} else {
+					vec![]
+				}
+			})?;
 
-			if let RshWait::Success = last_status {
+			let is_success = statuses.iter().all(|stat| matches!(stat, WaitStatus::Exited(_, 0)));
+			if is_success {
 				traverse(body, body_io.clone())?;
-				last_status = shellenv::await_fg_job()?;
 				return Ok(last_status)
 			}
 		}
@@ -631,16 +647,28 @@ fn handle_chain(node: Node) -> RshResult<RshWait> {
 
 	node_operation!(NdType::Chain { left, right, op }, node, {
 		traverse(*left, ProcIO::new())?;
-		last_status = shellenv::await_fg_job()?;
-		if last_status == RshWait::Success {
-			if let NdType::And = op.nd_type {
-				traverse(*right,ProcIO::new())?;
+
+		// Use the new waiting logic to fetch statuses
+		let statuses = write_jobs(|j| {
+			if let Some(job) = j.get_fg_mut() {
+				job.wait_pgrp().unwrap()
+			} else {
+				vec![]
 			}
-		} else if let NdType::Or = op.nd_type {
-			traverse(*right,ProcIO::new())?;
+		})?;
+
+		// Determine the result of the left side
+		let is_success = statuses.iter().all(|stat| matches!(stat, WaitStatus::Exited(_, 0)));
+
+		// Traverse the right side based on the chain operator and status
+		last_status = match op.nd_type {
+			NdType::And if is_success => traverse(*right, ProcIO::new())?,
+			NdType::Or if !is_success => traverse(*right, ProcIO::new())?,
+			_ => unreachable!()
 		}
 	});
-	Ok(last_status.clone())
+
+	Ok(last_status)
 }
 
 fn handle_assignment(node: Node) -> RshResult<RshWait> {
@@ -699,22 +727,6 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 		_ => unimplemented!("found this builtin: {}", argv[0].text()),
 	};
 
-	if !background {
-		let pgid = nix::unistd::getpgrp();
-		let job = Job::new(0, vec![pgid], argv.iter().map(|arg| arg.text().to_string()).collect(), pgid);
-		write_jobs(|j| j.new_fg(job))?;
-		write_jobs(|j| j.complete(0))?;
-		builtin_result?;
-		shellenv::notify_job(pgid, shellenv::JobState::Done)?;
-	} else {
-		let pgid = nix::unistd::getpgrp();
-		let job = Job::new(0, vec![pgid], vec![argv.first().unwrap().text().into()], pgid);
-		write_jobs(|j| j.new_job(vec![pgid], vec![argv.first().unwrap().text().into()], pgid))?;
-		write_jobs(|j| j.complete(0))?;
-		shellenv::notify_job(pgid, shellenv::JobState::Done)?;
-		builtin_result?;
-	}
-
 	Ok(RshWait::Success)
 }
 
@@ -744,7 +756,7 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 		body = expand::expand_shebang(body)?;
 
 		// Write the subshell contents to an in-memory file descriptor
-		let mut memfd = RustFd::new_memfd("anonymous_subshell", true)?;
+		let memfd = RustFd::new_memfd("anonymous_subshell", true)?;
 		memfd.write(body.as_bytes())?;
 
 		io.backup_fildescs()?;
@@ -774,13 +786,21 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 				unreachable!();
 			}
 			Ok(ForkResult::Parent { child }) => {
-				memfd.close()?;
 				if !node.flags.contains(NdFlags::IN_CMD_SUB) {
 					setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
+					let children = vec![
+						ChildProc::new(child,Some("anonymous_subshell"))?,
+					];
+					let job = JobBuilder::new()
+						.with_pgid(child)
+						.with_children(children)
+						.build();
 					shellenv::attach_tty(child)?;
-					let job = Job::new(0, vec![child], vec!["anonymous_subshell".into()], child);
 					env_snapshot.restore_snapshot()?;
-					write_jobs(|j| j.new_fg(job))?;
+					disable_reaping();
+					write_jobs(|j| j.new_fg(job))??;
+					enable_reaping()?;
+					write_jobs(|j| j.update_job_statuses())??;
 				}
 			}
 			Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_subshell".into(), 1, node.span())),
@@ -962,12 +982,23 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 
 					setpgid(child, pgid.unwrap()).map_err(|_| ShError::from_internal("Failed to set pgid in pipeline"))?;
 					if commands.is_empty() {
+						let mut children = Vec::new();
+						for (index,pid) in pids.iter().enumerate() {
+							let child = ChildProc::new(*pid, cmds.get(index).map(|cmd| cmd.as_str()))?;
+							children.push(child);
+						}
+						let job = JobBuilder::new()
+							.with_pgid(pgid.unwrap())
+							.with_children(children)
+							.build();
+
 						if background {
-							write_jobs(|j| j.new_job(pids, cmds, pgid.unwrap()))?;
+							write_jobs(|j| j.insert_job(job))??;
 						} else {
-							let job = Job::new(0, pids, cmds, pgid.unwrap());
-							write_jobs(|j| j.new_fg(job))?;
-							shellenv::attach_tty(pgid.unwrap())?
+							disable_reaping();
+							write_jobs(|j| j.new_fg(job))??;
+							enable_reaping()?;
+							write_jobs(|j| j.update_job_statuses())??;
 						}
 						break;
 					}
@@ -1007,6 +1038,7 @@ fn handle_command(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 
 	// Handle redirections and execute the command if in a pipe
 	if node.flags.contains(NdFlags::IN_PIPE) {
+		handle_redirs(redirs.into())?;
 		execvpe(&command, &argv, &envp).unwrap();
 		unreachable!();
 	}
@@ -1014,6 +1046,7 @@ fn handle_command(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 	// Fork the process
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
+			handle_redirs(redirs.into())?;
 			execvpe(&command, &argv, &envp).unwrap();
 			unreachable!();
 		}
@@ -1030,14 +1063,21 @@ fn handle_command(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 
 fn handle_parent_process(child: Pid, command: CString, node: &Node) -> RshResult<()> {
 	setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
+	let children = vec![
+		ChildProc::new(child, Some(command.to_str().unwrap()))?
+	];
+	let job = JobBuilder::new()
+		.with_children(children)
+		.with_pgid(child)
+		.build();
+
 	if node.flags.contains(NdFlags::BACKGROUND) {
-		let job_id = write_jobs(|j| j.new_job(vec![child], vec![command.to_str().unwrap().to_string()], child))?;
+		write_jobs(|j| j.insert_job(job))??;
 	} else {
-		if !node.flags.contains(NdFlags::FUNCTION) {
-			shellenv::attach_tty(child)?;
-		}
-		let job = Job::new(0, vec![child], vec![command.to_str().unwrap().to_string()], child);
-		write_jobs(|j| j.new_fg(job))?;
+		disable_reaping();
+		write_jobs(|j| j.new_fg(job))??;
+		enable_reaping()?;
+		write_jobs(|j| j.update_job_statuses())??;
 	}
 	Ok(())
 }
