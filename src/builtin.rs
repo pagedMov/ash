@@ -1133,7 +1133,7 @@ pub fn jobs(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 			write_jobs(|j| j.reset_recents())?;
 			setpgid(child, child).map_err(|_| ShError::from_io())?;
 			let children = vec![
-				ChildProc::new(child, Some("echo"))?
+				ChildProc::new(child, Some("jobs"),None)?
 			];
 			let job = JobBuilder::new()
 				.with_pgid(child)
@@ -1274,7 +1274,7 @@ pub fn echo(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 
 			setpgid(child, child).map_err(|_| ShError::from_io())?;
 			let children = vec![
-				ChildProc::new(child, Some("echo"))?
+				ChildProc::new(child, Some("echo"), None)?
 			];
 			let job = JobBuilder::new()
 				.with_pgid(child)

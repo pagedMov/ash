@@ -311,10 +311,6 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 		}
 	}
 
-	product_buffer.map_rotate(|mut elem| {
-		elem.wd.text = elem.wd.text.consume_escapes();
-		elem
-	});
 	if split_words {
 		split_tokens(&mut product_buffer);
 	}

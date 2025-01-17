@@ -577,7 +577,7 @@ pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		let redirs = node.redirs.clone();
 		let span = node.span();
 		if let NdType::PipelineBranch { left, right, both } = node.nd_type {
-			let commands = helper::flatten_pipeline(*left, *right, VecDeque::new());
+			let commands = helper::flatten_pipeline(*left, *right);
 			let flattened_pipeline = Node {
 				command: None,
 				nd_type: NdType::Pipeline { commands, both },

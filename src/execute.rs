@@ -1,7 +1,7 @@
 use std::{collections::{HashMap, VecDeque}, ffi::CString, fmt::{self, Display}, os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd}, path::Path, sync::Arc};
 
 use libc::{memfd_create, MFD_CLOEXEC};
-use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, setpgid, ForkResult, Pid}};
+use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
 use std::sync::Mutex;
 
 use crate::{builtin, event::ShError, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, disable_reaping, enable_reaping, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, RshResult};
@@ -548,9 +548,8 @@ fn handle_for(node: Node,io: ProcIO) -> RshResult<RshWait> {
 			std::process::exit(0);
 		}
 		Ok(ForkResult::Parent { child }) => {
-			setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
 			let children = vec![
-				ChildProc::new(child,Some("for"))?,
+				ChildProc::new(child,Some("for"),None)?,
 			];
 			let job = JobBuilder::new()
 				.with_pgid(child)
@@ -809,9 +808,8 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 			}
 			Ok(ForkResult::Parent { child }) => {
 				if !node.flags.contains(NdFlags::IN_CMD_SUB) {
-					setpgid(child, child).map_err(|_| ShError::from_io())?;
 					let children = vec![
-						ChildProc::new(child,Some("anonymous_subshell"))?,
+						ChildProc::new(child,Some("anonymous_subshell"),None)?,
 					];
 					let job = JobBuilder::new()
 						.with_pgid(child)
@@ -962,11 +960,10 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 
 					prev_read_pipe = r_pipe;
 
-					setpgid(child, pgid.unwrap()).map_err(|_| ShError::from_io())?;
 					if commands.is_empty() {
 						let mut children = Vec::new();
 						for (index,pid) in pids.iter().enumerate() {
-							let child = ChildProc::new(*pid, cmds.get(index).map(|cmd| cmd.as_str()))?;
+							let child = ChildProc::new(*pid, cmds.get(index).map(|cmd| cmd.as_str()), pgid)?;
 							children.push(child);
 						}
 						let job = JobBuilder::new()
@@ -1052,9 +1049,8 @@ fn handle_command(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 }
 
 fn handle_parent_process(child: Pid, command: CString, node: &Node) -> RshResult<()> {
-	setpgid(child, child).map_err(|_| ShError::from_io())?;
 	let children = vec![
-		ChildProc::new(child, Some(command.to_str().unwrap()))?
+		ChildProc::new(child, Some(command.to_str().unwrap()), None)?
 	];
 	let job = JobBuilder::new()
 		.with_children(children)

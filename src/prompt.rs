@@ -1,34 +1,37 @@
-use crate::{comp::RshHelper, event::{self, ShError, ShEvent}, interp::token::RshTokenizer, shellenv::{self, read_meta, read_vars, write_meta}, RshResult};
-use std::{path::{Path, PathBuf}, sync::mpsc::Receiver};
+use crate::{comp::RshHelper, event::ShError, shellenv::{read_meta, read_vars, write_meta}, RshResult};
+use std::path::{Path, PathBuf};
 use nix::{sys::signal::{kill, Signal}, unistd::Pid};
-use signal_hook::consts::signal::*;
 
 use rustyline::{self, config::Configurer, error::ReadlineError, history::{DefaultHistory, History}, ColorMode, Config, EditMode, Editor};
 
-use crate::interp::parse::{descend, NdType};
 use crate::interp::expand;
 
 
 
 fn init_prompt() -> RshResult<Editor<RshHelper, DefaultHistory>> {
+	let config = build_editor_config()?;
+	let mut rl = initialize_editor(config)?;
+	load_history(&mut rl)?;
+	Ok(rl)
+}
+
+fn build_editor_config() -> RshResult<Config> {
 	let mut config = Config::builder();
 
-	// Read options from ShellEnv
-	let max_size = read_meta(|m| m.get_shopt("max_hist").unwrap_or(1000))?; // Default to 1000
-	let hist_dupes = read_meta(|m| m.get_shopt("hist_ignore_dupes").is_some_and(|opt| opt > 0))?;
-	let comp_limit = read_meta(|m| m.get_shopt("comp_limit").unwrap_or(5))?; // Default to 5
-	let edit_mode = match read_meta(|m| m.get_shopt("edit_mode").unwrap_or(1))? {
+	let max_size = read_shell_option("max_hist", 1000)?;
+	let hist_dupes = read_shell_option_bool("hist_ignore_dupes")?;
+	let comp_limit = read_shell_option("comp_limit", 5)?;
+	let edit_mode = match read_shell_option("edit_mode", 1)? {
 		0 => EditMode::Emacs,
 		_ => EditMode::Vi,
 	};
-	let auto_hist = read_meta(|m| m.get_shopt("auto_hist").is_some_and(|opt| opt > 0))?;
-	let prompt_highlight = match read_meta(|m| m.get_shopt("prompt_highlight").unwrap_or(1))? {
+	let auto_hist = read_shell_option_bool("auto_hist")?;
+	let prompt_highlight = match read_shell_option("prompt_highlight", 1)? {
 		0 => ColorMode::Disabled,
 		_ => ColorMode::Enabled,
 	};
-	let tab_stop = read_meta(|m| m.get_shopt("tab_stop").unwrap_or(1).max(1))?; // Default to at least 1
+	let tab_stop = read_shell_option("tab_stop", 1).map(|val| val.max(1))?;
 
-	// Build configuration
 	config = config
 		.max_history_size(max_size)
 		.unwrap_or_else(|e| {
@@ -43,27 +46,37 @@ fn init_prompt() -> RshResult<Editor<RshHelper, DefaultHistory>> {
 		.color_mode(prompt_highlight)
 		.tab_stop(tab_stop);
 
-		let config = config.build();
+		Ok(config.build())
+}
 
-		// Initialize editor
-		let mut rl = Editor::with_config(config).unwrap_or_else(|e| {
-			eprintln!("Failed to initialize Rustyline editor: {}", e);
-			std::process::exit(1);
-		});
-		rl.set_completion_type(rustyline::CompletionType::List);
-		rl.set_helper(Some(RshHelper::new()));
+fn read_shell_option(option: &str, default: usize) -> RshResult<usize> {
+	read_meta(|m| m.get_shopt(option).unwrap_or(default))
+}
 
-		// Load history file
-		let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE"))?.unwrap_or_else(|| -> String {
-			let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
-			format!("{}/.rsh_hist",home)
-		});
-		let hist_path = PathBuf::from(hist_path);
-		if let Err(e) = rl.load_history(&hist_path) {
-			eprintln!("No previous history found or failed to load history: {}", e);
-		}
+fn read_shell_option_bool(option: &str) -> RshResult<bool> {
+	read_meta(|m| m.get_shopt(option).is_some_and(|opt| opt > 0))
+}
 
-		Ok(rl)
+fn initialize_editor(config: Config) -> RshResult<Editor<RshHelper, DefaultHistory>> {
+	let mut rl = Editor::with_config(config).unwrap_or_else(|e| {
+		eprintln!("Failed to initialize Rustyline editor: {}", e);
+		std::process::exit(1);
+	});
+	rl.set_completion_type(rustyline::CompletionType::List);
+	rl.set_helper(Some(RshHelper::new()));
+	Ok(rl)
+}
+
+fn load_history(rl: &mut Editor<RshHelper, DefaultHistory>) -> RshResult<()> {
+	let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE"))?.unwrap_or_else(|| {
+		let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
+		format!("{}/.rsh_hist", home)
+	});
+	let hist_path = PathBuf::from(hist_path);
+	if let Err(e) = rl.load_history(&hist_path) {
+		eprintln!("No previous history found or failed to load history: {}", e);
+	}
+	Ok(())
 }
 
 pub fn run() -> RshResult<String> {

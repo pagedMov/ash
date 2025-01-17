@@ -1,4 +1,4 @@
-use crate::{event::ShError, interp::token::REGEX, shellenv::{read_logic, read_meta, read_vars, write_logic, write_vars, RVal }, RshResult};
+use crate::{event::ShError, interp::token::REGEX, shellenv::{read_logic, read_meta, read_vars, write_logic, write_vars, DisplayWaitStatus, Job, RVal }, RshResult};
 use nix::unistd::dup2;
 use std::{collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}};
 
@@ -293,13 +293,20 @@ pub fn unset_var_conflicts(key: &str) -> RshResult<()> {
 	Ok(())
 }
 
-pub fn flatten_pipeline(left: Node, right: Node, mut flattened: VecDeque<Node>) -> VecDeque<Node> {
-	flattened.push_front(right);
-	if let NdType::PipelineBranch { left, right, both: _ } = left.nd_type {
-		flattened = flatten_pipeline(*left, *right, flattened);
-	} else {
-		flattened.push_front(left);
+pub fn flatten_pipeline(left: Node, right: Node) -> VecDeque<Node> {
+	let mut flattened = VecDeque::new();
+	let mut stack = vec![(left, right)];
+
+	while let Some((current_left, current_right)) = stack.pop() {
+		flattened.push_front(current_right);
+
+		if let NdType::PipelineBranch { left, right, both: _ } = current_left.nd_type {
+			stack.push((*left, *right));
+		} else {
+			flattened.push_front(current_left);
+		}
 	}
+
 	flattened
 }
 
@@ -488,6 +495,76 @@ pub fn extract_deck_from_root(node: &Node) -> RshResult<VecDeque<Node>> {
 		Ok(deck.clone())
 	} else {
 		Err(ShError::from_internal(format!("Called extract_deck_from_root with non-root node: {:?}", node.nd_type).as_str()))
+	}
+}
+
+pub fn determine_job_symbol(id: usize, current: Option<&usize>, prev: Option<&usize>) -> &'static str {
+	if current.is_some_and(|cur| *cur == id) {
+		"+"
+	} else if prev.is_some_and(|prev| *prev == id) {
+		"-"
+	} else {
+		" "
+	}
+}
+
+pub fn format_command_status(i: usize, cmd: &String, job: &Job, init: bool, pids: bool) -> String {
+	const GREEN: &str = "\x1b[32m";
+	const RED: &str = "\x1b[31m";
+	const CYAN: &str = "\x1b[35m";
+	const RESET: &str = "\x1b[0m";
+
+	let pid = if pids || init {
+		let mut pid = job.get_pids().get(i).unwrap().to_string();
+		pid.push(' ');
+		pid
+	} else {
+		"".to_string()
+	};
+
+	let mut status0 = if init {
+		"".into()
+	} else {
+		DisplayWaitStatus(*job.get_statuses().get(i).unwrap()).to_string()
+	};
+
+	if status0.len() < 6 && !status0.is_empty() {
+		let diff = 6 - status0.len();
+		let pad = " ".repeat(diff);
+		status0.push_str(&pad);
+	}
+
+	let status1 = format!("{}{}", pid, status0);
+	let status2 = format!("{}\t{}", status1, cmd);
+	let status_final = if status0.starts_with("done") {
+		format!("{}{}{}", GREEN, status2, RESET)
+	} else if status0.starts_with("exit") || status0.starts_with("stopped") {
+		format!("{}{}{}", RED, status2, RESET)
+	} else {
+		format!("{}{}{}", CYAN, status2, RESET)
+	};
+
+	if i != job.get_commands().len() - 1 {
+		format!("{} |", status_final)
+	} else {
+		status_final
+	}
+}
+
+pub fn format_status_line(i: usize, status_final: &str, job: &Job, long: bool, padding: &str) -> String {
+	if long {
+		format!(
+			"{}{} {}",
+			if i != 0 { padding } else { "" },
+			job.get_pids().get(i).unwrap(),
+			status_final
+		)
+	} else {
+		format!(
+			"{}{}",
+			if i != 0 { padding } else { "" },
+			status_final
+		)
 	}
 }
 

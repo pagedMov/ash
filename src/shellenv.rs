@@ -7,7 +7,7 @@ use once_cell::sync::Lazy;
 use std::{fs::File, sync::RwLock};
 
 
-use crate::{event::ShError, execute::{self, RshWait}, interp::{parse::{descend, Node, Span}, token::RshTokenizer}, RshResult};
+use crate::{event::ShError, execute::{self, RshWait}, interp::{helper, parse::{descend, Node, Span}, token::RshTokenizer}, RshResult};
 
 pub struct DisplayWaitStatus(pub WaitStatus);
 
@@ -122,16 +122,8 @@ bitflags! {
 	}
 }
 
-#[derive(Debug)]
-pub enum JobState { // Actual internal job state
-	Running,
-	Stopped,
-	Signaled,
-	Done
-}
-
 #[derive(Debug,Clone)]
-pub enum JobID { // Possible arguments for query_jobs(), each of these can find a job somehow
+pub enum JobID { // Possible arguments for JobTable::query(), each of these can find a job somehow
 	Pgid(Pid),
 	Pid(Pid),
 	TableID(usize),
@@ -147,14 +139,20 @@ pub struct ChildProc {
 }
 
 impl ChildProc {
-	pub fn new(pid: Pid, command: Option<&str>) -> RshResult<Self> {
+	pub fn new(pid: Pid, command: Option<&str>, pgid: Option<Pid>) -> RshResult<Self> {
 		let command = command.map(|str| str.to_string());
     let status = if kill(pid, None).is_ok() {
         WaitStatus::StillAlive // The process is still running
     } else {
         WaitStatus::Exited(pid, 0) // Default to exited
     };
-		Ok(Self { pgid: pid, pid, command, status })
+		let mut child = Self { pgid: pid, pid, command, status };
+		if let Some(pgid) = pgid {
+			child.setpgid(pgid)?
+		} else {
+			child.setpgid(pid)?
+		}
+		Ok(child)
 	}
 	pub fn pid(&self) -> Pid {
 		self.pid
@@ -352,19 +350,7 @@ impl Job {
 		killpg(self.pgid, Some(signal)).map_err(|_| ShError::from_io())
 	}
 	pub fn wait_pgrp(&mut self) -> RshResult<Vec<WaitStatus>> {
-		let pgid = Pid::from_raw(self.pgid.as_raw());
 		let mut statuses = Vec::new();
-
-		if kill(pgid, None).is_err() {
-		} else {
-			for child in &self.children {
-				let child_pgid = getpgid(Some(child.pid()));
-				let pid = child.pid();
-				if child_pgid.is_ok_and(|pgid| pgid == self.pgid) {
-				}
-			}
-		}
-
 
 		for child in self.children.iter_mut() {
 			let result = child.waitpid(None);
@@ -392,74 +378,21 @@ impl Job {
 		let current = job_order.last();
 		let prev = if job_order.len() > 2 {
 			job_order.get(job_order.len() - 2)
-		} else { None };
-		let mut output = String::new();
-
-		const GREEN: &str = "\x1b[32m";
-		const RED: &str = "\x1b[31m";
-		const CYAN: &str = "\x1b[35m";
-		const RESET: &str = "\x1b[0m";
+		} else {
+			None
+		};
 
 		// TODO: Handle this unwrap more safely
 		let id = self.table_id.unwrap();
-
-		// Add job ID and status
-		let symbol = if current.is_some_and(|cur| *cur == id) {
-			"+"
-		} else if prev.is_some_and(|prev| *prev == id) {
-			"-"
-		} else {
-			" "
-		};
-		output.push_str(&format!("[{}]{} ", id + 1, symbol));
+		let symbol = helper::determine_job_symbol(id, current, prev);
 		let padding_num = symbol.len() + id.to_string().len() + 3;
 		let padding: String = " ".repeat(padding_num);
 
-		// Add commands and PIDs
+		let mut output = format!("[{}]{} ", id + 1, symbol);
+
 		for (i, cmd) in self.get_commands().iter().enumerate() {
-			let pid = if pids || init {
-				let mut pid = self.get_pids().get(i).unwrap().to_string();
-				pid.push(' ');
-				pid
-			} else {
-				"".to_string()
-			};
-			let cmd = cmd.clone();
-			let mut status0 = if init { "".into() } else { DisplayWaitStatus(*self.get_statuses().get(i).unwrap()).to_string() };
-			if status0.len() < 6 && !status0.is_empty() {
-				// Pad out the length so that formatting is uniform
-				let diff = 6 - status0.len();
-				let pad = " ".repeat(diff);
-				status0.push_str(&pad);
-			}
-			let status1 = format!("{}{}",pid,status0);
-			let status2 = format!("{}\t{}",status1,cmd);
-			let mut status_final = if status0.starts_with("done") {
-				format!("{}{}{}",GREEN,status2,RESET)
-			} else if status0.starts_with("exit") || status0.starts_with("stopped") {
-				format!("{}{}{}",RED,status2,RESET)
-			} else {
-				format!("{}{}{}",CYAN,status2,RESET)
-			};
-			if i != self.get_commands().len() - 1 {
-				status_final.push_str(" |");
-			}
-			status_final.push('\n');
-			let status_line = if long {
-				// Long format includes PIDs
-				format!(
-					"{}{} {}",
-					if i != 0 { padding.clone() } else { "".into() },
-					self.get_pids().get(i).unwrap(),
-					status_final
-				)
-			} else {
-				format!(
-					"{}{}",
-					if i != 0 { padding.clone() } else { "".into() },
-					status_final
-				)
-			};
+			let status_final = helper::format_command_status(i, cmd, self, init, pids);
+			let status_line = helper::format_status_line(i, &status_final, self, long, &padding);
 			output.push_str(&status_line);
 		}
 
@@ -565,6 +498,51 @@ impl JobTable {
 	pub fn get_fg_mut(&mut self) -> Option<&mut Job> {
 		self.fg.as_mut()
 	}
+
+	/// Queries the job table to find a job that matches the specified identifier.
+	///
+	/// This function allows you to search for a job in the job table using various types of identifiers.
+	/// It returns a reference to the job if a match is found, or `None` if no matching job exists.
+	///
+	/// # Parameters
+	///
+	/// - `identifier`: A `JobID` enum variant that specifies the type of identifier to use for the search.
+	///   The `JobID` can be one of the following:
+	///   - `JobID::Pgid(pgid)`: Matches a job by its process group ID.
+	///   - `JobID::Pid(pid)`: Matches a job by the process ID of any of its child processes.
+	///   - `JobID::TableID(id)`: Matches a job by its index in the job table.
+	///   - `JobID::Command(cmd)`: Matches a job by a partial command name match.
+	///
+	/// # Returns
+	///
+	/// An `Option` containing a reference to the `Job` if a match is found, or `None` if no job matches
+	/// the specified identifier.
+	///
+	/// # Examples
+	///
+	/// ```rust
+	/// let job_table = JobTable::new(); // Assuming JobTable is defined elsewhere
+	/// if let Some(job) = job_table.query(JobID::Pgid(1234)) {
+	///     println!("Found job with PGID 1234: {:?}", job);
+	/// } else {
+	///     println!("No job found with PGID 1234");
+	/// }
+	///
+	/// if let Some(job) = job_table.query(JobID::Command("bash".to_string())) {
+	///     println!("Found job with command containing 'bash': {:?}", job);
+	/// } else {
+	///     println!("No job found with command containing 'bash'");
+	/// }
+	/// ```
+	///
+	/// In these examples, the function is used to search for jobs by process group ID and by partial
+	/// command name match.
+	///
+	/// # Notes
+	///
+	/// - The function performs a partial match when searching by command name, meaning it will return
+	///   a job if any of its child processes' command names contain the specified string.
+	/// - The search is case-sensitive when matching command names.
 	pub fn query(&self, identifier: JobID) -> Option<&Job> {
 		match identifier {
 			// Match by process group ID
@@ -1198,8 +1176,8 @@ mod tests {
 		let mut job_table = JobTable::new();
 
 		let children1 = vec![
-			ChildProc::new(Pid::from_raw(100), Some("cmd1")).unwrap(),
-			ChildProc::new(Pid::from_raw(101), Some("cmd2")).unwrap()
+			ChildProc::new(Pid::from_raw(100), Some("cmd1"),None).unwrap(),
+			ChildProc::new(Pid::from_raw(101), Some("cmd2"),None).unwrap()
 		];
 		let job1 = JobBuilder::new()
 			.with_id(1)
@@ -1208,7 +1186,7 @@ mod tests {
 			.build();
 
 			let children2 = vec![
-				ChildProc::new(Pid::from_raw(200), Some("cmd3")).unwrap(),
+				ChildProc::new(Pid::from_raw(200), Some("cmd3"),None).unwrap(),
 			];
 			let job2 = JobBuilder::new()
 				.with_id(2)
@@ -1399,7 +1377,7 @@ mod tests {
 	#[rstest]
 	fn jobtable_foreground_background(mut mock_jobs: JobTable) {
 		let fg_children = vec![
-			ChildProc::new(Pid::from_raw(400), Some("fg_cmd")).unwrap()
+			ChildProc::new(Pid::from_raw(400), Some("fg_cmd"),None).unwrap()
 		];
 		let fg_job = JobBuilder::new()
 			.with_pgid(Pid::from_raw(400))
@@ -1428,7 +1406,7 @@ mod tests {
 		let pgid = Pid::from_raw(300);
 
 		let children = vec![
-			ChildProc::new(Pid::from_raw(300), Some("cmd4")).unwrap()
+			ChildProc::new(Pid::from_raw(300), Some("cmd4"),None).unwrap()
 		];
 
 		let new_job = JobBuilder::new()
