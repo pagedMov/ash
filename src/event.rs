@@ -112,13 +112,15 @@ pub fn main_loop() -> RshResult<()> {
 					Ok(Some(state)) => {
 						write_jobs(|j| {
 							if let Some(job) = j.get_fg_mut() {
-								job.wait_pgrp();
+								job.wait_pgrp().unwrap();
 							}
-						});
+						})?;
 						let deck = helper::extract_deck_from_root(&state.ast)?;
 						if !deck.is_empty() {
 							// Send each deck immediately for execution
-							execute::traverse_ast(state.ast)?;
+							if let Err(e) = execute::traverse_ast(state.ast) {
+								eprintln!("{:?}",e);
+							}
 						} else {
 							break;
 						}

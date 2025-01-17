@@ -1,10 +1,7 @@
-use std::{collections::VecDeque, sync::Mutex};
+use nix::{sys::{signal::{killpg, signal, SigHandler, Signal} , wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{getpgid, Pid}};
 
-use nix::{sys::{signal::{killpg, signal, SigHandler, Signal} , wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{getpgid, tcgetpgrp, Pid}};
+use crate::{event::ShError, shellenv::{self, read_jobs, write_jobs, JobCmdFlags, JobID, RSH_PGRP}, RshResult};
 
-use crate::{event::ShError, execute::RshWait, shellenv::{self, read_jobs, write_jobs, JobCmdFlags, JobID, RSH_PGRP}, RshResult};
-
-static DEFERRED_SIGNALS: Mutex<VecDeque<Pid>> = Mutex::new(VecDeque::new());
 
 pub fn sig_handler_setup() {
 	unsafe {
@@ -20,10 +17,8 @@ pub fn sig_handler_setup() {
 
 extern "C" fn handle_sighup(_: libc::c_int) {
 	write_jobs(|j| {
-		for item in j.mut_jobs() {
-			if let Some(job) = item {
-				job.killpg(Signal::SIGTERM);
-			}
+		for job in j.mut_jobs().iter_mut().flatten() {
+			job.killpg(Signal::SIGTERM).unwrap();
 		}
 	}).unwrap();
 	std::process::exit(0);
@@ -32,17 +27,17 @@ extern "C" fn handle_sighup(_: libc::c_int) {
 extern "C" fn handle_sigtstp(_: libc::c_int) {
 	write_jobs(|j| {
 		if let Some(job) = j.get_fg_mut() {
-			job.killpg(Signal::SIGTSTP);
+			job.killpg(Signal::SIGTSTP).unwrap();
 		}
-	});
+	}).unwrap();
 }
 
 extern "C" fn handle_sigint(_: libc::c_int) {
 	write_jobs(|j| {
 		if let Some(job) = j.get_fg_mut() {
-			job.killpg(Signal::SIGINT);
+			job.killpg(Signal::SIGINT).unwrap();
 		}
-	});
+	}).unwrap();
 }
 
 pub extern "C" fn ignore_sigchld(_: libc::c_int) {
@@ -55,16 +50,19 @@ pub extern "C" fn ignore_sigchld(_: libc::c_int) {
 
 extern "C" fn handle_sigquit(_: libc::c_int) {
 	write_jobs(|j| {
-		for item in j.mut_jobs() {
-			if let Some(job) = item {
-				job.killpg(Signal::SIGTERM);
-			}
+		for job in j.mut_jobs().iter_mut().flatten() {
+			job.killpg(Signal::SIGTERM).unwrap();
 		}
 	}).unwrap();
 	std::process::exit(0);
 }
 
 pub extern "C" fn handle_sigchld(_: libc::c_int) {
+	/*
+	 * This is the signal handler's real job
+	 * Each WaitStatus has logic associated with it
+	 * But handle_child_exit() is the most important one
+	 */
 	let flags = WaitPidFlag::WUNTRACED;
 	while let Ok(status) = waitpid(None, Some(flags)) {
 		let _ = match status {
@@ -109,6 +107,13 @@ pub fn handle_child_stop(pid: Pid, signal: Signal) -> RshResult<()> {
 }
 
 pub fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
+	/*
+	 * Here we are going to get metadata on the exited process by querying the job table with the pid.
+	 * Then if the discovered job is the fg task, return terminal control to rsh
+	 * If it is not the fg task, print the display info for the job in the job table
+	 * We can reasonably assume that if it is not a foreground job, then it exists in the job table
+	 * If this assumption is incorrect, the code has gone wrong somewhere.
+	 */
 	let (
 		pgid,
 		is_fg,

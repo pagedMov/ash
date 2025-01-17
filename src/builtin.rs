@@ -10,7 +10,7 @@ use libc::{getegid, geteuid};
 use nix::fcntl::OFlag;
 use nix::sys::signal::{killpg, Signal};
 use nix::sys::stat::Mode;
-use nix::unistd::{access, fork, isatty, AccessFlags, ForkResult, Pid};
+use nix::unistd::{access, fork, isatty, setpgid, AccessFlags, ForkResult, Pid};
 use regex::Regex;
 
 use crate::execute::{ProcIO, RshWait, RustFd};
@@ -18,7 +18,7 @@ use crate::interp::helper::{self, StrExtension};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType, WdFlags};
-use crate::shellenv::{self, read_jobs, read_logic, read_vars, write_jobs, write_logic, write_meta, write_vars, EnvFlags, HashFloat, JobCmdFlags, JobID, RVal};
+use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_logic, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, HashFloat, JobBuilder, JobCmdFlags, JobID, RVal};
 use crate::event::ShError;
 use crate::RshResult;
 
@@ -1129,8 +1129,24 @@ pub fn jobs(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 			read_jobs(|j| j.print_jobs(&flags))?;
 			std::process::exit(0);
 		}
-		Ok(ForkResult::Parent { child: _ }) => {
+		Ok(ForkResult::Parent { child }) => {
 			write_jobs(|j| j.reset_recents())?;
+			setpgid(child, child).map_err(|_| ShError::from_io())?;
+			let children = vec![
+				ChildProc::new(child, Some("echo"))?
+			];
+			let job = JobBuilder::new()
+				.with_pgid(child)
+				.with_children(children)
+				.build();
+
+			if node.flags.contains(NdFlags::BACKGROUND) {
+				write_jobs(|j| j.insert_job(job))??;
+			} else {
+				disable_reaping();
+				write_jobs(|j| j.new_fg(job))??;
+				enable_reaping()?;
+			}
 		}
 		Err(_) => return Err(ShError::from_internal("Failed to fork in print_jobs()"))
 	}
@@ -1241,14 +1257,36 @@ pub fn echo(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 	io.backup_fildescs()?;
 	io.route_io()?;
 
+	if node.flags.contains(NdFlags::IN_PIPE) {
+		output_fd.write(output_str.as_bytes())?;
+		std::process::exit(0);
+	}
+
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
 			output_fd.write(output_str.as_bytes())?;
 			std::process::exit(0);
 		}
-		Ok(ForkResult::Parent { child: _ }) => {
+		Ok(ForkResult::Parent { child }) => {
 			for fd in &mut fd_stack {
 				fd.close()?
+			}
+
+			setpgid(child, child).map_err(|_| ShError::from_io())?;
+			let children = vec![
+				ChildProc::new(child, Some("echo"))?
+			];
+			let job = JobBuilder::new()
+				.with_pgid(child)
+				.with_children(children)
+				.build();
+
+			if node.flags.contains(NdFlags::BACKGROUND) {
+				write_jobs(|j| j.insert_job(job))??;
+			} else {
+				disable_reaping();
+				write_jobs(|j| j.new_fg(job))??;
+				enable_reaping()?;
 			}
 		}
 		Err(_) => return Err(ShError::from_internal("Failed to fork in echo()"))

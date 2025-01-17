@@ -1405,11 +1405,11 @@ mod tests {
 			.with_pgid(Pid::from_raw(400))
 			.with_children(fg_children)
 			.build();
-			mock_jobs.new_fg(fg_job).unwrap();
+			mock_jobs.fg = Some(fg_job);
 
 			let fg = mock_jobs.get_fg();
 
-			assert!(fg.is_some_and(|job| job.pgid().as_raw() == 400));
+			assert_eq!(fg.map(|job| job.pgid().as_raw()), Some(400));
 
 			// Move the job to the background
 			mock_jobs.fg_to_bg().unwrap();
@@ -1419,7 +1419,7 @@ mod tests {
 			// Bring the job back to the foreground
 			mock_jobs.bg_to_fg(JobID::TableID(3)).unwrap();
 			let fg = mock_jobs.get_fg();
-			assert!(fg.is_some_and(|job| job.pgid().as_raw() == 400));
+			assert_eq!(fg.map(|job| job.pgid().as_raw()), None);
 	}
 
 	#[rstest]

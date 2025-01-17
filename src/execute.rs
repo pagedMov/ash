@@ -643,8 +643,6 @@ fn handle_if(node: Node, io: ProcIO) -> RshResult<RshWait> {
 }
 
 fn handle_chain(node: Node) -> RshResult<RshWait> {
-	let last_status;
-
 	node_operation!(NdType::Chain { left, right, op }, node, {
 		traverse(*left, ProcIO::new())?;
 
@@ -661,14 +659,18 @@ fn handle_chain(node: Node) -> RshResult<RshWait> {
 		let is_success = statuses.iter().all(|stat| matches!(stat, WaitStatus::Exited(_, 0)));
 
 		// Traverse the right side based on the chain operator and status
-		last_status = match op.nd_type {
-			NdType::And if is_success => traverse(*right, ProcIO::new())?,
-			NdType::Or if !is_success => traverse(*right, ProcIO::new())?,
-			_ => unreachable!()
+		match op.nd_type {
+			NdType::And if is_success => {
+				traverse(*right, ProcIO::new())?;
+			},
+			NdType::Or if !is_success => {
+				traverse(*right, ProcIO::new())?;
+			},
+			_ => { /* Do nothing */ }
 		}
 	});
 
-	Ok(last_status)
+	Ok(RshWait::Success)
 }
 
 fn handle_assignment(node: Node) -> RshResult<RshWait> {
@@ -731,7 +733,27 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 }
 
 pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
-	// Expand arguments and get redirections
+	/*
+	 * rsh subshells work differently than subshells in standard shells like bash and zsh.
+	 *
+	 * In rsh, the text content of a subshell is written to an in-memory file descriptor.
+	 * This function then asks the kernel to execute the file descriptor as though it were a script file.
+	 *
+	 * Of course, this behavior means that the resulting script-fd must have a shebang.
+	 * If no shebang is provided, one is dynamically inserted using the path to the rsh binary.
+	 * Provided shebangs can use just the program's name, and it will be expanded to the full path
+	 * if a program by that name is found in the user's PATH.
+	 *
+	 * This means that rsh subshells can execute code using any interpreter,
+	 * and the output can be captured and operated on. For instance:
+	 * (#!python
+	 * print("hello world")
+	 * ) | (#!bash
+	 * read -r line
+	 * echo "$line" | awk '{print $1}'
+	 * )
+	 * This would produce the output `hello`.
+	 */
 	expand::expand_arguments(&mut node)?;
 	let redirs = node.get_redirs()?;
 
@@ -787,7 +809,7 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 			}
 			Ok(ForkResult::Parent { child }) => {
 				if !node.flags.contains(NdFlags::IN_CMD_SUB) {
-					setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
+					setpgid(child, child).map_err(|_| ShError::from_io())?;
 					let children = vec![
 						ChildProc::new(child,Some("anonymous_subshell"))?,
 					];
@@ -848,65 +870,17 @@ fn handle_function(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 	} else { unreachable!() }
 }
 
-/// Handles the execution of a pipeline of commands.
-///
-/// This function processes a node representing a pipeline of commands,
-/// creating the necessary pipes and forking processes to execute each command
-/// in the pipeline. It also handles process group IDs to ensure that the
-/// commands in the pipeline are executed as a single job.
-///
-/// # Arguments
-///
-/// * `node` - The node representing the pipeline of commands.
-/// * `io` - The `ProcIO` object managing input/output redirection.
-///
-/// # Returns
-///
-/// * `RshResult<RshWait>` - The result of the pipeline execution.
-///
-/// # Behavior
-///
-/// 1. **Initialization**:
-///    - Initializes variables to keep track of the previous read pipe,
-///      process group ID, command names, and process IDs.
-///
-/// 2. **Command Iteration**:
-///    - Iterates through each command in the pipeline.
-///    - Creates pipes between commands to handle inter-process communication.
-///    - Prepares the `ProcIO` object for each command, setting up input and output redirections.
-///
-/// 3. **Forking Processes**:
-///    - Forks a new process for each command in the pipeline.
-///    - In the child process, it routes input/output as necessary and executes the command.
-///    - In the parent process, it manages process group IDs and closes unused pipes.
-///
-/// 4. **Job Management**:
-///    - If the pipeline is to be executed in the background, it creates a new background job.
-///    - If the pipeline is to be executed in the foreground, it creates a new foreground job and attaches the terminal to the process group.
-///
-/// 5. **Completion**:
-///    - Returns the result of the pipeline execution.
-///
-/// # Notes
-///
-/// - This function does not use `fork_instruction!` due to the specific handling required for process group IDs in pipelines.
-/// - It handles shell functions containing pipelines and ensures proper input/output routing.
-///
-/// # Errors
-///
-/// - Returns an error if any of the fork or exec operations fail.
-/// - Returns an error if setting the process group ID fails.
-///
-/// # Example
-///
-/// ```rust
-/// let node = Node::from_pipeline("command1 | command2");
-/// let io = ProcIO::new();
-/// let result = handle_pipeline(node, io);
-/// ```
-///
-/// This example demonstrates how to create a pipeline node and handle its execution using the `handle_pipeline` function.
 pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
+	/*
+	 * This one is pretty complex, but it can't really be helped. File descriptors complicate everything they touch.
+	 *
+	 * In this, we loop through the commands held in the pipeline node.
+	 * For each command, a read pipe and a write pipe are created.
+	 * prev_read_pipe starts out as None, but is replaced by the read pipe on each iteration
+	 * This has the effect of routing the output of the last command to the input of the next one.
+	 * A new ProcIO instance is created for each command, and then used in the traverse() call.
+	 *
+	 */
 	let span = node.span();
 
 	let mut prev_read_pipe: Option<RustFd> = None;
@@ -942,8 +916,12 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 
 			match unsafe { fork() } {
 				Ok(ForkResult::Child) => {
-					// This if statement allows shell functions containing pipelines to be used in pipelines
-					// Handles the case of the pipeline starting with outside input, and ending with outside output
+					/*
+					 * The if statement here allows for cases where the first pipeline command actually does have stdin.
+					 * For instance, a function `func() { sed 's/hello/goodbye/' | awk '{print $1}' }` being used
+					 * in a pipeline like `echo hello world | func` to produce the output `goodbye`.
+					 * Works similarly in cases where the stdout leaves the scope of the function instead.
+					 */
 					if count == 0 {
 						// If io contains input, route it here
 						io.route_input()?;
@@ -966,6 +944,10 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 					}
 				}
 				Ok(ForkResult::Parent { child }) => {
+					/*
+					 * Here we just do some file descriptor handling and job control stuff
+					 * A new job is created for the pipeline, and leftover pipes are closed.
+					 */
 					pids.push(child);
 					if let Some(ref mut read_pipe) = prev_read_pipe {
 						read_pipe.close()?;
@@ -980,7 +962,7 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 
 					prev_read_pipe = r_pipe;
 
-					setpgid(child, pgid.unwrap()).map_err(|_| ShError::from_internal("Failed to set pgid in pipeline"))?;
+					setpgid(child, pgid.unwrap()).map_err(|_| ShError::from_io())?;
 					if commands.is_empty() {
 						let mut children = Vec::new();
 						for (index,pid) in pids.iter().enumerate() {
@@ -1016,7 +998,15 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 }
 
 fn handle_command(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
-	// Extract argv and redirs from the node
+	/*
+	 * In this function, we first get the arg vector of the command as CStrings, so as to be compatible with execvpe().
+	 *
+	 * We also handle input and output with ProcIO::route_io() and handle_redirs(),
+	 * these two functions will connect pipes and direct output to file descriptors respectively
+	 *
+	 * If we are in a pipe, the job control logic is skipped and execvpe() is called in this process
+	 * This is because if we are in a pipe, this is already a forked child process, so forking again doesn't make sense.
+	 */
 	let argv = node.get_argv()?.iter().map(|arg| CString::new(arg.text()).unwrap()).collect::<Vec<CString>>();
 	let redirs = node.get_redirs()?;
 
@@ -1062,7 +1052,7 @@ fn handle_command(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 }
 
 fn handle_parent_process(child: Pid, command: CString, node: &Node) -> RshResult<()> {
-	setpgid(child, child).map_err(|_| ShError::from_internal("Failed to set child PGID"))?;
+	setpgid(child, child).map_err(|_| ShError::from_io())?;
 	let children = vec![
 		ChildProc::new(child, Some(command.to_str().unwrap()))?
 	];
