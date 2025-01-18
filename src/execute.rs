@@ -557,16 +557,13 @@ fn handle_for(node: Node,io: ProcIO) -> RshResult<RshWait> {
 				.build();
 
 			if node.flags.contains(NdFlags::BACKGROUND) {
-				write_jobs(|j| j.insert_job(job))??;
+				write_jobs(|j| j.insert_job(job,false))??;
 
 			} else {
 				if !node.flags.contains(NdFlags::FUNCTION) {
 					shellenv::attach_tty(child)?;
 				}
-				disable_reaping();
-				write_jobs(|j| j.new_fg(job))??;
-				enable_reaping()?;
-				write_jobs(|j| j.update_job_statuses())??;
+				helper::handle_fg(job)?;
 			}
 		}
 		Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_for".into(), 1, node.span())),
@@ -647,7 +644,6 @@ fn handle_chain(node: Node) -> RshResult<RshWait> {
 		while let Some(cmd) = commands.pop_front() {
 			traverse(cmd, ProcIO::new())?;
 
-			// Use the new waiting logic to fetch statuses
 			let statuses = write_jobs(|j| {
 				if let Some(job) = j.get_fg_mut() {
 					job.get_statuses()
@@ -656,10 +652,8 @@ fn handle_chain(node: Node) -> RshResult<RshWait> {
 				}
 			})?;
 
-			// Determine the result of the left side
 			let is_success = statuses.iter().all(|stat| matches!(stat, WaitStatus::Exited(_, 0)));
 
-			// Traverse the right side based on the chain operator and status
 			match op.nd_type {
 				NdType::And if !is_success => {
 					break
@@ -667,7 +661,7 @@ fn handle_chain(node: Node) -> RshResult<RshWait> {
 				NdType::Or if is_success => {
 					break
 				},
-				_ => { /* Do nothing */ }
+				_ => { /* Keep going */ }
 			}
 		}
 	});
@@ -697,33 +691,32 @@ fn handle_assignment(node: Node) -> RshResult<RshWait> {
 
 fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 	let argv = node.get_argv()?;
-	let background = node.flags.contains(NdFlags::BACKGROUND);
-	let builtin_result = match argv.first().unwrap().text() {
-		"echo" => builtin::echo(node, io),
-		"expr" => builtin::expr(node, io),
-		"set" => builtin::set_or_unset(node, true),
-		"jobs" => builtin::jobs(node, io),
-		"fg" => builtin::fg(node),
-		"bg" => builtin::bg(node),
-		"int" => builtin::int(node),
-		"bool" => builtin::bool(node),
-		"float" => builtin::float(node),
-		"arr" => builtin::array(node),
-		"type" => builtin::r#type(node),
-		//"dict" => builtin::dict(node),
-		"unset" => builtin::set_or_unset(node, false),
-		"source" => builtin::source(node),
-		"cd" => builtin::cd(node),
-		"pwd" => builtin::pwd(node.span()),
-		"alias" => builtin::alias(node),
-		"unalias" => builtin::unalias(node),
-		"export" => builtin::export(node),
-		"[" | "test" => builtin::test(node.get_argv()?.into()),
+	match argv.first().unwrap().text() {
+		"echo" => builtin::echo(node, io)?,
+		"expr" => builtin::expr(node, io)?,
+		"set" => builtin::set_or_unset(node, true)?,
+		"jobs" => builtin::jobs(node, io)?,
+		"fg" => builtin::fg(node)?,
+		"bg" => builtin::bg(node)?,
+		"int" => builtin::int(node)?,
+		"bool" => builtin::bool(node)?,
+		"float" => builtin::float(node)?,
+		"arr" => builtin::array(node)?,
+		"type" => builtin::r#type(node)?,
+		//"dict" => builtin::dict(node)?,
+		"unset" => builtin::set_or_unset(node, false)?,
+		"source" => builtin::source(node)?,
+		"cd" => builtin::cd(node)?,
+		"pwd" => builtin::pwd(node.span())?,
+		"alias" => builtin::alias(node)?,
+		"unalias" => builtin::unalias(node)?,
+		"export" => builtin::export(node)?,
+		"[" | "test" => builtin::test(node.get_argv()?.into())?,
 		"builtin" => {
 			if let NdType::Builtin { mut argv } = node.nd_type {
 				argv.pop_front();
 				node.nd_type = NdType::Builtin { argv };
-				handle_builtin(node, io)
+				handle_builtin(node, io)?
 			} else {
 				unreachable!()
 			}
@@ -820,10 +813,7 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 						.build();
 					shellenv::attach_tty(child)?;
 					env_snapshot.restore_snapshot()?;
-					disable_reaping();
-					write_jobs(|j| j.new_fg(job))??;
-					enable_reaping()?;
-					write_jobs(|j| j.update_job_statuses())??;
+					helper::handle_fg(job)?;
 				}
 			}
 			Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_subshell".into(), 1, node.span())),
@@ -975,12 +965,9 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 							.build();
 
 						if background {
-							write_jobs(|j| j.insert_job(job))??;
+							write_jobs(|j| j.insert_job(job,false))??;
 						} else {
-							disable_reaping();
-							write_jobs(|j| j.new_fg(job))??;
-							enable_reaping()?;
-							write_jobs(|j| j.update_job_statuses())??;
+							helper::handle_fg(job)?;
 						}
 						break;
 					}
@@ -1061,12 +1048,9 @@ fn handle_parent_process(child: Pid, command: CString, node: &Node) -> RshResult
 		.build();
 
 	if node.flags.contains(NdFlags::BACKGROUND) {
-		write_jobs(|j| j.insert_job(job))??;
+		write_jobs(|j| j.insert_job(job,false))??;
 	} else {
-		disable_reaping();
-		write_jobs(|j| j.new_fg(job))??;
-		enable_reaping()?;
-		write_jobs(|j| j.update_job_statuses())??;
+		helper::handle_fg(job)?;
 	}
 	Ok(())
 }

@@ -38,7 +38,7 @@ use interp::{parse::{descend, NdType, Span}, token::RshTokenizer};
 use libc::{S_IRGRP, S_IRUSR};
 use nix::{fcntl::OFlag, sys::{signal::{signal, SigHandler, Signal::{SIGTTIN, SIGTTOU}}, stat::Mode, termios::{self, LocalFlags}}, unistd::isatty};
 use once_cell::sync::{Lazy, OnceCell};
-use shellenv::{read_vars, write_meta, write_vars, EnvFlags};
+use shellenv::{read_vars, write_meta, write_vars, EnvFlags, RSH_PATH, RSH_PGRP};
 use termios::Termios;
 
 //use crate::event::EventLoop;
@@ -65,9 +65,19 @@ fn restore_termios(orig: &Option<Termios>) {
 	}
 }
 
+fn initialize_proc_constants() {
+	/*
+	 * These two variables are set using Lazy,
+	 * in order to kick-start the lazy evaluation, we dereference them very early
+	 */
+	let _ = *RSH_PGRP;
+	let _ = *RSH_PATH;
+}
+
 #[tokio::main]
 async fn main() {
 	env_logger::init();
+	initialize_proc_constants();
 	let mut args = env::args().collect::<Vec<String>>();
 
 	// Ignore SIGTTOU

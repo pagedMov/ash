@@ -9,6 +9,7 @@ use std::{fs::File, sync::RwLock};
 
 use crate::{event::ShError, execute::{self, RshWait}, interp::{helper, parse::{descend, Node, Span}, token::RshTokenizer}, RshResult};
 
+#[derive(Debug)]
 pub struct DisplayWaitStatus(pub WaitStatus);
 
 impl fmt::Display for DisplayWaitStatus {
@@ -43,6 +44,7 @@ impl fmt::Display for DisplayWaitStatus {
 }
 
 pub static RSH_PGRP: Lazy<Pid> = Lazy::new(Pid::this);
+pub static RSH_PATH: Lazy<String> = Lazy::new(|| std::env::current_exe().unwrap().to_str().unwrap().to_string());
 
 pub static JOBS: LazyLock<Arc<RwLock<JobTable>>> = LazyLock::new(|| {
 	Arc::new(
@@ -148,9 +150,9 @@ impl ChildProc {
     };
 		let mut child = Self { pgid: pid, pid, command, status };
 		if let Some(pgid) = pgid {
-			child.setpgid(pgid)?
+			child.setpgid(pgid).ok();
 		} else {
-			child.setpgid(pid)?
+			child.setpgid(pid).ok();
 		}
 		Ok(child)
 	}
@@ -312,17 +314,13 @@ impl Job {
 	pub fn poll_children(&mut self) -> RshResult<()> {
 		for child in self.children.iter_mut() {
 			let pid = child.pid();
-			match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+			match waitpid(pid, Some(WaitPidFlag::WNOHANG | WaitPidFlag::WUNTRACED | WaitPidFlag::WCONTINUED)) {
 				Ok(status) => {
-					child.set_status(status);
 					match status {
-						WaitStatus::Exited(pid, _) => crate::signal::handle_child_exit(pid, status)?,
-						WaitStatus::Signaled(pid, sig, _) => crate::signal::handle_child_signal(pid, sig)?,
-						WaitStatus::Stopped(pid, signal) => crate::signal::handle_child_stop(pid, signal)?,
-						WaitStatus::Continued(pid) => crate::signal::handle_child_continue(pid)?,
-						WaitStatus::StillAlive => { /* Do nothing */ },
-						_ => unimplemented!()
+						WaitStatus::StillAlive => continue,
+						_ => { /* Do nothing */ }
 					};
+					child.set_status(status);
 				}
 				Err(_) => {
 					attach_tty(*RSH_PGRP)?
@@ -346,21 +344,27 @@ impl Job {
 	pub fn to_fg(&self) -> RshResult<()> {
 		attach_tty(self.pgid)
 	}
-	pub fn killpg(&self, signal: Signal) -> RshResult<()> {
-		killpg(self.pgid, Some(signal)).map_err(|_| ShError::from_io())
+	pub fn killpg(&mut self, signal: Signal) -> RshResult<()> {
+		let status = match signal {
+			Signal::SIGTSTP => WaitStatus::Stopped(self.pgid, Signal::SIGTSTP),
+			Signal::SIGCONT => WaitStatus::Continued(self.pgid),
+			_ => unimplemented!()
+		};
+		self.set_statuses(status);
+		killpg(self.pgid, Some(signal)).map_err(|_| ShError::from_io())?;
+		Ok(())
 	}
 	pub fn wait_pgrp(&mut self) -> RshResult<Vec<WaitStatus>> {
 		let mut statuses = Vec::new();
 
 		for child in self.children.iter_mut() {
-			let result = child.waitpid(None);
+			let result = child.waitpid(Some(WaitPidFlag::WUNTRACED));
 			match result {
 				Ok(status) => {
 					statuses.push(status);
 				}
 				Err(nix::errno::Errno::ECHILD) => {
 					// No more child processes in the group
-					attach_tty(*RSH_PGRP)?;
 					break;
 				}
 				Err(_) => {
@@ -410,6 +414,9 @@ impl JobTable {
 	pub fn new() -> Self {
 		Self { fg: None, jobs: vec![], order: vec![], new_updates: vec![] }
 	}
+	pub fn reset_fg(&mut self) {
+		std::mem::take(&mut self.fg);
+	}
 	fn next_open_pos(&self) -> usize {
 		if let Some(open_position) = self.jobs.iter().position(|slot| slot.is_none()) {
 			open_position
@@ -431,13 +438,15 @@ impl JobTable {
 			None
 		}
 	}
-	pub fn insert_job(&mut self, mut job: Job) -> RshResult<usize> {
+	pub fn insert_job(&mut self, mut job: Job, silent: bool) -> RshResult<usize> {
 		self.prune_jobs();
-		let table_position = self.next_open_pos();
+		let table_position = if let Some(id) = job.table_id() { id } else { self.next_open_pos() };
 		job.set_table_id(table_position);
 		self.order.push(table_position);
 
-		println!("{}", job.display(self.job_order(), JobCmdFlags::INIT));
+		if !silent {
+			println!("{}", job.display(self.job_order(), JobCmdFlags::INIT));
+		}
 		if table_position == self.jobs.len() {
 			self.jobs.push(Some(job)); // Append if no open position is found
 		} else {
@@ -448,46 +457,40 @@ impl JobTable {
 	pub fn job_order(&self) -> &[usize] {
 		&self.order
 	}
-	pub fn new_fg(&mut self, job: Job) -> RshResult<()> {
+	pub fn new_fg(&mut self, job: Job) -> RshResult<Vec<WaitStatus>> {
 		let pgid = job.pgid();
 		self.fg = Some(job);
 		attach_tty(pgid)?;
-		self.fg.as_mut().unwrap().wait_pgrp()?;
+		let statuses = self.fg.as_mut().unwrap().wait_pgrp()?;
 		attach_tty(*RSH_PGRP)?;
-		Ok(())
+		Ok(statuses)
 	}
 
-	pub fn fg_to_bg(&mut self) -> RshResult<()> {
+	pub fn fg_to_bg(&mut self, status: WaitStatus) -> RshResult<()> {
 		attach_tty(*RSH_PGRP)?;
 		if self.fg.is_none() {
 			return Ok(())
 		}
 		let fg = take(&mut self.fg);
-		if let Some(job) = fg {
+		if let Some(mut job) = fg {
 			// Find the first open position (None)
-			self.insert_job(job)?;
+			job.set_statuses(status);
+			self.insert_job(job,false)?;
 		}
 		Ok(())
 	}
+	pub fn remove_job(&mut self, id: JobID) -> Option<Job> {
+		let table_id = self.query(id).map(|job| job.table_id()).unwrap();
+		if let Some(table_id) = table_id {
+			self.jobs.get_mut(table_id).and_then(Option::take)
+		} else {
+			None
+		}
+	}
 	pub fn bg_to_fg(&mut self, id: JobID) -> RshResult<()> {
-		if let Some(job) = self.query(id) {
-			let table_id = job.table_id();
-			if table_id.is_none() {
-				return Err(ShError::from_internal("Called `bg_to_fg()` on a job with no table_id"))
-			}
-
-			// Safely remove the job and replace with None
-			let job = self.jobs.get_mut(table_id.unwrap()).and_then(Option::take);
-
-			if job.is_some() {
-				if self.fg.is_some() {
-					self.fg_to_bg()?;
-				}
-				self.fg = job;
-				self.order.pop();
-			} else {
-				return Ok(()); // Job was already None or invalid ID
-			}
+		let job = self.remove_job(id);
+		if let Some(job) = job {
+			helper::handle_fg(job)?;
 		}
 		Ok(())
 	}
@@ -619,15 +622,18 @@ impl JobTable {
 	}
 	pub fn print_jobs(&self, flags: &JobCmdFlags) {
 		let jobs = if flags.contains(JobCmdFlags::NEW_ONLY) {
-			self.jobs
-				.clone()
-				.into_iter()
+			&self.jobs
+				.iter()
 				.filter(|job| job.as_ref().is_some_and(|job| self.new_updates.contains(&job.table_id().unwrap())))
-				.collect::<Vec<Option<Job>>>()
+				.map(|job| job.as_ref())
+				.collect::<Vec<Option<&Job>>>()
 		} else {
-			self.jobs.clone()
+			&self.jobs
+				.iter()
+				.map(|job| job.as_ref())
+				.collect::<Vec<Option<&Job>>>()
 		};
-		for job in jobs.into_iter().flatten() {
+		for job in jobs.iter().flatten() {
 			// Skip foreground job
 			let id = job.table_id().unwrap();
 			// Filter jobs based on flags
@@ -643,7 +649,7 @@ impl JobTable {
 	}
 	pub fn update_job_statuses(&mut self) -> RshResult<()> {
 		for job in self.jobs.iter_mut().flatten() {
-			job.poll_children()?;
+			//job.poll_children()?;
 		}
 		Ok(())
 	}
@@ -1028,11 +1034,14 @@ where F: FnOnce(&mut EnvMeta) -> T {
 	let mut lock = META.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
 }
-#[track_caller]
 pub fn attach_tty(pgid: Pid) -> RshResult<()> {
 	// Ensure stdin (fd 0) is a tty before proceeding
 	if !isatty(0).unwrap_or(false) {
 		return Ok(());
+	}
+
+	if unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) == Ok(pgid) } {
+		return Ok(())
 	}
 
 	// Attempt to set the process group for the terminal
@@ -1193,8 +1202,8 @@ mod tests {
 				.with_children(children2)
 				.build();
 
-			job_table.insert_job(job1).unwrap();
-			job_table.insert_job(job2).unwrap();
+			job_table.insert_job(job1,false).unwrap();
+			job_table.insert_job(job2,false).unwrap();
 
 			job_table
 	}
@@ -1389,7 +1398,7 @@ mod tests {
 			assert_eq!(fg.map(|job| job.pgid().as_raw()), Some(400));
 
 			// Move the job to the background
-			mock_jobs.fg_to_bg().unwrap();
+			mock_jobs.fg_to_bg(WaitStatus::Stopped(Pid::from_raw(400), Signal::SIGTSTP)).unwrap();
 			let fg = mock_jobs.get_fg();
 			assert!(fg.is_none());
 
@@ -1413,7 +1422,7 @@ mod tests {
 			.with_children(children.clone())
 			.build();
 
-			let job_id = mock_jobs.insert_job(new_job).unwrap();
+			let job_id = mock_jobs.insert_job(new_job,false).unwrap();
 			let job = mock_jobs.query(JobID::TableID(job_id)).unwrap();
 
 			assert_eq!(job.table_id().unwrap(), job_id);

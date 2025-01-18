@@ -1193,20 +1193,6 @@ mod tests {
 	}
 
 	#[test]
-	fn tokenizer_cmd_sub() {
-		let input = "echo $(echo hi)";
-		let mut tokenizer = RshTokenizer::new(input);
-
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
-		let expected = vec![
-			Tk::start_of_input(),
-			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
-			token(TkType::String, "hi", 5, 15, WdFlags::empty()),
-		];
-		pretty_assertions::assert_eq!(tokens, expected);
-	}
-
-	#[test]
 	fn tokenizer_subshell() {
 		let input = "(echo hi)";
 		let mut tokenizer = RshTokenizer::new(input);

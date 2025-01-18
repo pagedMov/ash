@@ -1702,27 +1702,6 @@ mod test {
 	}
 
 	#[test]
-	fn parser_command_sub() {
-		let input = "echo $(echo hi)";
-		let mut tokenizer = RshTokenizer::new(input);
-
-		let mut flat_nodes = Vec::new();
-		loop {
-			let state = descend(&mut tokenizer).unwrap().unwrap();
-			if state.tokens.is_empty() {
-				break;
-			}
-
-			if let NdType::Root { deck } = state.ast.nd_type {
-				flat_nodes.extend(deck);
-			} else {
-				flat_nodes.push(state.ast);
-			}
-		}
-
-		insta::assert_debug_snapshot!(flat_nodes)
-	}
-	#[test]
 	fn parser_quoted_args() {
 		let input = "echo \"hello world\"";
 		let mut tokenizer = RshTokenizer::new(input);

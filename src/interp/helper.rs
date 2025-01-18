@@ -1,5 +1,5 @@
-use crate::{event::ShError, interp::token::REGEX, shellenv::{read_logic, read_meta, read_vars, write_logic, write_vars, DisplayWaitStatus, Job, RVal }, RshResult};
-use nix::unistd::dup2;
+use crate::{event::ShError, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, RVal, RSH_PGRP }, RshResult};
+use nix::{sys::wait::WaitStatus, unistd::dup2};
 use std::{collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}};
 
 use super::{parse::{NdType, Node}, token::Tk};
@@ -293,6 +293,29 @@ pub fn unset_var_conflicts(key: &str) -> RshResult<()> {
 	Ok(())
 }
 
+pub fn handle_fg(job: Job) -> RshResult<()> {
+	disable_reaping();
+	let statuses = write_jobs(|j| j.new_fg(job))??;
+	for status in statuses {
+		match status {
+			WaitStatus::Stopped(pid, sig) => {
+				attach_tty(*RSH_PGRP)?;
+				crate::signal::handle_child_stop(pid, sig)?
+			},
+			WaitStatus::Signaled(pid, sig, _) => {
+				attach_tty(*RSH_PGRP)?;
+				crate::signal::handle_child_signal(pid, sig)?
+			},
+			_ => { /* Do nothing */ }
+		}
+	}
+	write_jobs(|j| {
+		j.update_job_statuses().unwrap();
+		j.reset_fg();
+	})?;
+	enable_reaping()
+}
+
 pub fn flatten_tree(left: Node, right: Node) -> VecDeque<Node> {
 	let mut flattened = VecDeque::new();
 	let mut stack = vec![(left, right)];
@@ -528,7 +551,8 @@ pub fn format_command_status(i: usize, cmd: &String, job: &Job, init: bool, pids
 	let mut status0 = if init {
 		"".into()
 	} else {
-		DisplayWaitStatus(*job.get_statuses().get(i).unwrap()).to_string()
+		let status = DisplayWaitStatus(*job.get_statuses().get(i).unwrap());
+		status.to_string()
 	};
 
 	if status0.len() < 6 && !status0.is_empty() {

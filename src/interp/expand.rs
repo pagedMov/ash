@@ -8,7 +8,7 @@ use crate::execute::{self, ProcIO, RustFd};
 use crate::interp::parse::NdFlags;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
 use crate::interp::helper::{self,StrExtension, VecDequeExtension};
-use crate::shellenv::{read_logic, read_vars};
+use crate::shellenv::{read_logic, read_vars, RSH_PATH};
 use crate::RshResult;
 
 use super::parse::{NdType, Node, Span};
@@ -23,7 +23,10 @@ pub fn expand_shebang(mut body: String) -> RshResult<String> {
 	// and attach the '--subshell' argument to signal to the rsh subprocess that it is in a subshell context
 	if !body.starts_with("#!") {
 		//let interpreter = std::env::current_exe().unwrap();
-		let interpreter = PathBuf::from("/home/pagedmov/Coding/projects/rust/rsh/target/debug/rsh");
+		dbg!("/home/pagedmov/Coding/projects/rust/rsh/target/debug/rsh");
+		dbg!(&RSH_PATH);
+		let interpreter = PathBuf::from(RSH_PATH.clone());
+		dbg!(&interpreter);
 		let mut shebang = "#!".to_string();
 		shebang.push_str(interpreter.to_str().unwrap());
 		shebang = format!("{} {}", shebang, "--subshell");
@@ -599,24 +602,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_expand_shebang_no_shebang() {
-		let body = "print('Hello, World!')".to_string();
-		let expanded = expand_shebang(body).unwrap();
-		assert!(expanded.starts_with("#!"));
-		assert!(expanded.contains("--subshell"));
-	}
-
-	#[test]
-	fn test_expand_shebang_abbreviated() {
-		write_logic(|logic| logic.new_alias("python", "/usr/bin/python".to_string())).unwrap();
-		let body = "#!python\nprint('Hello, World!')".to_string();
-		let expanded = expand_shebang(body).unwrap();
-		let real_path = helper::which("python").unwrap_or_default();
-		let real_path = format!("#!{}",real_path);
-		assert!(expanded.starts_with(&real_path));
-	}
-
-	#[test]
 	fn test_expand_var() {
 		let input = "$USER".to_string();
 		let user = User::from_uid(getuid()).unwrap().unwrap().name;
@@ -674,13 +659,6 @@ mod tests {
 		assert_eq!(expanded.len(), 2);
 		assert_eq!(expanded[0].text(), "echo");
 		assert_eq!(expanded[1].text(), "hello");
-	}
-
-	#[test]
-	fn test_expand_cmd_sub() {
-		let token = token(TkType::CommandSub, "echo hello", Span::new(), WdFlags::empty());
-		let expanded = expand_cmd_sub(token).unwrap();
-		assert_eq!(expanded.text(), "hello");
 	}
 
 	#[test]

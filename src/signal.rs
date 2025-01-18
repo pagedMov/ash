@@ -63,7 +63,7 @@ pub extern "C" fn handle_sigchld(_: libc::c_int) {
 	 * Each WaitStatus has logic associated with it
 	 * But handle_child_exit() is the most important one
 	 */
-	let flags = WaitPidFlag::WUNTRACED;
+	let flags = WaitPidFlag::WNOHANG | WaitPidFlag::WUNTRACED;
 	while let Ok(status) = waitpid(None, Some(flags)) {
 		let _ = match status {
 			WaitStatus::Exited(pid, _code) => handle_child_exit(pid, status),
@@ -96,13 +96,12 @@ pub fn handle_child_stop(pid: Pid, signal: Signal) -> RshResult<()> {
 		if let Some(job) = j.query_mut(JobID::Pgid(pgid)) {
 			let child = job.get_children_mut().iter_mut().find(|chld| pid == chld.pid()).unwrap();
 			child.set_status(WaitStatus::Stopped(pid, signal));
-			if j.get_fg_mut().is_some_and(|fg| fg.pgid() == pgid) {
-				j.fg_to_bg().unwrap();
-			}
+		} else if j.get_fg_mut().is_some_and(|fg| fg.pgid() == pgid) {
+			j.fg_to_bg(WaitStatus::Stopped(pid, signal)).unwrap();
 		}
 	})?;
+	let job = read_jobs(|j| j.query(JobID::Pid(pid)).cloned())?;
 	shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal
-	killpg(pid, Signal::SIGCONT).unwrap();
 	Ok(())
 }
 
@@ -114,7 +113,6 @@ pub fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
 	 * We can reasonably assume that if it is not a foreground job, then it exists in the job table
 	 * If this assumption is incorrect, the code has gone wrong somewhere.
 	 */
-	dbg!(&status);
 	let (
 		pgid,
 		is_fg,

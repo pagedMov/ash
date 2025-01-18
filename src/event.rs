@@ -110,11 +110,6 @@ pub fn main_loop() -> RshResult<()> {
 				let result = descend(&mut tokenizer);
 				match result {
 					Ok(Some(state)) => {
-						write_jobs(|j| {
-							if let Some(job) = j.get_fg_mut() {
-								job.wait_pgrp().unwrap();
-							}
-						})?;
 						let deck = helper::extract_deck_from_root(&state.ast)?;
 						if !deck.is_empty() {
 							// Send each deck immediately for execution

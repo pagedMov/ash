@@ -18,7 +18,7 @@ use crate::interp::helper::{self, StrExtension};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType, WdFlags};
-use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_logic, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, HashFloat, JobBuilder, JobCmdFlags, JobID, RVal};
+use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_logic, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, HashFloat, JobBuilder, JobCmdFlags, JobID, RVal, RSH_PGRP};
 use crate::event::ShError;
 use crate::RshResult;
 
@@ -922,17 +922,17 @@ pub fn fg(node: Node) -> RshResult<RshWait> {
 		Some(arg) => parse_job_id(arg.text(), node.span())?,
 		None => curr_job_id.unwrap(),
 	};
-	write_jobs(|j| {
+	let mut job = write_jobs(|j| {
 		let id = JobID::TableID(job_id);
 		let query_result = j.query(id.clone());
-		if let Some(job) = query_result {
-			job.killpg(Signal::SIGCONT).map_err(|_| ShError::from_internal("Failed to send SIGCONT to the job"))?;
-			j.bg_to_fg(id);
+		if query_result.is_some() {
+			Ok(j.remove_job(id).unwrap())
 		} else {
-			return Err(ShError::from_execf(format!("Job ID {} not found", job_id).as_str(), 1, node.span()));
+			Err(ShError::from_execf(format!("Job ID {} not found", job_id).as_str(), 1, node.span()))
 		}
-		Ok(())
-	})?;
+	})??;
+	job.killpg(Signal::SIGCONT).map_err(|_| ShError::from_io())?;
+	helper::handle_fg(job)?;
 	Ok(RshWait::Success)
 }
 
@@ -952,24 +952,20 @@ pub fn bg(node: Node) -> RshResult<RshWait> {
 	};
 
 	// Perform the job transition
-	read_jobs(|j| {
+	let mut job = write_jobs(|j| {
 		let id = JobID::TableID(job_id);
 		let query_result = j.query(id.clone());
-		if let Some(job) = query_result {
-			job.killpg(Signal::SIGCONT).map_err(|_| ShError::from_internal("Failed to send SIGCONT to the job"))?;
+		if query_result.is_some() {
+			Ok(j.remove_job(id).unwrap())
 		} else {
-			return Err(ShError::from_execf(format!("Job ID {} not found", job_id).as_str(), 1, node.span()));
+			Err(ShError::from_execf(format!("Job ID {} not found", job_id).as_str(), 1, node.span()))
 		}
-		Ok(())
-	})?;
+	})??;
+	let job_order = read_jobs(|j| j.job_order().to_vec())?;
+	job.killpg(Signal::SIGCONT).map_err(|_| ShError::from_internal("Failed to send SIGCONT to the job"))?;
+	println!("{}", job.display(&job_order, JobCmdFlags::PIDS));
 
-	// Print job details
-	read_jobs(|j| {
-		if let Some(job) = j.query(JobID::TableID(job_id)) {
-			let job_order = j.job_order().to_vec();
-			println!("{}", job.display(&job_order, JobCmdFlags::PIDS));
-		}
-	})?;
+	write_jobs(|j| j.insert_job(job,true))??;
 
 	Ok(RshWait::Success)
 }
@@ -978,15 +974,15 @@ fn parse_job_id(arg: &str, span: Span) -> RshResult<usize> {
 	if arg.starts_with('%') {
 		let arg = arg.strip_prefix('%').unwrap();
 		if arg.chars().all(|ch| ch.is_ascii_digit()) {
-			return Ok(arg.parse::<usize>().unwrap());
+			Ok(arg.parse::<usize>().unwrap())
 		} else {
 			let result = write_jobs(|j| {
 				let query_result = j.query(JobID::Command(arg.into()));
 				query_result.map(|job| job.table_id().unwrap())
 			})?;
 			match result {
-				None => return Err(ShError::from_internal("Found a job but no table id in parse_job_id")),
-				Some(id) => return Ok(id),
+				None => Err(ShError::from_internal("Found a job but no table id in parse_job_id")),
+				Some(id) => Ok(id),
 			}
 		}
 	} else if arg.chars().all(|ch| ch.is_ascii_digit()) {
@@ -1141,11 +1137,9 @@ pub fn jobs(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 				.build();
 
 			if node.flags.contains(NdFlags::BACKGROUND) {
-				write_jobs(|j| j.insert_job(job))??;
+				write_jobs(|j| j.insert_job(job,false))??;
 			} else {
-				disable_reaping();
-				write_jobs(|j| j.new_fg(job))??;
-				enable_reaping()?;
+				helper::handle_fg(job)?;
 			}
 		}
 		Err(_) => return Err(ShError::from_internal("Failed to fork in print_jobs()"))
@@ -1282,7 +1276,7 @@ pub fn echo(node: Node, mut io: ProcIO,) -> RshResult<RshWait> {
 				.build();
 
 			if node.flags.contains(NdFlags::BACKGROUND) {
-				write_jobs(|j| j.insert_job(job))??;
+				write_jobs(|j| j.insert_job(job,false))??;
 			} else {
 				disable_reaping();
 				write_jobs(|j| j.new_fg(job))??;
