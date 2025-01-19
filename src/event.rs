@@ -88,6 +88,92 @@ impl Display for ShError {
 	}
 }
 
+#[derive(Debug)]
+pub struct ShErrorWindow {
+	line: usize,
+	col: usize,
+	window: String
+}
+
+impl ShErrorWindow {
+	pub fn new(input: &str, span: Span) -> Self {
+		assert!(span.start <= input.len(), "span.start is out of bounds");
+		assert!(span.end <= input.len(), "span.end is out of bounds");
+		let delta = span.end - span.start;
+		let mut chars = input.chars();
+		let mut lines = input.lines();
+
+		let mut pos = 0;
+		let mut line = 0;
+		let mut col = 0;
+
+		while pos != span.start {
+			let char = chars.next();
+			if char == Some('\n') {
+				line += 1;
+				col = 0;
+			} else {
+				col += 1;
+			}
+			pos += 1
+		}
+
+		let first_line = lines.nth(line).unwrap();
+		let second_line = {
+			let caret = String::from("\x1b[31m^\x1b[0m");
+			let padding = String::from(" ").repeat(col);
+			let span_line = String::from("\x1b[31m~\x1b[0m").repeat(delta.saturating_sub(2)); // subtract 2 to make room for the carets
+			if delta <= 1 {
+				format!("{}{}",padding,caret)
+			} else {
+				format!("{}{}{}{}",padding,caret,span_line,caret)
+			}
+		};
+		let window = format!("{}\n{}",first_line,second_line);
+		Self { line, col, window }
+	}
+
+	pub fn get_vals(&self) -> (usize,usize,&str) {
+		(self.line + 1,self.col + 1,self.window.as_str())
+	}
+}
+
+#[derive(Debug)]
+pub struct ShErrorFull {
+	window: Option<ShErrorWindow>,
+	msg: String
+}
+
+impl ShErrorFull {
+	pub fn from(err: ShError, input: &str) -> Self {
+		match err {
+			ShError::CommandNotFound(msg, span) |
+			ShError::InvalidSyntax(msg, span) |
+			ShError::ParsingError(msg, span) |
+			ShError::ExecFailed(msg, _, span) => {
+				let window = Some(ShErrorWindow::new(input, span));
+				Self { window, msg }
+			}
+			ShError::IoError(msg, _, _) => Self { window: None, msg },
+			ShError::InternalError(msg) => Self { window: None, msg }
+		}
+	}
+}
+
+impl Display for ShErrorFull {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match &self.window {
+			Some(window) => {
+				let (line,col,window) = window.get_vals();
+				write!(f,"{};{} - {}\n\n{}",line,col,self.msg,window)
+			}
+			None => {
+				write!(f,"{}",self.msg)
+			}
+		}
+	}
+}
+
 #[derive(Debug,Clone)]
 pub enum ShEvent {
 	Input(String),
@@ -97,6 +183,12 @@ pub enum ShEvent {
 	Error(ShError),
 	LastStatus(RshWait),
 	Prompt
+}
+
+pub fn throw(err: ShError) -> RshResult<()> {
+	let input = read_meta(|m| m.get_last_input())?;
+	eprintln!("{}", ShErrorFull::from(err,&input));
+	Ok(())
 }
 
 pub fn main_loop() -> RshResult<()> {
@@ -114,7 +206,7 @@ pub fn main_loop() -> RshResult<()> {
 						if !deck.is_empty() {
 							// Send each deck immediately for execution
 							if let Err(e) = execute::traverse_ast(state.ast) {
-								eprintln!("{:?}",e);
+								throw(e)?;
 							}
 						} else {
 							break;
@@ -122,7 +214,7 @@ pub fn main_loop() -> RshResult<()> {
 					}
 					Ok(None) => break,
 					Err(e) => {
-						eprintln!("{:?}",e);
+						throw(e)?;
 					}
 				}
 			}
