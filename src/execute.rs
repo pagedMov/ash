@@ -1,11 +1,11 @@
 use std::{collections::{HashMap, VecDeque}, env, ffi::CString, fmt::{self, Display}, os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd}, path::{Path, PathBuf}, sync::Arc};
 
 use libc::{memfd_create, MFD_CLOEXEC};
-use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, mkfifo, pipe, ForkResult, Pid}};
+use nix::{errno::Errno, fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, mkfifo, pipe, ForkResult, Pid}};
 use std::sync::Mutex;
 use uuid::Uuid;
 
-use crate::{builtin, event::ShError, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, RshResult};
+use crate::{builtin, event::{self, ShError, ShErrorFull}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, RshResult};
 
 macro_rules! node_operation {
 	($node_type:path { $($field:tt)* }, $node:expr, $node_op:block) => {
@@ -1024,8 +1024,12 @@ fn handle_command(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
 			handle_redirs(redirs.into())?;
-			execvpe(&command, &argv, &envp).unwrap();
-			unreachable!();
+			let Err(e) = execvpe(&command, &argv, &envp);
+			if e == Errno::ENOENT {
+				let err = ShError::from_no_cmd(format!("\x1b[31mCommand not found:\x1b[0m {}", command.to_str().unwrap()).as_str(), node.span());
+				event::throw(err).unwrap();
+				std::process::exit(1);
+			} else { unreachable!() }
 		}
 		Ok(ForkResult::Parent { child }) => {
 			handle_parent_process(child, command, &node)?;
