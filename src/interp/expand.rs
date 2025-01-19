@@ -2,6 +2,7 @@ use chrono::Local;
 use glob::glob;
 use regex::Regex;
 use std::collections::VecDeque;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use crate::event::ShError;
 use crate::execute::{self, ProcIO, RustFd};
@@ -23,10 +24,7 @@ pub fn expand_shebang(mut body: String) -> RshResult<String> {
 	// and attach the '--subshell' argument to signal to the rsh subprocess that it is in a subshell context
 	if !body.starts_with("#!") {
 		//let interpreter = std::env::current_exe().unwrap();
-		dbg!("/home/pagedmov/Coding/projects/rust/rsh/target/debug/rsh");
-		dbg!(&RSH_PATH);
 		let interpreter = PathBuf::from(RSH_PATH.clone());
-		dbg!(&interpreter);
 		let mut shebang = "#!".to_string();
 		shebang.push_str(interpreter.to_str().unwrap());
 		shebang = format!("{} {}", shebang, "--subshell");
@@ -213,7 +211,7 @@ pub fn check_home_expansion(text: &str) -> bool {
 pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 	let mut working_buffer: VecDeque<Tk> = VecDeque::new();
 	let mut product_buffer: VecDeque<Tk> = VecDeque::new();
-	let split_words = token.tk_type != TkType::String;
+	let split_words = !matches!(token.tk_type, TkType::String);
 
 	//TODO: find some way to clean up this surprisingly functional mess
 	// Escaping breaks this right now I think
@@ -224,6 +222,7 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 		let is_glob = if expand_glob { check_globs(token.text().into()) } else { expand_glob };
 		let is_brace_expansion = helper::is_brace_expansion(token.text());
 		let is_cmd_sub = matches!(token.tk_type,TkType::CommandSub);
+		let is_proc_sub = matches!(token.tk_type,TkType::ProcSub(_));
 
 		if is_cmd_sub {
 			let new_token = expand_cmd_sub(token)?;
@@ -260,7 +259,7 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 				product_buffer.push_back(token)
 			}
 
-		} else if is_brace_expansion && token.text().has_unescaped("{") && token.tk_type != TkType::String {
+		} else if is_brace_expansion && token.text().has_unescaped("{") && !matches!(token.tk_type, TkType::String) {
 			// Perform brace expansion
 			let expanded = expand_braces(token.text().to_string(), VecDeque::new());
 			for mut expanded_token in expanded {
@@ -351,7 +350,7 @@ pub fn clean_escape_chars(token_buffer: &mut VecDeque<Tk>) {
 
 pub fn expand_cmd_sub(token: Tk) -> RshResult<Tk> {
 	let new_token;
-	if let TkType::CommandSub = token.tk_type {
+	if matches!(token.tk_type, TkType::CommandSub | TkType::ProcSub(_)) {
 		let body = token.text().to_string();
 		let node = Node {
 			command: None,
@@ -363,12 +362,25 @@ pub fn expand_cmd_sub(token: Tk) -> RshResult<Tk> {
 		let (mut r_pipe,w_pipe) = RustFd::pipe()?;
 		let io = ProcIO::from(None,Some(w_pipe.mk_shared()),None);
 		execute::handle_subshell(node, io)?;
-		let buffer = r_pipe.read()?;
-		new_token = Tk {
-			tk_type: TkType::String,
-			wd: WordDesc { text: buffer.trim().to_string(), span: token.span(), flags: token.flags() }
-		};
-		r_pipe.close()?;
+
+		if let TkType::CommandSub = token.tk_type {
+			let buffer = r_pipe.read()?;
+			new_token = Tk {
+				tk_type: TkType::String,
+				wd: WordDesc { text: buffer.trim().to_string(), span: token.span(), flags: token.flags() }
+			};
+			r_pipe.close()?;
+		} else {
+			let buffer = r_pipe.read()?;
+			let proc_fd = RustFd::new_memfd("rsh_proc_sub", true)?;
+			proc_fd.write(buffer.as_bytes())?;
+			let path = format!("/proc/self/fd/{}",proc_fd);
+
+			new_token = Tk {
+				tk_type: TkType::ProcSub(Some(proc_fd.mk_shared())),
+				wd: WordDesc { text: path, span: token.span(), flags: token.flags() }
+			}
+		}
 	} else {
 		return Err(ShError::from_internal("Called expand_cmd_sub() on a non-commandsub token"))
 	}

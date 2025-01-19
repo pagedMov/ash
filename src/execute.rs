@@ -1,8 +1,9 @@
-use std::{collections::{HashMap, VecDeque}, ffi::CString, fmt::{self, Display}, os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd}, path::Path, sync::Arc};
+use std::{collections::{HashMap, VecDeque}, env, ffi::CString, fmt::{self, Display}, os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd}, path::{Path, PathBuf}, sync::Arc};
 
 use libc::{memfd_create, MFD_CLOEXEC};
-use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
+use nix::{fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, mkfifo, pipe, ForkResult, Pid}};
 use std::sync::Mutex;
+use uuid::Uuid;
 
 use crate::{builtin, event::ShError, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, RshResult};
 
@@ -145,7 +146,6 @@ impl RustFd {
 		Ok(Self { fd: file_fd })
 	}
 
-	#[track_caller]
 	pub fn close(&mut self) -> RshResult<()> {
 		if !self.is_valid() {
 			return Ok(())

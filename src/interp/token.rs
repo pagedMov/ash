@@ -4,7 +4,10 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::mem::take;
+use std::sync::Arc;
+use std::sync::Mutex;
 
+use crate::execute::RustFd;
 use crate::interp::expand::expand_cmd_sub;
 use crate::interp::parse::Span;
 use crate::event::ShError;
@@ -213,13 +216,13 @@ impl Default for WordDesc {
 	}
 }
 
-#[derive(Debug,Hash,Clone,PartialEq,Eq)]
+#[derive(Debug,Clone)]
 pub struct Tk {
 	pub tk_type: TkType,
 	pub wd: WordDesc
 }
 
-#[derive(Debug,Hash,Clone,PartialEq,Eq)]
+#[derive(Debug,Clone)]
 pub enum TkType {
 	// Control Flow Keywords
 	If,
@@ -262,6 +265,7 @@ pub enum TkType {
 	BraceExpansion,
 	VariableSub, // `$var`, `${var}`
 	CommandSub, // `$(command)`
+	ProcSub(Option<Arc<Mutex<RustFd>>>), // `>(command), <(command)`
 
 	// Comments
 	Comment, // `#`
@@ -367,7 +371,7 @@ impl Default for Tk {
 }
 
 
-#[derive(Debug,Hash,Clone,PartialEq,Eq)]
+#[derive(Debug,Clone)]
 pub struct Redir {
 	pub fd_source: i32,
 	pub op: RedirType,
@@ -422,6 +426,7 @@ Redirect, // >, <, <<, <<<, 1>&2, 2>, etc.
 Comment, // #Comments like this
 Whitespace, // Space or tabs
 CommandSub, // $(Command substitution)
+ProcSub, // <(Process substitution)
 Operator, // operators
 Separator, // Semicolon or newline to end an invocation
 DeadEnd, // Used for closing keywords like 'fi' and 'done' that demand a separator immediately after
@@ -572,6 +577,9 @@ impl RshTokenizer {
 						break
 					}
 				}
+				'<' | '>' if self.char_stream.get(1).is_some_and(|ch| *ch == '(') => {
+					self.push_ctx(ProcSub);
+				}
 				'#' => self.push_ctx(Comment),
 				'(' if *self.ctx() == Command => self.push_ctx(Subshell),
 				'{' if *self.ctx() == FuncDef => self.push_ctx(FuncBody),
@@ -596,7 +604,7 @@ impl RshTokenizer {
 				VarDec => self.vardec_context(take(&mut wd))?,
 				SingleVarDec => self.vardec_context(take(&mut wd))?,
 				ArrDec => self.arrdec_context(take(&mut wd))?,
-				Subshell | CommandSub => self.subshell_context(take(&mut wd))?,
+				Subshell | CommandSub | ProcSub => self.subshell_context(take(&mut wd))?,
 				FuncBody => self.func_context(take(&mut wd)),
 				Case => self.case_context(take(&mut wd))?,
 				Comment => {
@@ -857,7 +865,7 @@ impl RshTokenizer {
 	fn subshell_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
 		use crate::interp::token::TkState::*;
 		self.advance();
-		if *self.ctx() == CommandSub { self.advance(); }
+		if matches!(*self.ctx(), CommandSub | ProcSub) { self.advance(); }
 		let mut paren_stack = vec!['('];
 		while let Some(ch) = self.advance() {
 			match ch {
@@ -891,9 +899,15 @@ impl RshTokenizer {
 					wd
 				}
 			}
+			ProcSub => {
+				Tk {
+					tk_type: TkType::ProcSub(None),
+					wd
+				}
+			}
 			_ => unreachable!()
 		};
-		if *self.ctx() == CommandSub {
+		if matches!(*self.ctx(), CommandSub | ProcSub) {
 			tk = expand_cmd_sub(tk)?;
 		}
 		self.pop_ctx();
@@ -1098,7 +1112,7 @@ mod tests {
 			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
 			token(TkType::String, "hello", 5, 10, WdFlags::IS_ARG),
 		];
-		pretty_assertions::assert_eq!(tokens,expected);
+		assert!(matches!(tokens,expected));
 	}
 
 	#[test]
@@ -1113,7 +1127,7 @@ mod tests {
 			token(TkType::String, "-l", 3, 5, WdFlags::IS_ARG),
 			token(TkType::String, "/home/user", 6, 16, WdFlags::IS_ARG),
 		];
-		pretty_assertions::assert_eq!(tokens, expected);
+		assert!(matches!(tokens,expected));
 	}
 
 	#[test]
@@ -1127,7 +1141,7 @@ mod tests {
 			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
 			token(TkType::String, "Hello, world!", 5, 20, WdFlags::IS_ARG),
 		];
-		pretty_assertions::assert_eq!(tokens, expected);
+		assert!(matches!(tokens,expected));
 	}
 
 	#[test]
@@ -1141,7 +1155,7 @@ mod tests {
 			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
 			token(TkType::String, "single quoted arg", 5, 24, WdFlags::IS_ARG),
 		];
-		pretty_assertions::assert_eq!(tokens, expected);
+		assert!(matches!(tokens,expected));
 	}
 
 	#[test]
@@ -1156,7 +1170,7 @@ mod tests {
 			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
 			token(TkType::String, user.as_str(), 5, 10, WdFlags::IS_ARG),
 		];
-		pretty_assertions::assert_eq!(tokens, expected);
+		assert!(matches!(tokens,expected));
 	}
 
 	#[test]
@@ -1172,7 +1186,7 @@ mod tests {
 			token(TkType::Ident, "grep", 5, 9, WdFlags::empty()),
 			token(TkType::String, "file", 10, 14, WdFlags::IS_ARG),
 		];
-		pretty_assertions::assert_eq!(tokens, expected);
+		assert!(matches!(tokens,expected));
 	}
 
 
@@ -1189,7 +1203,7 @@ mod tests {
 			token(TkType::Redirection { redir: Redir { fd_source: 1, op: RedirType::Output, fd_target: None, file_target: None } }, ">", 11, 12, WdFlags::IS_OP),
 			token(TkType::String, "output.txt", 13, 23, WdFlags::IS_ARG),
 		];
-		pretty_assertions::assert_eq!(tokens, expected);
+		assert!(matches!(tokens,expected));
 	}
 
 	#[test]
@@ -1202,7 +1216,7 @@ mod tests {
 			Tk::start_of_input(),
 			token(TkType::Subshell, "echo hi", 0, 9, WdFlags::empty()),
 		];
-		pretty_assertions::assert_eq!(tokens, expected);
+		assert!(matches!(tokens,expected));
 	}
 
 	#[test]
@@ -1223,7 +1237,7 @@ print(\"hello world\")
 				WdFlags::empty(),
 			),
 		];
-		pretty_assertions::assert_eq!(tokens, expected);
+		assert!(matches!(tokens,expected));
 	}
 
 	#[test]
@@ -1240,7 +1254,7 @@ print(\"hello world\")
 			token(TkType::FuncDef, "func", 0, 6, WdFlags::empty()),
 			token(TkType::FuncBody, "echo hi\n\t\t\tcat file.txt", 7, 39, WdFlags::empty()),
 		];
-		pretty_assertions::assert_eq!(tokens, expected);
+		assert!(matches!(tokens,expected));
 	}
 
 	#[test]
@@ -1285,7 +1299,7 @@ print(\"hello world\")
 			token(TkType::Cmdsep, "", 72, 72, WdFlags::empty()),
 			token(TkType::Fi, "fi", 73, 75, WdFlags::KEYWORD),
 			];
-		pretty_assertions::assert_eq!(tokens, expected);
+		assert!(matches!(tokens,expected));
 	}
 
 	#[test]
@@ -1309,7 +1323,7 @@ print(\"hello world\")
 			token(TkType::Cmdsep, "", 27, 27, WdFlags::empty()),
 			token(TkType::Done, "done", 28, 32, WdFlags::KEYWORD),
 		];
-		pretty_assertions::assert_eq!(tokens, expected);
+		assert!(matches!(tokens,expected));
 	}
 
 	#[test]
@@ -1329,7 +1343,7 @@ print(\"hello world\")
 			token(TkType::Cmdsep, "", 28, 28, WdFlags::empty()),
 			token(TkType::Done, "done", 29, 33, WdFlags::KEYWORD),
 		];
-		pretty_assertions::assert_eq!(tokens, expected);
+		assert!(matches!(tokens,expected));
 	}
 
 	#[test]
@@ -1349,7 +1363,7 @@ print(\"hello world\")
 			token(TkType::Cmdsep, "", 28, 28, WdFlags::empty()),
 			token(TkType::Done, "done", 29, 33, WdFlags::KEYWORD),
 		];
-		pretty_assertions::assert_eq!(tokens, expected);
+		assert!(matches!(tokens,expected));
 	}
 
 	#[test]
@@ -1439,6 +1453,6 @@ print(\"hello world\")
 			// fi
 			token(TkType::Fi, "fi", 265, 267, WdFlags::KEYWORD),
 			];
-		pretty_assertions::assert_eq!(tokens, expected);
+		assert!(matches!(tokens,expected));
 	}
 }

@@ -3,7 +3,7 @@ use libc::{getpid, tcgetpgrp};
 use signal_hook::iterator::Signals;
 
 
-use crate::{deconstruct, execute::{self, RshWait}, interp::{helper, parse::{descend, NdType, Node, Span}, token::RshTokenizer}, prompt, shellenv::{self, read_jobs, read_meta, write_jobs, write_meta}, signal::{self, }, RshResult, GLOBAL_EVENT_CHANNEL};
+use crate::{deconstruct, execute::{self, RshWait}, interp::{helper, parse::{descend, NdType, Node, Span}, token::RshTokenizer}, prompt, shellenv::{self, read_jobs, read_meta, write_jobs, write_meta}, signal::{self, }, RshResult};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShError {

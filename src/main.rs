@@ -30,22 +30,17 @@ pub mod builtin;
 pub mod comp;
 pub mod signal;
 
-use std::{env, fs::File, io::Read, os::fd::AsRawFd, path::PathBuf, sync::mpsc::{self, Receiver, Sender}, thread};
+use std::{env, os::fd::AsRawFd, path::PathBuf};
 
-use event::{ShError, ShEvent};
+use event::ShError;
 use execute::{traverse_ast, RshWait, RustFd};
-use interp::{parse::{descend, NdType, Span}, token::RshTokenizer};
-use libc::{S_IRGRP, S_IRUSR};
-use nix::{fcntl::OFlag, sys::{signal::{signal, SigHandler, Signal::{SIGTTIN, SIGTTOU}}, stat::Mode, termios::{self, LocalFlags}}, unistd::isatty};
-use once_cell::sync::{Lazy, OnceCell};
+use interp::{parse::{descend, NdType}, token::RshTokenizer};
+use nix::{fcntl::OFlag, sys::{stat::Mode, termios::{self, LocalFlags}}, unistd::isatty};
 use shellenv::{read_vars, write_meta, write_vars, EnvFlags, RSH_PATH, RSH_PGRP};
 use termios::Termios;
 
-//use crate::event::EventLoop;
-
 pub type RshResult<T> = Result<T, ShError>;
 
-static GLOBAL_EVENT_CHANNEL: OnceCell<Sender<ShEvent>> = OnceCell::new();
 
 fn set_termios() -> Option<Termios> {
 	if isatty(std::io::stdin().as_raw_fd()).unwrap() {
