@@ -61,9 +61,73 @@ pub trait StrExtension {
 	fn consume_escapes(&self) -> String;
 	fn trim_quotes(&self) -> String;
 	fn split_outside_quotes(&self) -> Vec<String>;
+	fn split_twice(&self,left: &str, right: &str) -> Option<(String,String,String)>;
 }
 
 impl StrExtension for str {
+	/// This function looks for two patterns to split at
+	/// The left one must come first, and the right one second.
+	/// If the string matches this pattern, it will return all three parts as a tuple
+	/// It also respects escaped characters
+	fn split_twice(&self, left: &str, right: &str) -> Option<(String, String, String)> {
+		let mut found_left = false;
+		let mut product = String::new();
+		let mut prefix = String::new();
+		let mut suffix = String::new();
+		let mut chars = self.chars();
+		let mut buffer = String::new(); // Temporary buffer for matching delimiters
+
+		while let Some(ch) = chars.next() {
+			match ch {
+				'\\' => {
+					// Skip escaped characters
+					if let Some(escaped) = chars.next() {
+						if found_left {
+							product.push(escaped);
+						} else {
+							prefix.push(escaped);
+						}
+					}
+				}
+				_ => {
+					if found_left {
+						product.push(ch);
+						buffer.push(ch);
+
+						// Check if we've reached the right delimiter
+						if buffer.ends_with(right) {
+							product.truncate(product.len() - right.len());
+							suffix = chars.collect(); // Remaining characters form the suffix
+							return Some((prefix, product, suffix));
+						}
+
+						// Trim the buffer to the length of `right`
+						if buffer.len() > right.len() {
+							buffer.drain(..buffer.len() - right.len());
+						}
+					} else {
+						buffer.push(ch);
+						prefix.push(ch);
+
+						// Check if we've reached the left delimiter
+						if buffer.ends_with(left) {
+							found_left = true;
+							product.clear();
+							buffer.clear();
+							prefix.truncate(prefix.len() - left.len()); // Remove the delimiter from prefix
+						}
+
+						// Trim the buffer to the length of `left`
+						if buffer.len() > left.len() {
+							buffer.drain(..buffer.len() - left.len());
+						}
+					}
+				}
+			}
+		}
+
+		None
+	}
 	fn split_outside_quotes(&self) -> Vec<String> {
 		let mut result = Vec::new();
 		let mut working_str = String::new();
@@ -595,16 +659,32 @@ pub fn format_status_line(i: usize, status_final: &str, job: &Job, long: bool, p
 	}
 }
 
-pub fn has_valid_delims(input: &str, open: char, close: char) -> bool {
+pub fn has_valid_delims(input: &str, open: &str, close: &str) -> bool {
 	let mut open_found = false;
+	let mut working_buffer = String::new();
 	let mut chars = input.chars();
 
 	while let Some(ch) = chars.next() {
 		match ch {
-			'\\' => { chars.next(); },
-			_ if ch == open => open_found = true,
-			_ if ch == close && open_found => return true,
-			_ => { /* Do nothing */ }
+			'\\' => {
+				if let Some(next) = chars.next() {
+					working_buffer.push(next); // Preserve escaped character in buffer
+				}
+				continue;
+			}
+			' ' | '\t' | ';' | '\n' => {
+				working_buffer.clear();
+			}
+			_ => {
+				working_buffer.push(ch);
+				if !open_found && working_buffer.ends_with(open) {
+					open_found = true;
+					working_buffer.clear();
+				}
+				if open_found && working_buffer.ends_with(close) {
+					return true;
+				}
+			}
 		}
 	}
 	false

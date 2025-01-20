@@ -1,4 +1,4 @@
-use crate::{comp::RshHelper, event::ShError, shellenv::{read_meta, read_vars, write_meta}, RshResult};
+use crate::{comp::RshHelper, event::ShError, shellenv::{self, read_meta, read_vars, write_meta, RSH_PGRP}, RshResult};
 use std::path::{Path, PathBuf};
 use nix::{sys::signal::{kill, Signal}, unistd::Pid};
 
@@ -81,6 +81,7 @@ fn load_history(rl: &mut Editor<RshHelper, DefaultHistory>) -> RshResult<()> {
 
 pub fn run() -> RshResult<String> {
 	write_meta(|m| m.enter_prompt())?;
+	shellenv::attach_tty(*RSH_PGRP)?;
 
 	let mut rl = init_prompt()?;
 	let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE"))?.unwrap_or_else(|| -> String {
@@ -114,7 +115,7 @@ pub fn run() -> RshResult<String> {
 		}
 		Err(e) => {
 			write_meta(|m| m.leave_prompt())?;
-			Err(ShError::from_internal(e.to_string().as_str()))
+			Err(ShError::from_internal(format!("rustyline error: {}",e.to_string().as_str()).as_str()))
 		}
 	}
 }

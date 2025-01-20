@@ -674,7 +674,22 @@ impl RshTokenizer {
 				_ => unreachable!()
 			};
 			if wd.text.has_unescaped("=") {
-				self.tokens.push(Tk { tk_type: TkType::Assignment, wd });
+				let (var,val) = wd.text.split_once("=").unwrap();
+				let mut val_wd = wd.clone();
+				val_wd.text = val.to_string();
+				let mut val_tk = Tk { tk_type: TkType::Ident, wd: val_wd };
+
+				if val.starts_with('"') && val.ends_with('"') {
+					val_tk.tk_type = TkType::String;
+					val_tk.wd.text = val.trim_matches('"').to_string();
+				}
+
+				let mut expanded = expand::expand_token(val_tk, true)?;
+				while let Some(mut tk) = expanded.pop_front() {
+					tk.tk_type = TkType::Assignment;
+					tk.wd.text = format!("{}={}",var,tk.text());
+					self.tokens.push(tk);
+				}
 				self.push_ctx(Arg)
 			} else {
 				self.tokens.push(Tk { tk_type: TkType::Ident, wd: wd.reset_flags().add_flag(flags) });
@@ -686,7 +701,6 @@ impl RshTokenizer {
 	fn arg_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
 		use crate::interp::token::TkState::*;
 		wd = self.complete_word(wd);
-		dbg!(&wd.text);
 		match wd.text.as_str() {
 			"||" | "&&" | "|" | "|&" => {
 				while self.char_stream.front().is_some_and(|ch| *ch == '\n') {
@@ -753,7 +767,11 @@ impl RshTokenizer {
 			_ => {
 				// Now we will just expand the token here
 				// This catches variable subs, command subs, brace expansions, the whole nine yards
-				let token = Tk { tk_type: TkType::Ident, wd: wd.add_flag(WdFlags::IS_ARG) };
+				let mut token = Tk { tk_type: TkType::Ident, wd: wd.add_flag(WdFlags::IS_ARG) };
+				if token.text().starts_with('"') && token.text().ends_with('"') {
+					token.tk_type = TkType::String;
+					token.wd.text = token.text().trim_matches('"').to_string();
+				}
 				// We will expand variables later for these contexts
 				if !self.context.contains(&For) && !self.context.contains(&Case) && !self.context.contains(&Select) {
 					let mut expanded = expand::expand_token(token, true)?;

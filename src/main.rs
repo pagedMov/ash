@@ -78,6 +78,7 @@ fn initialize_proc_constants() {
 async fn main() {
 	env_logger::init();
 	initialize_proc_constants();
+	let mut interactive = true;
 	let mut args = env::args().collect::<Vec<String>>();
 
 	// Ignore SIGTTOU
@@ -98,11 +99,12 @@ async fn main() {
 	}
 	if args.iter().any(|arg| arg == "--subshell") {
 		let index = args.iter().position(|arg| arg == "--subshell").unwrap();
+		interactive = false;
 		args.remove(index);
 		write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::IN_SUBSH)).unwrap();
 	}
-	match args.len() {
-		1 => { // interactive
+	match interactive {
+		true => { // interactive
 			let termios = set_termios();
 			write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::INTERACTIVE)).unwrap();
 
@@ -110,7 +112,7 @@ async fn main() {
 
 			restore_termios(&termios);
 		},
-		_ => {
+		false => {
 			main_noninteractive(args).unwrap();
 		}
 	};
@@ -151,10 +153,8 @@ fn main_noninteractive(args: Vec<String>) -> RshResult<RshWait> {
 	// Code Execution Logic
 	write_meta(|m| m.set_last_input(&input))?;
 	for (index,param) in pos_params.into_iter().enumerate() {
-		dbg!(index + 1,&param);
 		let key = format!("{}",index + 1);
 		write_vars(|v| v.set_param(key, param))?;
-		dbg!(read_vars(|v| v.get_param("1")).unwrap());
 	}
 	let mut tokenizer = RshTokenizer::new(&input);
 	let mut last_result = RshWait::new();

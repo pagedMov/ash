@@ -1044,6 +1044,10 @@ pub fn attach_tty(pgid: Pid) -> RshResult<()> {
 		return Ok(());
 	}
 
+	if pgid == *RSH_PGRP && read_meta(|m| m.flags().contains(EnvFlags::IN_SUBSH))? {
+		return Ok(())
+	}
+
 	if unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) == Ok(pgid) } {
 		return Ok(())
 	}

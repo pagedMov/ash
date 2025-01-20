@@ -3,7 +3,7 @@ use libc::{getpid, tcgetpgrp};
 use signal_hook::iterator::Signals;
 
 
-use crate::{deconstruct, execute::{self, RshWait}, interp::{helper, parse::{descend, NdType, Node, Span}, token::RshTokenizer}, prompt, shellenv::{self, read_jobs, read_meta, write_jobs, write_meta}, signal::{self, }, RshResult, GLOBAL_EVENT_CHANNEL};
+use crate::{deconstruct, execute::{self, RshWait}, interp::{helper, parse::{descend, NdType, Node, Span}, token::RshTokenizer}, prompt, shellenv::{self, read_jobs, read_meta, write_jobs, write_meta, EnvFlags}, signal::{self, }, RshResult, GLOBAL_EVENT_CHANNEL};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShError {
@@ -192,6 +192,9 @@ pub fn throw(err: ShError) -> RshResult<()> {
 }
 
 pub fn main_loop() -> RshResult<()> {
+	if read_meta(|m| m.flags().contains(EnvFlags::IN_SUBSH))? {
+		eprintln!("I shouldnt be here");
+	}
 	loop {
 		let input = prompt::run()?;
 		write_meta(|m| m.leave_prompt())?;

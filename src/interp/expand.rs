@@ -26,7 +26,7 @@ pub fn check_globs(tk: Tk) -> bool {
 	// Check for unescaped glob characters
 
 	let has_globs = GLOB_CHARS.iter().any(|&ch| text.has_unescaped(ch));
-	let has_brackets = helper::has_valid_delims(text, '[', ']');
+	let has_brackets = helper::has_valid_delims(text, "[", "]");
 	has_globs || has_brackets
 }
 
@@ -35,10 +35,7 @@ pub fn expand_shebang(mut body: String) -> RshResult<String> {
 	// and attach the '--subshell' argument to signal to the rsh subprocess that it is in a subshell context
 	if !body.starts_with("#!") {
 		//let interpreter = std::env::current_exe().unwrap();
-		dbg!("/home/pagedmov/Coding/projects/rust/rsh/target/debug/rsh");
-		dbg!(&RSH_PATH);
 		let interpreter = PathBuf::from(RSH_PATH.clone());
-		dbg!(&interpreter);
 		let mut shebang = "#!".to_string();
 		shebang.push_str(interpreter.to_str().unwrap());
 		shebang = format!("{} {}", shebang, "--subshell");
@@ -235,7 +232,7 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 		// If expand_glob is true, then check for globs. Otherwise, is_glob is false
 		let is_glob = if expand_glob { check_globs(token.clone()) } else { expand_glob };
 		let is_brace_expansion = helper::is_brace_expansion(token.text());
-		let is_cmd_sub = matches!(token.tk_type,TkType::CommandSub);
+		let is_cmd_sub = helper::has_valid_delims(token.text(), "$(", ")");
 
 		if is_cmd_sub {
 			let new_token = expand_cmd_sub(token)?;
@@ -369,19 +366,66 @@ pub fn expand_cmd_sub(token: Tk) -> RshResult<Tk> {
 			nd_type: NdType::Subshell { body, argv: VecDeque::new() },
 			flags: NdFlags::VALID_OPERAND | NdFlags::IN_CMD_SUB,
 			redirs: VecDeque::new(),
-			span: token.span()
+			span: token.span(),
 		};
-		let (mut r_pipe,w_pipe) = RustFd::pipe()?;
-		let io = ProcIO::from(None,Some(w_pipe.mk_shared()),None);
+		let (mut r_pipe, w_pipe) = RustFd::pipe()?;
+		let io = ProcIO::from(None, Some(w_pipe.mk_shared()), None);
 		execute::handle_subshell(node, io)?;
 		let buffer = r_pipe.read()?;
 		new_token = Tk {
 			tk_type: TkType::String,
-			wd: WordDesc { text: buffer.trim().to_string(), span: token.span(), flags: token.flags() }
+			wd: WordDesc {
+				text: buffer.trim().to_string(),
+				span: token.span(),
+				flags: token.flags(),
+			},
 		};
 		r_pipe.close()?;
+	} else if let TkType::String = token.tk_type {
+		let mut text = token.text().to_string();
+		let mut result = String::new();
+
+		while let Some((left, body, right)) = text.split_twice("$(", ")") {
+			// Construct the node for the subshell body
+			let node = Node {
+				command: None,
+				nd_type: NdType::Subshell { body: body.to_string(), argv: VecDeque::new() },
+				flags: NdFlags::VALID_OPERAND | NdFlags::IN_CMD_SUB,
+				redirs: VecDeque::new(),
+				span: token.span(),
+			};
+
+			// Create the pipe for subshell communication
+			let (mut r_pipe, w_pipe) = RustFd::pipe()?;
+			let io = ProcIO::from(None, Some(w_pipe.mk_shared()), None);
+			execute::handle_subshell(node, io)?;
+
+			// Read the result of the subshell
+			let buffer = r_pipe.read()?;
+			r_pipe.close()?;
+
+			// Append the resolved text to the result
+			result.push_str(&left);
+			result.push_str(buffer.trim());
+
+			// Update the remaining text
+			text = right.to_string();
+		}
+
+		// Append any remaining text after the last substitution
+		result.push_str(&text);
+
+		// Create the new token with the fully expanded string
+		new_token = Tk {
+			tk_type: TkType::String,
+			wd: WordDesc {
+				text: result,
+				span: token.span(),
+				flags: token.flags(),
+			},
+		};
 	} else {
-		return Err(ShError::from_internal("Called expand_cmd_sub() on a non-commandsub token"))
+		return Err(ShError::from_internal(format!("Called expand_cmd_sub() on a non-commandsub token: {:?}", token.tk_type).as_str()))
 	}
 	Ok(new_token)
 }
