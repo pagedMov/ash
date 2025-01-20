@@ -1310,7 +1310,7 @@ mod tests {
 		let node = Node::new(); // Assuming a `Node::new()` exists for creating a dummy node.
 		mock_logic.new_func("func1", node.clone());
 		let retrieved_func = mock_logic.get_func("func1");
-		assert!(matches!(retrieved_func, Some(node)));
+		assert_eq!(retrieved_func, Some(node));
 	}
 
 #[rstest]
@@ -1318,10 +1318,10 @@ mod tests {
 		let node = Node::new(); // Assuming a `Node::new()` exists for creating a dummy node.
 		mock_logic.new_func("func1", node.clone());
 		let retrieved_func = mock_logic.get_func("func1");
-		assert!(matches!(retrieved_func, Some(node)));
+		assert_eq!(retrieved_func, Some(node));
 
 		// Ensure retrieving a nonexistent function returns `None`
-		assert!(mock_logic.get_func("nonexistent").is_none());
+		assert_eq!(mock_logic.get_func("nonexistent"), None);
 	}
 
 	#[rstest]
@@ -1330,7 +1330,7 @@ mod tests {
 		mock_logic.new_func("func1", node.clone());
 		mock_logic.remove_func("func1");
 		let retrieved_func = mock_logic.get_func("func1");
-		assert!(retrieved_func.is_none());
+		assert_eq!(retrieved_func, None);
 	}
 
 
@@ -1379,5 +1379,54 @@ mod tests {
 		if let Err(err) = nonexistent {
 			assert_eq!(err.to_string(), "does_not_exist is not a variable");
 		}
+	}
+
+
+	#[rstest]
+	fn jobtable_foreground_background(mut mock_jobs: JobTable) {
+		let fg_children = vec![
+			ChildProc::new(Pid::from_raw(400), Some("fg_cmd"),None).unwrap()
+		];
+		let fg_job = JobBuilder::new()
+			.with_pgid(Pid::from_raw(400))
+			.with_children(fg_children)
+			.build();
+			mock_jobs.fg = Some(fg_job);
+
+			let fg = mock_jobs.get_fg();
+
+			assert_eq!(fg.map(|job| job.pgid().as_raw()), Some(400));
+
+			// Move the job to the background
+			mock_jobs.fg_to_bg(WaitStatus::Stopped(Pid::from_raw(400), Signal::SIGTSTP)).unwrap();
+			let fg = mock_jobs.get_fg();
+			assert!(fg.is_none());
+
+			// Bring the job back to the foreground
+			mock_jobs.bg_to_fg(JobID::TableID(3)).unwrap();
+			let fg = mock_jobs.get_fg();
+			assert_eq!(fg.map(|job| job.pgid().as_raw()), None);
+	}
+
+	#[rstest]
+	fn jobtable_new_job(mut mock_jobs: JobTable) {
+		let commands = vec!["cmd4".to_string()];
+		let pgid = Pid::from_raw(300);
+
+		let children = vec![
+			ChildProc::new(Pid::from_raw(300), Some("cmd4"),None).unwrap()
+		];
+
+		let new_job = JobBuilder::new()
+			.with_pgid(pgid)
+			.with_children(children.clone())
+			.build();
+
+			let job_id = mock_jobs.insert_job(new_job,false).unwrap();
+			let job = mock_jobs.query(JobID::TableID(job_id)).unwrap();
+
+			assert_eq!(job.table_id().unwrap(), job_id);
+			assert_eq!(job.get_children().iter().next(), children.first());
+			assert_eq!(job.get_commands(), commands);
 	}
 }
