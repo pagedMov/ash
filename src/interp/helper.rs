@@ -1,6 +1,6 @@
 use crate::{event::ShError, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, RVal, RSH_PGRP }, RshResult};
 use nix::{sys::wait::WaitStatus, unistd::dup2};
-use std::{collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}};
+use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}};
 
 use super::{parse::{NdType, Node}, token::Tk};
 
@@ -593,6 +593,10 @@ pub fn format_status_line(i: usize, status_final: &str, job: &Job, long: bool, p
 			status_final
 		)
 	}
+}
+
+pub fn is_opener(tk_type: &TkType) -> bool {
+	OPENERS.iter().any(|tk| tk == tk_type)
 }
 
 pub fn is_brace_expansion(text: &str) -> bool {

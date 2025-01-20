@@ -360,7 +360,9 @@ pub fn get_tree(ctx: DescentContext) -> RshResult<Node> {
 	Ok(tree)
 }
 
+#[track_caller]
 pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentContext> {
+	dbg!(std::panic::Location::caller());
 	// First pass just makes nodes without joining at operators
 	while let Some(tk) = ctx.next_tk() {
 		use crate::interp::token::TkType::*;
@@ -416,7 +418,11 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 			Ident | String => {
 				ctx.tokens.push_front(tk);
 				ctx = build_command(ctx)?;
-				// Fall through
+				if once {
+					break
+				} else {
+					/* Fall through */
+				}
 			}
 			Subshell => {
 				ctx.tokens.push_front(tk);
@@ -449,15 +455,17 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 				ctx.tokens.push_front(tk);
 				ctx = build_redirection(ctx)?;
 			}
-			Cmdsep => ctx.attach_node(
-				Node {
-					command: None,
-					nd_type: NdType::Cmdsep,
-					span: tk.span(),
-					flags: NdFlags::empty(),
-					redirs: VecDeque::new()
-				}
-			),
+			Cmdsep => {
+				ctx.attach_node(
+					Node {
+						command: None,
+						nd_type: NdType::Cmdsep,
+						span: tk.span(),
+						flags: NdFlags::empty(),
+						redirs: VecDeque::new()
+					}
+				)
+			}
 			LogicAnd => ctx.attach_node(
 				Node {
 					command: None,
@@ -880,7 +888,6 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let span_start = ctx.mark_start();
 
 	while let Some(tk) = ctx.next_tk() {
-		dbg!(&tk);
 		let err_span = ctx.mark_start();
 
 		match tk.class() {
@@ -954,7 +961,6 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 			TkType::Fi => {
 				closed = true;
 				if !matches!(if_context,TkType::Then | TkType::Else) {
-					dbg!(&if_context);
 					return Err(ShError::from_parse("Was expecting a `then` block, get an else block instead", Span::from(err_span,ctx.mark_end())))
 				}
 				if if_context == TkType::Else {
@@ -1173,10 +1179,6 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> RshResult<Descent
 	let span = Span::from(span_start,span_end);
 
 	if !closed {
-		dbg!(&cond_tokens);
-		dbg!(&cond_root);
-		dbg!(&body_tokens);
-		dbg!(&body_root);
 		return Err(ShError::from_parse(
 				"This loop is missing a `done`",
 				span)

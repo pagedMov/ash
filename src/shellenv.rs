@@ -807,6 +807,10 @@ impl VarTable {
 		}
 	}
 
+	pub fn borrow_vars(&self) -> &HashMap<String, RVal> {
+		&self.vars
+	}
+
 	pub fn borrow_evars(&self) -> &HashMap<String, String> {
 		&self.env
 	}

@@ -758,7 +758,8 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 
 	// Perform subshell node operation
 	node_operation!(NdType::Subshell { mut body, mut argv }, node, {
-		body = expand::expand_var(body.trim().to_string())?;
+		let vars = read_vars(|v| v.borrow_vars().clone())?;
+		body = expand::expand_var(body.trim().to_string(),&vars)?;
 		if body.is_empty() {
 			return Ok(RshWait::Success);
 		}

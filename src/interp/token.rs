@@ -17,6 +17,7 @@ use super::helper::StrExtension;
 
 pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
 	let mut regex = HashMap::new();
+	regex.insert("var_index", Regex::new(r"(\w+)\[(\d+)\]").unwrap());
 	regex.insert("redirection",Regex::new(r"^(?P<fd_out>[0-9]+)?(?P<operator>>{1,2}|<{1,3})(?:[&]?(?P<fd_target>[0-9]+))?$").unwrap());
 	regex.insert("rsh_shebang",Regex::new(r"^#!((?:/[^\s]+)+)((?:\s+arg:[a-zA-Z][a-zA-Z0-9_\-]*)*)$").unwrap());
 	regex.insert("brace_expansion",Regex::new(r"(\$?)\{(?:[\x20-\x7e,]+|[0-9]+(?:\.\.[0-9+]){1,2}|[a-z]\.\.[a-z]|[A-Z]\.\.[A-Z])\}").unwrap());
@@ -593,8 +594,7 @@ impl RshTokenizer {
 				Command => self.command_context(take(&mut wd),ctx.clone())?,
 				Arg => self.arg_context(take(&mut wd))?,
 				DQuote | SQuote => self.string_context(take(&mut wd))?,
-				VarDec => self.vardec_context(take(&mut wd))?,
-				SingleVarDec => self.vardec_context(take(&mut wd))?,
+				VarDec | SingleVarDec => self.vardec_context(take(&mut wd))?,
 				ArrDec => self.arrdec_context(take(&mut wd))?,
 				Subshell | CommandSub => self.subshell_context(take(&mut wd))?,
 				FuncBody => self.func_context(take(&mut wd)),
