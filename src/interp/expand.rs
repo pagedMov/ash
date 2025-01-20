@@ -1,18 +1,17 @@
 use chrono::Local;
 use glob::glob;
-use regex::Regex;
-use std::collections::VecDeque;
-use std::os::fd::AsRawFd;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use crate::event::ShError;
 use crate::execute::{self, ProcIO, RustFd};
 use crate::interp::parse::NdFlags;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
-use crate::interp::helper::{self,StrExtension, VecDequeExtension};
-use crate::shellenv::{read_logic, read_vars, RSH_PATH};
+use crate::interp::helper::{self,StrExtension};
+use crate::shellenv::{read_logic, read_vars, RVal, RSH_PATH};
 use crate::RshResult;
 
 use super::parse::{NdType, Node, Span};
+use super::token::REGEX;
 
 pub fn check_globs(string: String) -> bool {
 	string.has_unescaped("?") ||
@@ -24,7 +23,10 @@ pub fn expand_shebang(mut body: String) -> RshResult<String> {
 	// and attach the '--subshell' argument to signal to the rsh subprocess that it is in a subshell context
 	if !body.starts_with("#!") {
 		//let interpreter = std::env::current_exe().unwrap();
+		dbg!("/home/pagedmov/Coding/projects/rust/rsh/target/debug/rsh");
+		dbg!(&RSH_PATH);
 		let interpreter = PathBuf::from(RSH_PATH.clone());
+		dbg!(&interpreter);
 		let mut shebang = "#!".to_string();
 		shebang.push_str(interpreter.to_str().unwrap());
 		shebang = format!("{} {}", shebang, "--subshell");
@@ -211,7 +213,7 @@ pub fn check_home_expansion(text: &str) -> bool {
 pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 	let mut working_buffer: VecDeque<Tk> = VecDeque::new();
 	let mut product_buffer: VecDeque<Tk> = VecDeque::new();
-	let split_words = !matches!(token.tk_type, TkType::String);
+	let split_words = token.tk_type != TkType::String;
 
 	//TODO: find some way to clean up this surprisingly functional mess
 	// Escaping breaks this right now I think
@@ -222,7 +224,6 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 		let is_glob = if expand_glob { check_globs(token.text().into()) } else { expand_glob };
 		let is_brace_expansion = helper::is_brace_expansion(token.text());
 		let is_cmd_sub = matches!(token.tk_type,TkType::CommandSub);
-		let is_proc_sub = matches!(token.tk_type,TkType::ProcSub(_));
 
 		if is_cmd_sub {
 			let new_token = expand_cmd_sub(token)?;
@@ -237,7 +238,7 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 			token.wd.text = token.wd.text.replace("~",&home);
 		}
 
-		if !is_glob && !is_brace_expansion {
+		if !matches!(token.tk_type, TkType::Expanded) && !is_glob && !is_brace_expansion {
 			if token.text().has_unescaped("$") && !token.wd.flags.intersects(WdFlags::FROM_VAR | WdFlags::SNG_QUOTED) {
 				if token.text().has_unescaped("$@") {
 					let mut param_tokens = expand_params(token)?;
@@ -246,7 +247,8 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 					}
 					continue
 				}
-				token.wd.text = expand_var(token.text().into())?;
+				let vars = read_vars(|v| v.borrow_vars().clone())?;
+				token.wd.text = expand_var(token.text().into(),&vars)?;
 			}
 			if helper::is_brace_expansion(token.text()) || token.text().has_unescaped("$") {
 				working_buffer.push_front(token);
@@ -259,12 +261,11 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 				product_buffer.push_back(token)
 			}
 
-		} else if is_brace_expansion && token.text().has_unescaped("{") && !matches!(token.tk_type, TkType::String) {
+		} else if is_brace_expansion && token.text().has_unescaped("{") && token.tk_type != TkType::String {
 			// Perform brace expansion
-			let expanded = expand_braces(token.text().to_string(), VecDeque::new());
-			for mut expanded_token in expanded {
-				expanded_token = expand_var(expanded_token)?;
-				working_buffer.push_back(
+			let expanded = expand_braces(token.text().to_string())?;
+			for expanded_token in expanded {
+				product_buffer.push_back(
 					Tk {
 						tk_type: TkType::Expanded,
 						wd: WordDesc {
@@ -312,7 +313,6 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 			product_buffer.push_back(token);
 		}
 	}
-
 	if split_words {
 		split_tokens(&mut product_buffer);
 	}
@@ -350,7 +350,7 @@ pub fn clean_escape_chars(token_buffer: &mut VecDeque<Tk>) {
 
 pub fn expand_cmd_sub(token: Tk) -> RshResult<Tk> {
 	let new_token;
-	if matches!(token.tk_type, TkType::CommandSub | TkType::ProcSub(_)) {
+	if let TkType::CommandSub = token.tk_type {
 		let body = token.text().to_string();
 		let node = Node {
 			command: None,
@@ -362,72 +362,95 @@ pub fn expand_cmd_sub(token: Tk) -> RshResult<Tk> {
 		let (mut r_pipe,w_pipe) = RustFd::pipe()?;
 		let io = ProcIO::from(None,Some(w_pipe.mk_shared()),None);
 		execute::handle_subshell(node, io)?;
-
-		if let TkType::CommandSub = token.tk_type {
-			let buffer = r_pipe.read()?;
-			new_token = Tk {
-				tk_type: TkType::String,
-				wd: WordDesc { text: buffer.trim().to_string(), span: token.span(), flags: token.flags() }
-			};
-			r_pipe.close()?;
-		} else {
-			let buffer = r_pipe.read()?;
-			let proc_fd = RustFd::new_memfd("rsh_proc_sub", true)?;
-			proc_fd.write(buffer.as_bytes())?;
-			let path = format!("/proc/self/fd/{}",proc_fd);
-
-			new_token = Tk {
-				tk_type: TkType::ProcSub(Some(proc_fd.mk_shared())),
-				wd: WordDesc { text: path, span: token.span(), flags: token.flags() }
-			}
-		}
+		let buffer = r_pipe.read()?;
+		new_token = Tk {
+			tk_type: TkType::String,
+			wd: WordDesc { text: buffer.trim().to_string(), span: token.span(), flags: token.flags() }
+		};
+		r_pipe.close()?;
 	} else {
 		return Err(ShError::from_internal("Called expand_cmd_sub() on a non-commandsub token"))
 	}
 	Ok(new_token)
 }
 
-pub fn expand_braces(word: String, mut results: VecDeque<String>) -> VecDeque<String> {
-	if let Some((preamble, rest)) = word.split_once("{") {
-		if let Some((amble, postamble)) = rest.split_last("}") {
-			// the current logic makes adjacent expansions look like this: `left}{right`
-			// let's take advantage of that, shall we
-			if let Some((left,right)) = amble.split_once("}{") {
-				// Reconstruct the left side into a new brace expansion: left -> {left}
-				let left = format!("{}{}{}","{",left,"}");
-				// Same with the right side: right -> {right}
-				// This also has the side effect of rebuilding any subsequent adjacent expansions
-				// e.g. "right1}{right2}{right3" -> {right1}{right2}{right3}
-				let right = format!("{}{}{}","{",right,"}");
-				// Recurse
-				let left_expanded = expand_braces(left.to_string(), VecDeque::new());
-				let right_expanded = expand_braces(right.to_string(), VecDeque::new());
-				// Combine them
-				for left_part in left_expanded {
-					for right_part in &right_expanded {
-						results.push_back(format!("{}{}",left_part,right_part));
-					}
-				}
-			} else {
-				let mut expanded = expand_amble(amble);
-				while let Some(string) = expanded.pop_front() {
-					let expanded_word = format!("{}{}{}", preamble, string, postamble);
-					results = expand_braces(expanded_word, results); // Recurse for nested braces
-				}
-			}
-	} else {
-		// Malformed brace: No closing `}` found
-		results.push_back(word);
-	}
-} else {
-	// Base case: No more braces to expand
-	results.push_back(word);
-}
-results
+fn cartesian_product_lazy<'a>(
+    left: &'a [String],
+    right: &'a [String],
+) -> impl Iterator<Item = String> + 'a {
+    left.iter().flat_map(move |l| right.iter().map(move |r| format!("{}{}", l, r)))
 }
 
-pub fn expand_amble(amble: String) -> VecDeque<String> {
-	let mut result = VecDeque::new();
+pub fn build_word(words: &[&str], buffer: &mut String) {
+	for word in words {
+		buffer.push_str(word);
+	}
+}
+
+
+fn precompute_cartesian(left: &[String], right: &[String]) -> VecDeque<String> {
+	use rayon::prelude::*;
+	left.par_iter() // Parallelize the outer iterator
+		.flat_map(|l| {
+			right.par_iter()
+				.map(move |r| format!("{}{}", l, r)) // Compute Cartesian product
+		})
+	.collect::<Vec<_>>() // Collect results into a Vec
+		.into() // Convert Vec to VecDeque
+}
+
+fn split_braces(word: &str) -> Option<(&str, &str, &str)> {
+	if let Some(start) = word.find('{') {
+		if let Some(end) = word[start..].find('}') {
+			let preamble = &word[..start];
+			let amble = &word[start + 1..start + end];
+			let postamble = &word[start + end + 1..];
+			return Some((preamble, amble, postamble));
+		}
+	}
+	None
+}
+
+pub fn expand_braces(word: String) -> RshResult<VecDeque<String>> {
+	let mut result = VecDeque::new(); // Final results
+	let mut working_buffer = String::new(); // Reusable buffer
+	let mut product_stack = VecDeque::new(); // First pass results
+	let mut work_stack = VecDeque::from([word]); // Work queue
+	let mut vars = read_vars(|v| v.borrow_vars().clone())?;
+
+	while let Some(current) = work_stack.pop_front() {
+		if let Some((preamble,amble,postamble)) = split_braces(&current) {
+			if let Some((left, right)) = amble.split_once("}{") {
+				let left_parts = expand_amble(left);
+				let right_parts = expand_amble(right);
+
+				let precomputed_products = precompute_cartesian(&left_parts, &right_parts);
+				for product in precomputed_products {
+					build_word(&[preamble, &product, postamble], &mut working_buffer);
+					let result = std::mem::take(&mut working_buffer);
+					work_stack.push_back(result);
+				}
+			} else {
+				let parts = expand_amble(amble);
+				for part in parts {
+					build_word(&[preamble, part.as_str(), postamble], &mut working_buffer);
+					let result = std::mem::take(&mut working_buffer);
+					work_stack.push_back(result);
+				}
+			}
+		} else {
+			product_stack.push_back(current); // Base case
+		}
+	}
+	while let Some(product) = product_stack.pop_front() {
+		let expanded = expand_var(product,&vars)?;
+		result.push_back(expanded);
+	}
+	Ok(result)
+}
+
+pub fn expand_amble(amble: &str) -> Vec<String> {
+	let mut result = vec![];
 	if amble.contains("..") && amble.len() >= 4 {
 		let num_range = amble.chars().next().is_some_and(|ch| ch.is_ascii_digit())
 			&& amble.chars().last().is_some_and(|ch| ch.is_ascii_digit());
@@ -444,13 +467,13 @@ pub fn expand_amble(amble: String) -> VecDeque<String> {
 			let left = amble.chars().next().unwrap();
 			let right = amble.chars().last().unwrap();
 			for i in left..=right {
-				result.push_back(i.to_string());
+				result.push(i.to_string());
 			}
 		}
 		if num_range {
 			let (left,right) = amble.split_once("..").unwrap();
 			for i in left.parse::<i32>().unwrap()..=right.parse::<i32>().unwrap() {
-				result.push_back(i.to_string());
+				result.push(i.to_string());
 			}
 		}
 	} else {
@@ -469,7 +492,7 @@ pub fn expand_amble(amble: String) -> VecDeque<String> {
 				}
 				',' => {
 					if brace_stack.is_empty() {
-						result.push_back(cur_string);
+						result.push(cur_string);
 						cur_string = String::new();
 					} else {
 						cur_string.push(ch)
@@ -487,13 +510,12 @@ pub fn expand_amble(amble: String) -> VecDeque<String> {
 				_ => cur_string.push(ch)
 			}
 		}
-		result.push_back(cur_string);
+		result.push(cur_string);
 	}
 	result
 }
 
-pub fn expand_var(mut string: String) -> RshResult<String> {
-	let index_regex = Regex::new(r"(\w+)\[(\d+)\]").unwrap();
+pub fn expand_var(mut string: String, var_table: &HashMap<String,RVal>) -> RshResult<String> {
 	loop {
 		let mut left = String::new();
 		let mut right = String::new();
@@ -543,8 +565,8 @@ pub fn expand_var(mut string: String) -> RshResult<String> {
 		}
 		let right = right_chars.iter().collect::<String>();
 
-		let value = if index_regex.is_match(&var_name) {
-			if let Some(caps) = index_regex.captures(&var_name) {
+		let value: RVal = if REGEX["var_index"].is_match(&var_name) {
+			if let Some(caps) = REGEX["var_index"].captures(&var_name) {
 				let var_name = caps.get(1).map_or("", |m| m.as_str());
 				let index = caps.get(2).map_or("", |m| m.as_str());
 
@@ -553,7 +575,7 @@ pub fn expand_var(mut string: String) -> RshResult<String> {
 				return Err(ShError::from_syntax("This is a weird way to index a variable", Span::new()));
 			}
 		} else {
-			read_vars(|vars| vars.get_var(&var_name).unwrap_or_default())?
+			var_table.get(&var_name).cloned().unwrap_or_default()
 		};
 
 		let expanded = format!("{}{}{}", left, value, right);
@@ -617,7 +639,8 @@ mod tests {
 	fn test_expand_var() {
 		let input = "$USER".to_string();
 		let user = User::from_uid(getuid()).unwrap().unwrap().name;
-		let expanded = expand_var(input).unwrap();
+		let vars = read_vars(|v| v.borrow_vars().clone()).unwrap();
+		let expanded = expand_var(input,&vars).unwrap();
 		assert_eq!(expanded, user.to_string());
 	}
 
@@ -626,7 +649,8 @@ mod tests {
 		let array = RVal::Array(vec![RVal::parse("first").unwrap(), RVal::parse("second").unwrap()]);
 		write_vars(|vars| { vars.set_var("arr", array); }).unwrap();
 		let input = "$arr[0]".to_string();
-		let expanded = expand_var(input).unwrap();
+		let vars = read_vars(|v| v.borrow_vars().clone()).unwrap();
+		let expanded = expand_var(input,&vars).unwrap();
 		assert_eq!(expanded, "first");
 	}
 
@@ -644,9 +668,9 @@ mod tests {
 		let input1 = "{1,2,3}".to_string();
 		let input2 = "{1..5}".to_string();
 		let input3 = "{a..c}{1..5}".to_string();
-		let expanded1 = expand_braces(input1, VecDeque::new());
-		let expanded2 = expand_braces(input2, VecDeque::new());
-		let expanded3 = expand_braces(input3, VecDeque::new());
+		let expanded1 = expand_braces(input1).unwrap();
+		let expanded2 = expand_braces(input2).unwrap();
+		let expanded3 = expand_braces(input3).unwrap();
 		assert_eq!(expanded1, VecDeque::from(vec!["1".into(), "2".into(), "3".into()]));
 		assert_eq!(expanded2, VecDeque::from(vec!["1".into(), "2".into(), "3".into(), "4".into(), "5".into()]));
 		assert_eq!(expanded3, VecDeque::from(vec!["a1".into(), "a2".into(), "a3".into(), "a4".into(), "a5".into(), "b1".into(), "b2".into(), "b3".into(), "b4".into(), "b5".into(), "c1".into(), "c2".into(), "c3".into(), "c4".into(), "c5".into(),]));

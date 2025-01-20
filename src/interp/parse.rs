@@ -26,6 +26,21 @@ bitflags! {
 	}
 }
 
+pub static EXPECT: Lazy<HashMap<TkType, Vec<TkType>>> = Lazy::new(|| {
+	let mut m = HashMap::new();
+	m.insert(TkType::If,     vec![TkType::Then]);
+	m.insert(TkType::Elif,   vec![TkType::Then]);
+	m.insert(TkType::Else,   vec![TkType::Fi]);
+	m.insert(TkType::Then,   vec![TkType::Fi, TkType::Elif, TkType::Else]);
+	m.insert(TkType::Do,     vec![TkType::Done]); // `Do` expects `Done`
+	m.insert(TkType::Case,   vec![TkType::Esac]); // `Case` expects `Esac`
+	m.insert(TkType::Select, vec![TkType::Do]); // `Select` expects `Do`
+	m.insert(TkType::While,  vec![TkType::Do]); // `While` expects `Do`
+	m.insert(TkType::Until,  vec![TkType::Do]); // `Until` expects `Do`
+	m.insert(TkType::For,    vec![TkType::Do]); // `Until` expects `Do`
+	m
+});
+
 pub const OPENERS: [TkType;6] = [
 	TkType::If,
 	TkType::For,
@@ -79,13 +94,13 @@ impl Span {
 	}
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,PartialEq)]
 pub struct Conditional {
 	pub condition: Box<Node>,
 	pub body: Box<Node>
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,PartialEq)]
 pub struct Node {
 	pub command: Option<Tk>,
 	pub nd_type: NdType,
@@ -180,7 +195,7 @@ impl Default for Node {
 		Self::new()
 	}
 }
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,PartialEq)]
 pub enum NdType {
 	Root { deck: VecDeque<Node> },
 	If { cond_blocks: VecDeque<Conditional>, else_block: Option<Box<Node>> },
@@ -208,7 +223,7 @@ pub enum NdType {
 	NullNode
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,PartialEq,Clone)]
 pub struct ParseState {
 	pub input: String,
 	pub tokens: VecDeque<Tk>,
@@ -345,7 +360,9 @@ pub fn get_tree(ctx: DescentContext) -> RshResult<Node> {
 	Ok(tree)
 }
 
+#[track_caller]
 pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentContext> {
+	dbg!(std::panic::Location::caller());
 	// First pass just makes nodes without joining at operators
 	while let Some(tk) = ctx.next_tk() {
 		use crate::interp::token::TkType::*;
@@ -401,7 +418,11 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 			Ident | String => {
 				ctx.tokens.push_front(tk);
 				ctx = build_command(ctx)?;
-				// Fall through
+				if once {
+					break
+				} else {
+					/* Fall through */
+				}
 			}
 			Subshell => {
 				ctx.tokens.push_front(tk);
@@ -434,15 +455,17 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 				ctx.tokens.push_front(tk);
 				ctx = build_redirection(ctx)?;
 			}
-			Cmdsep => ctx.attach_node(
-				Node {
-					command: None,
-					nd_type: NdType::Cmdsep,
-					span: tk.span(),
-					flags: NdFlags::empty(),
-					redirs: VecDeque::new()
-				}
-			),
+			Cmdsep => {
+				ctx.attach_node(
+					Node {
+						command: None,
+						nd_type: NdType::Cmdsep,
+						span: tk.span(),
+						flags: NdFlags::empty(),
+						redirs: VecDeque::new()
+					}
+				)
+			}
 			LogicAnd => ctx.attach_node(
 				Node {
 					command: None,
@@ -865,11 +888,10 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let span_start = ctx.mark_start();
 
 	while let Some(tk) = ctx.next_tk() {
-		dbg!(&tk);
 		let err_span = ctx.mark_start();
 
 		match tk.class() {
-			_ if helper::is_opener(&tk.tk_type) => {
+			_ if OPENERS.contains(&tk.class()) => {
 				ctx.tokens.push_front(tk);
 				match phase {
 					Phase::Condition => {
@@ -893,7 +915,7 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 					_ => unreachable!()
 				}
 			}
-			TkType::Elif if !matches!(if_context, TkType::Else) => {
+			TkType::Elif if if_context != TkType::Else => {
 				if_context = TkType::Elif;
 				let cond_span = compute_span(&cond_tokens);
 				cond_root = parse_and_attach(take(&mut cond_tokens), cond_root)?;
@@ -906,13 +928,13 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				phase = Phase::Condition;
 			}
 			TkType::Then => {
-				if matches!(if_context, TkType::Then) {
+				if if_context == TkType::Then {
 					return Err(ShError::from_parse(
 							"Did not find a condition for this `then` block",
 							Span::from(err_span,ctx.mark_end()))
 					)
 				}
-				if matches!(if_context, TkType::Then) {
+				if if_context == TkType::Else {
 					return Err(ShError::from_parse(
 							"Else blocks do not get a `then` statement; give the body directly after the else keyword",
 							Span::from(err_span,ctx.mark_end()))
@@ -922,7 +944,7 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				phase = Phase::Body;
 			}
 			TkType::Else => {
-				if !matches!(if_context, TkType::Then) {
+				if if_context != TkType::Then {
 					return Err(ShError::from_parse("Was expecting a `then` block, get an else block instead", Span::from(err_span,ctx.mark_end())))
 				}
 				if_context = TkType::Else;
@@ -939,10 +961,9 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 			TkType::Fi => {
 				closed = true;
 				if !matches!(if_context,TkType::Then | TkType::Else) {
-					dbg!(&if_context);
 					return Err(ShError::from_parse("Was expecting a `then` block, get an else block instead", Span::from(err_span,ctx.mark_end())))
 				}
-				if matches!(if_context, TkType::Else) {
+				if if_context == TkType::Else {
 					let else_ctx = DescentContext::new(take(&mut body_tokens));
 					let else_node = get_tree(else_ctx)?.boxed();
 					else_block = Some(else_node);
@@ -1011,7 +1032,7 @@ pub fn build_for(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				phase = Phase::Array
 			}
 			TkType::Do => {
-				if loop_arr.back().is_some_and(|tk| matches!(tk.class(), TkType::Cmdsep)) {
+				if loop_arr.back().is_some_and(|tk| tk.class() == TkType::Cmdsep) {
 					loop_arr.pop_back();
 				}
 				if loop_arr.is_empty() {
@@ -1048,7 +1069,7 @@ pub fn build_for(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				}
 				Phase::Body => {
 					match tk.class() {
-						_ if helper::is_opener(&tk.tk_type) => {
+						_ if OPENERS.contains(&tk.class()) => {
 							ctx.tokens.push_front(tk);
 							if !body_tokens.is_empty() {
 								body_root = parse_and_attach(take(&mut body_tokens), body_root)?;
@@ -1119,7 +1140,7 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> RshResult<Descent
 				closed = true;
 				break
 			}
-			_ if helper::is_opener(&tk.tk_type) => {
+			_ if OPENERS.contains(&tk.class()) => {
 				ctx.tokens.push_front(tk);
 				match phase {
 					Phase::Condition => {
@@ -1158,10 +1179,6 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> RshResult<Descent
 	let span = Span::from(span_start,span_end);
 
 	if !closed {
-		dbg!(&cond_tokens);
-		dbg!(&cond_root);
-		dbg!(&body_tokens);
-		dbg!(&body_root);
 		return Err(ShError::from_parse(
 				"This loop is missing a `done`",
 				span)
@@ -1197,7 +1214,7 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let mut input_var: Option<Tk> = None;
 	let mut phase = Phase::Vars;
 	let mut closed = false;
-	if ctx.front_tk().is_some_and(|tk| matches!(tk.tk_type, TkType::Ident)) {
+	if ctx.front_tk().is_some_and(|tk| tk.tk_type == TkType::Ident) {
 		input_var = Some(ctx.next_tk().unwrap());
 	}
 
@@ -1207,7 +1224,7 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		match tk.class() {
 			TkType::In => {
 				if input_var.is_some() {
-					if ctx.front_tk().is_some_and(|tk| matches!(tk.class(), TkType::Cmdsep)) {
+					if ctx.front_tk().is_some_and(|tk| tk.class() == TkType::Cmdsep) {
 						ctx.next_tk();
 					}
 					phase = Phase::Condition;
@@ -1246,7 +1263,7 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 					));
 				}
 			}
-			_ if phase == Phase::Body && ctx.front_tk().is_some_and(|f_tk| matches!(f_tk.tk_type, TkType::CasePat)) => {
+			_ if phase == Phase::Body && ctx.front_tk().is_some_and(|f_tk| f_tk.tk_type == TkType::CasePat) => {
 				let block_span = compute_span(&block_tokens);
 				block_root = parse_and_attach(take(&mut block_tokens), block_root)?;
 				let block_node = Node::from(take(&mut block_root), block_span);
@@ -1261,7 +1278,7 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 					));
 				}
 				match tk.class() {
-					_ if helper::is_opener(&tk.tk_type) => {
+					_ if OPENERS.contains(&tk.class()) => {
 						ctx.tokens.push_front(tk);
 						if !block_tokens.is_empty() {
 							block_root = parse_and_attach(take(&mut block_tokens), block_root)?;
@@ -1328,7 +1345,7 @@ pub fn build_select(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				phase = Phase::Vars
 			}
 			TkType::Do => {
-				if opts.back().is_some_and(|tk| matches!(tk.class(), TkType::Cmdsep)) {
+				if opts.back().is_some_and(|tk| tk.class() == TkType::Cmdsep) {
 					opts.pop_back();
 				}
 				phase = Phase::Body
@@ -1357,7 +1374,7 @@ pub fn build_select(mut ctx: DescentContext) -> RshResult<DescentContext> {
 					}
 					Phase::Body => {
 						match tk.class() {
-							_ if helper::is_opener(&tk.tk_type) => {
+							_ if OPENERS.contains(&tk.class()) => {
 								ctx.tokens.push_front(tk);
 								if !body_tokens.is_empty() {
 									body_root = parse_and_attach(take(&mut body_tokens), body_root)?;
@@ -1476,7 +1493,7 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let func_body = read_logic(|l| l.get_func(cmd.text()))?;
 	let cmd_type = if builtin::BUILTINS.contains(&cmd.text()) {
 		CmdType::Builtin
-	} else if matches!(cmd.tk_type, TkType::Subshell) {
+	} else if cmd.tk_type == TkType::Subshell {
 		CmdType::Subshell
 	} else if func_body.is_some() {
 		CmdType::Function
@@ -1502,7 +1519,7 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				break // Background operator '&' is always the last argument
 			}
 			TkType::Subshell => continue, // Don't include the subshell token in the args
-			TkType::Ident | TkType::CommandSub | TkType::ProcSub(_) | TkType::String | TkType::VariableSub | TkType::Assignment => {
+			TkType::Ident | TkType::CommandSub | TkType::String | TkType::VariableSub | TkType::Assignment => {
 				// Add to argv
 				argv.push_back(tk);
 			}
@@ -1592,6 +1609,7 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	Ok(ctx)
 }
 
+// Turn back now if you value your sanity
 #[cfg(test)]
 mod test {
 	use super::*;

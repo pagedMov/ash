@@ -1463,6 +1463,7 @@ dependencies = [
  "once_cell",
  "perf",
  "pretty_assertions",
+ "rayon",
  "regex",
  "rstest",
  "rustyline",
