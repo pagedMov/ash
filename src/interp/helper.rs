@@ -595,8 +595,19 @@ pub fn format_status_line(i: usize, status_final: &str, job: &Job, long: bool, p
 	}
 }
 
-pub fn is_opener(tk_type: &TkType) -> bool {
-	OPENERS.iter().any(|tk| tk == tk_type)
+pub fn has_valid_delims(input: &str, open: char, close: char) -> bool {
+	let mut open_found = false;
+	let mut chars = input.chars();
+
+	while let Some(ch) = chars.next() {
+		match ch {
+			'\\' => { chars.next(); },
+			_ if ch == open => open_found = true,
+			_ if ch == close && open_found => return true,
+			_ => { /* Do nothing */ }
+		}
+	}
+	false
 }
 
 pub fn is_brace_expansion(text: &str) -> bool {

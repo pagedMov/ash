@@ -686,6 +686,7 @@ impl RshTokenizer {
 	fn arg_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
 		use crate::interp::token::TkState::*;
 		wd = self.complete_word(wd);
+		dbg!(&wd.text);
 		match wd.text.as_str() {
 			"||" | "&&" | "|" | "|&" => {
 				while self.char_stream.front().is_some_and(|ch| *ch == '\n') {

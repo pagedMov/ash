@@ -13,9 +13,21 @@ use crate::RshResult;
 use super::parse::{NdType, Node, Span};
 use super::token::REGEX;
 
-pub fn check_globs(string: String) -> bool {
-	string.has_unescaped("?") ||
-		string.has_unescaped("*")
+static GLOB_CHARS: [&str;2] = ["*", "?"];
+
+pub fn check_globs(tk: Tk) -> bool {
+	let text = tk.text();
+	let flags = tk.flags();
+
+	if !flags.contains(WdFlags::IS_ARG) {
+		return false; // Skip if not an argument
+	}
+
+	// Check for unescaped glob characters
+
+	let has_globs = GLOB_CHARS.iter().any(|&ch| text.has_unescaped(ch));
+	let has_brackets = helper::has_valid_delims(text, '[', ']');
+	has_globs || has_brackets
 }
 
 pub fn expand_shebang(mut body: String) -> RshResult<String> {
@@ -221,7 +233,7 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 	working_buffer.push_back(token.clone());
 	while let Some(mut token) = working_buffer.pop_front() {
 		// If expand_glob is true, then check for globs. Otherwise, is_glob is false
-		let is_glob = if expand_glob { check_globs(token.text().into()) } else { expand_glob };
+		let is_glob = if expand_glob { check_globs(token.clone()) } else { expand_glob };
 		let is_brace_expansion = helper::is_brace_expansion(token.text());
 		let is_cmd_sub = matches!(token.tk_type,TkType::CommandSub);
 

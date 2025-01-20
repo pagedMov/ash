@@ -360,9 +360,7 @@ pub fn get_tree(ctx: DescentContext) -> RshResult<Node> {
 	Ok(tree)
 }
 
-#[track_caller]
 pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentContext> {
-	dbg!(std::panic::Location::caller());
 	// First pass just makes nodes without joining at operators
 	while let Some(tk) = ctx.next_tk() {
 		use crate::interp::token::TkType::*;
