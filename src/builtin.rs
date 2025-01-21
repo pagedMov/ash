@@ -14,16 +14,16 @@ use nix::unistd::{access, fork, isatty, setpgid, AccessFlags, ForkResult, Pid};
 use regex::Regex;
 
 use crate::execute::{ProcIO, RshWait, RustFd};
-use crate::interp::helper::{self, StrExtension};
+use crate::interp::helper::{self, StrExtension, VecDequeExtension};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType, WdFlags};
-use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_logic, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, HashFloat, JobBuilder, JobCmdFlags, JobID, RVal, RSH_PGRP};
+use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, HashFloat, JobBuilder, JobCmdFlags, JobID, RVal, RSH_PGRP};
 use crate::event::ShError;
-use crate::RshResult;
+use crate::{deconstruct, node_operation, RshResult};
 
-pub const BUILTINS: [&str; 30] = [
-	"type", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "wait",
+pub const BUILTINS: [&str; 32] = [
+	"pushd", "popd", "type", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "wait",
 ];
 
 bitflags! {
@@ -33,6 +33,11 @@ bitflags! {
 		const NO_NEWLINE = 0b0010;
 		const NO_ESCAPE = 0b0100;
 		const STDERR = 0b1000;
+	}
+	pub struct CdFlags: u8 {
+		const CHANGE = 0b0001;
+		const PUSH = 0b0010;
+		const POP = 0b0100;
 	}
 }
 
@@ -855,7 +860,7 @@ pub fn unalias(node: Node) -> RshResult<RshWait> {
 	Ok(RshWait::Success)
 }
 
-pub fn cd(node: Node) -> RshResult<RshWait> {
+pub fn cd(node: Node, flags: CdFlags) -> RshResult<RshWait> {
 	let mut argv = node
 		.get_argv()?
 		.iter()
@@ -863,7 +868,14 @@ pub fn cd(node: Node) -> RshResult<RshWait> {
 		.collect::<VecDeque<CString>>();
 		argv.pop_front();
 		let new_pwd;
-		if let Some(arg) = argv.pop_front() {
+		if flags.contains(CdFlags::POP) {
+			let stack_path = read_meta(|m| m.top_dir().cloned())?;
+			if let Some(path) = stack_path {
+				new_pwd = CString::new(path.to_str().unwrap_or_default().to_string()).unwrap();
+			} else {
+				return Err(ShError::ExecFailed("Directory stack is empty".into(), 1, node.span()))
+			}
+		} else if let Some(arg) = argv.pop_front() {
 			if arg.to_str().is_ok_and(|arg| arg == "-") {
 				new_pwd = CString::new(read_vars(|vars| vars.get_evar("OLDPWD").unwrap_or_default())?).unwrap()
 			} else {
@@ -874,10 +886,45 @@ pub fn cd(node: Node) -> RshResult<RshWait> {
 		} else {
 			new_pwd = CString::new("/").unwrap();
 		}
+		if !flags.intersects(CdFlags::PUSH | CdFlags::POP) {
+			write_meta(|m| m.reset_dir_stack(PathBuf::from(new_pwd.to_str().unwrap_or_default())))?;
+		}
 		let path = Path::new(new_pwd.to_str().unwrap());
 		std::env::set_current_dir(path).map_err(|_| ShError::from_io())?;
 		write_vars(|v| v.export_var("PWD", std::env::current_dir().unwrap().to_str().unwrap()))?;
-		Ok(RshWait::Success )
+		Ok(RshWait::Success)
+}
+
+pub fn cd_internal(path: String, span: Span, flags: CdFlags) -> RshResult<RshWait> {
+	let mut tokens = vec![
+		Tk {
+			tk_type: TkType::Ident,
+			wd: token::WordDesc {
+				text: "cd".into(),
+				span,
+				flags: WdFlags::empty()
+			}
+		}
+	];
+	let token = Tk {
+		tk_type: TkType::String,
+		wd: token::WordDesc {
+			text: path,
+			span,
+			flags: WdFlags::empty(),
+		},
+	};
+	tokens.push(token);
+	let cd_call = Node {
+		command: tokens.first().cloned(),
+		nd_type: NdType::Builtin {
+			argv: tokens.into(),
+		},
+		flags: NdFlags::empty(),
+		redirs: VecDeque::new(),
+		span,
+	};
+	cd(cd_call, flags)
 }
 
 /// Brings a background or stopped job to the foreground and manages its execution.
@@ -972,6 +1019,44 @@ pub fn bg(node: Node) -> RshResult<RshWait> {
 	write_jobs(|j| j.insert_job(job,true))??;
 
 	Ok(RshWait::Success)
+}
+
+pub fn pushd(node: Node) -> RshResult<RshWait> {
+	let tk_to_str = |tk: Tk| -> String { tk.text().to_string() };
+	node_operation!(NdType::Builtin { mut argv }, node, {
+
+		let mut args = vec![];
+		argv.pop_front();
+		while let Some(arg) = argv.pop_front() {
+			let str = tk_to_str(arg);
+			write_meta(|m| m.push_dir(PathBuf::from(&str)))?;
+			args.push(str)
+		}
+		if let Some(path) = args.last() {
+			cd_internal(path.to_string(), node.span(), CdFlags::PUSH)
+		} else {
+			Ok(RshWait::Fail { code: 1, cmd: Some("pushd".into()) })
+		}
+	})
+}
+
+pub fn popd(node: Node) -> RshResult<RshWait> {
+	let argv = deconstruct!(NdType::Builtin { argv }, node.nd_type.clone(), {
+		argv
+	});
+	if argv.len() > 1 {
+		return Err(ShError::from_syntax("popd does not take any arguments", node.span()))
+	}
+	let result = write_meta(|m| m.pop_dir())?;
+	if let Some(path) = result {
+		if let Some(string) = path.to_str() {
+			cd_internal(string.to_string(), node.span(), CdFlags::POP)
+		} else {
+			Ok(RshWait::Fail { code: 1, cmd: Some("popd".into()) })
+		}
+	} else {
+		Ok(RshWait::Fail { code: 1, cmd: Some("popd".into()) })
+	}
 }
 
 fn parse_job_id(arg: &str, span: Span) -> RshResult<usize> {

@@ -4,8 +4,9 @@ use libc::{memfd_create, MFD_CLOEXEC};
 use nix::{errno::Errno, fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
 use std::sync::Mutex;
 
-use crate::{builtin, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, RshResult};
+use crate::{builtin::{self, CdFlags}, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, RshResult};
 
+#[macro_export]
 macro_rules! node_operation {
 	($node_type:path { $($field:tt)* }, $node:expr, $node_op:block) => {
 		if let $node_type { $($field)* } = $node.nd_type.clone() {
@@ -698,6 +699,8 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 		"jobs" => builtin::jobs(node, io)?,
 		"fg" => builtin::fg(node)?,
 		"bg" => builtin::bg(node)?,
+		"pushd" => builtin::pushd(node)?,
+		"popd" => builtin::popd(node)?,
 		"int" => builtin::int(node)?,
 		"bool" => builtin::bool(node)?,
 		"float" => builtin::float(node)?,
@@ -706,7 +709,7 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 		//"dict" => builtin::dict(node)?,
 		"unset" => builtin::set_or_unset(node, false)?,
 		"source" => builtin::source(node)?,
-		"cd" => builtin::cd(node)?,
+		"cd" => builtin::cd(node, CdFlags::CHANGE)?,
 		"pwd" => builtin::pwd(node.span())?,
 		"alias" => builtin::alias(node)?,
 		"unalias" => builtin::unalias(node)?,

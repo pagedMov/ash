@@ -948,6 +948,7 @@ impl Default for LogicTable {
 #[derive(Debug,Clone)]
 pub struct EnvMeta {
 	last_input: String,
+	dir_stack: Vec<PathBuf>,
 	shopts: HashMap<String,usize>,
 	flags: EnvFlags,
 	in_prompt: bool
@@ -958,10 +959,27 @@ impl EnvMeta {
 		let in_prompt = flags.contains(EnvFlags::INTERACTIVE);
 		Self {
 			last_input: String::new(),
+			dir_stack: vec![std::env::current_dir().unwrap()],
 			shopts: init_shopts(),
 			flags,
 			in_prompt
 		}
+	}
+	pub fn reset_dir_stack(&mut self, path: PathBuf) {
+		self.dir_stack = vec![path]
+	}
+	pub fn push_dir(&mut self, path: PathBuf) {
+		self.dir_stack.push(path)
+	}
+	pub fn pop_dir(&mut self) -> Option<PathBuf> {
+		if self.dir_stack.len() > 1 {
+			self.dir_stack.pop()
+		} else {
+			None
+		}
+	}
+	pub fn top_dir(&self) -> Option<&PathBuf> {
+		self.dir_stack.last()
 	}
 	pub fn leave_prompt(&mut self) {
 		self.in_prompt = false

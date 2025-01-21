@@ -1,9 +1,7 @@
-use std::{ffi::c_int, fmt::Display, io, panic::Location, sync::mpsc::{self, Receiver, Sender}};
-use libc::{getpid, tcgetpgrp};
-use signal_hook::iterator::Signals;
+use std::{ffi::c_int, fmt::Display, io, panic::Location};
 
 
-use crate::{deconstruct, execute::{self, RshWait}, interp::{helper, parse::{descend, NdType, Node, Span}, token::RshTokenizer}, prompt, shellenv::{self, read_jobs, read_meta, write_jobs, write_meta, EnvFlags}, signal::{self, }, RshResult, GLOBAL_EVENT_CHANNEL};
+use crate::{execute::{self, RshWait}, interp::{helper, parse::{descend, Node, Span}, token::RshTokenizer}, prompt, shellenv::{read_meta, write_meta, EnvFlags}, RshResult};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShError {
