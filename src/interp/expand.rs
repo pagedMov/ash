@@ -7,7 +7,7 @@ use crate::execute::{self, ProcIO, RustFd};
 use crate::interp::parse::NdFlags;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
 use crate::interp::helper::{self,StrExtension};
-use crate::shellenv::{read_logic, read_vars, RVal, RSH_PATH};
+use crate::shellenv::{self, read_logic, read_vars, RVal, VarTable, RSH_PATH};
 use crate::RshResult;
 
 use super::parse::{NdType, Node, Span};
@@ -256,7 +256,7 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 					}
 					continue
 				}
-				let vars = read_vars(|v| v.borrow_vars().clone())?;
+				let vars = shellenv::borrow_var_table().unwrap();
 				token.wd.text = expand_var(token.text().into(),&vars)?;
 			}
 			if helper::is_brace_expansion(token.text()) || token.text().has_unescaped("$") {
@@ -472,7 +472,7 @@ pub fn expand_braces(word: String) -> RshResult<VecDeque<String>> {
 	let mut working_buffer = String::new(); // Reusable buffer
 	let mut product_stack = VecDeque::new(); // First pass results
 	let mut work_stack = VecDeque::from([word]); // Work queue
-	let mut vars = read_vars(|v| v.borrow_vars().clone())?;
+	let vars = shellenv::borrow_var_table().unwrap();
 
 	while let Some(current) = work_stack.pop_front() {
 		if let Some((preamble,amble,postamble)) = split_braces(&current) {
@@ -571,7 +571,7 @@ pub fn expand_amble(amble: &str) -> Vec<String> {
 	result
 }
 
-pub fn expand_var(mut string: String, var_table: &HashMap<String,RVal>) -> RshResult<String> {
+pub fn expand_var(mut string: String, var_table: &VarTable) -> RshResult<String> {
 	loop {
 		let mut left = String::new();
 		let mut right = String::new();
@@ -631,7 +631,7 @@ pub fn expand_var(mut string: String, var_table: &HashMap<String,RVal>) -> RshRe
 				return Err(ShError::from_syntax("This is a weird way to index a variable", Span::new()));
 			}
 		} else {
-			var_table.get(&var_name).cloned().unwrap_or_default()
+			var_table.get_var(&var_name).unwrap_or_default()
 		};
 
 		let expanded = format!("{}{}{}", left, value, right);
@@ -674,7 +674,7 @@ fn expand_params(token: Tk) -> RshResult<VecDeque<Tk>> {
 
 #[cfg(test)]
 mod tests {
-	use crate::shellenv::{read_meta, write_logic, write_meta, write_vars, RVal};
+	use crate::shellenv::{self, read_meta, write_logic, write_meta, write_vars, RVal};
 	use nix::unistd::{getuid, User};
 	use pretty_assertions::assert_eq;
 
@@ -695,7 +695,7 @@ mod tests {
 	fn test_expand_var() {
 		let input = "$USER".to_string();
 		let user = User::from_uid(getuid()).unwrap().unwrap().name;
-		let vars = read_vars(|v| v.borrow_vars().clone()).unwrap();
+		let vars = shellenv::borrow_var_table().unwrap();
 		let expanded = expand_var(input,&vars).unwrap();
 		assert_eq!(expanded, user.to_string());
 	}
@@ -705,7 +705,7 @@ mod tests {
 		let array = RVal::Array(vec![RVal::parse("first").unwrap(), RVal::parse("second").unwrap()]);
 		write_vars(|vars| { vars.set_var("arr", array); }).unwrap();
 		let input = "$arr[0]".to_string();
-		let vars = read_vars(|v| v.borrow_vars().clone()).unwrap();
+		let vars = shellenv::borrow_var_table().unwrap();
 		let expanded = expand_var(input,&vars).unwrap();
 		assert_eq!(expanded, "first");
 	}

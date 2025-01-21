@@ -403,6 +403,7 @@ impl Job {
 	}
 }
 
+#[derive(Debug,Clone)]
 pub struct JobTable {
 	fg: Option<Job>,
 	jobs: Vec<Option<Job>>,
@@ -876,7 +877,10 @@ impl VarTable {
 			Some(var)
 		} else if let Some(var) = self.params.get(key).cloned() {
 			Some(RVal::String(var))
-		} else { self.env.get(key).cloned().map(RVal::String) }
+		} else {
+			let var = self.env.get(key).cloned().map(RVal::String);
+			var
+		}
 	}
 
 	pub fn index_arr(&self, key: &str, index: usize) -> RshResult<RVal> {
@@ -994,6 +998,16 @@ pub fn enable_reaping() -> RshResult<()> {
 	write_jobs(|j| j.update_job_statuses())??;
 	unsafe { signal(Signal::SIGCHLD, SigHandler::Handler(crate::signal::handle_sigchld)) }.unwrap();
 	Ok(())
+}
+
+pub fn borrow_var_table() -> RshResult<VarTable> {
+	Ok(VARS.read().map_err(|_| ShError::from_internal("Failed to clone VarTable"))?.clone())
+}
+pub fn borrow_job_table() -> RshResult<JobTable> {
+	Ok(JOBS.read().map_err(|_| ShError::from_internal("Failed to clone VarTable"))?.clone())
+}
+pub fn borrow_env_meta() -> RshResult<EnvMeta> {
+	Ok(META.read().map_err(|_| ShError::from_internal("Failed to clone VarTable"))?.clone())
 }
 
 pub fn read_jobs<F,T>(f: F) -> RshResult<T>

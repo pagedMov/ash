@@ -864,7 +864,11 @@ pub fn cd(node: Node) -> RshResult<RshWait> {
 		argv.pop_front();
 		let new_pwd;
 		if let Some(arg) = argv.pop_front() {
-			new_pwd = arg;
+			if arg.to_str().is_ok_and(|arg| arg == "-") {
+				new_pwd = CString::new(read_vars(|vars| vars.get_evar("OLDPWD").unwrap_or_default())?).unwrap()
+			} else {
+				new_pwd = arg
+			}
 		} else if let Some(home_path) = read_vars(|vars| vars.get_evar("HOME"))? {
 			new_pwd = CString::new(home_path).unwrap();
 		} else {
