@@ -1,6 +1,8 @@
 use bitflags::bitflags;
+use nix::NixPath;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::mem::take;
@@ -9,10 +11,13 @@ use crate::interp::expand::expand_cmd_sub;
 use crate::interp::parse::Span;
 use crate::event::ShError;
 use crate::shellenv::read_logic;
+use crate::shellenv::read_meta;
+use crate::shellenv::read_vars;
 use crate::RshResult;
 use crate::builtin::BUILTINS;
 
 use super::expand;
+use super::helper;
 use super::helper::StrExtension;
 
 pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
@@ -80,38 +85,11 @@ bitflags! {
 	}
 
 #[derive(Debug,Hash,Clone,PartialEq,Eq)]
-pub struct TkizerCtx {
-	alias_expansion: Option<String>
-	}
-
-impl TkizerCtx {
-	pub fn new() -> Self {
-		Self { alias_expansion: None }
-	}
-	pub fn with_alias(name: &str) -> Self {
-		Self { alias_expansion: Some(name.to_string()) }
-	}
-	pub fn check_alias_exp(&self) -> bool {
-		self.alias_expansion.is_some()
-	}
-	pub fn get_alias_exp(&self) -> Option<String> {
-		self.alias_expansion.clone()
-	}
-}
-
-impl Default for TkizerCtx {
-	fn default() -> Self {
-		Self::new()
-	}
-}
-
-
-#[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub struct WordDesc {
 	pub text: String,
 	pub span: Span,
 	pub flags: WdFlags
-}
+	}
 
 impl WordDesc {
 	pub fn empty() -> Self {
@@ -241,7 +219,7 @@ pub enum TkType {
 
 	Redirection { redir: Redir },
 	FuncDef,
-	Assignment, // `=`
+	Assignment { key: String, value: Box<Tk> }, // `=`
 	LogicAnd, // `&&`
 	LogicOr, // `||`
 	Pipe, // `|`
@@ -500,20 +478,27 @@ impl TkState {
 	}
 }
 
+#[derive(Debug)]
 pub struct RshTokenizer {
 	input: String,
 	char_stream: VecDeque<char>,
 	context: Vec<TkState>,
+	expanded: bool,
 	pub tokens: Vec<Tk>,
 	pub span: Span,
 }
 
 impl RshTokenizer {
 	pub fn new(input: &str) -> Self {
-		let input = input.trim().to_string();
+		let mut input = input.trim().to_string();
 		let char_stream = input.chars().collect::<VecDeque<char>>();
 		let tokens = vec![Tk { tk_type: TkType::SOI, wd: WordDesc::empty() }];
-		Self { input, char_stream, context: vec![TkState::Command], tokens, span: Span::new() }
+		if input.starts_with("#!") { // Ignore shebangs
+			let mut lines = input.lines();
+			lines.next();
+			input = lines.collect::<Vec<&str>>().join("\n");
+		}
+		Self { input, char_stream, context: vec![TkState::Command], expanded: false, tokens, span: Span::new() }
 	}
 	pub fn input(&self) -> String {
 		self.input.clone()
@@ -535,8 +520,188 @@ impl RshTokenizer {
 		}
 		self.char_stream.pop_front()
 	}
-	pub fn tokenize_one(&mut self, ctx: TkizerCtx) -> RshResult<Vec<Tk>> {
+	fn split_input(&self) -> Vec<String> {
+		let input = &self.input;
+		let mut words = vec![];
+		let mut current_word = String::new();
+		let mut double_quote = false;
+		let mut single_quote = false;
+		let mut paren_stack = vec![];
+		let mut bracket_stack = vec![];
+		let mut chars = input.chars().peekable();
+
+		while let Some(ch) = chars.next() {
+			match ch {
+				'\\' => {
+					// Handle escape sequences
+					if let Some(next) = chars.next() {
+						current_word.push(ch); // Include the backslash
+						current_word.push(next);
+					}
+				}
+				'"' if !single_quote => {
+					// Toggle double-quote state
+					double_quote = !double_quote;
+					current_word.push(ch);
+				}
+				'\'' if !double_quote => {
+					// Toggle single-quote state
+					single_quote = !single_quote;
+					current_word.push(ch);
+				}
+				'(' if !single_quote && !double_quote && bracket_stack.is_empty() => {
+					// Open parenthesis
+					paren_stack.push(ch);
+					current_word.push(ch);
+				}
+				')' if !single_quote && !double_quote && !paren_stack.is_empty() => {
+					// Close parenthesis
+					paren_stack.pop();
+					current_word.push(ch);
+				}
+				'[' if !single_quote && !double_quote && paren_stack.is_empty() => {
+					// Open bracket
+					bracket_stack.push(ch);
+					current_word.push(ch);
+				}
+				']' if !single_quote && !double_quote && !bracket_stack.is_empty() => {
+					// Close bracket
+					bracket_stack.pop();
+					current_word.push(ch);
+				}
+				' ' | '\t' if !double_quote && !single_quote && paren_stack.is_empty() && bracket_stack.is_empty() => {
+					// End of word (outside quotes, parentheses, and brackets)
+					current_word.push(ch);
+					if !current_word.is_empty() {
+						words.push(current_word);
+						current_word = String::new();
+					}
+				}
+				'\n' | ';' if !double_quote && !single_quote && paren_stack.is_empty() && bracket_stack.is_empty() => {
+					// End of word and standalone separator (outside quotes, parentheses, and brackets)
+					if !current_word.is_empty() {
+						current_word.push(ch);
+						words.push(current_word);
+						current_word = String::new();
+						words.push(ch.to_string());
+					}
+				}
+				_ => {
+					// Regular character or inside quotes, parentheses, or brackets
+					current_word.push(ch);
+				}
+			}
+		}
+
+		if !current_word.is_empty() {
+			words.push(current_word);
+		}
+
+		words
+	}
+
+	// Push the last word
+	fn alias_pass(&mut self) -> RshResult<()> {
+		let aliases = read_logic(|m| m.borrow_aliases().clone())?;
+		let mut input = self.input.clone();
+		let mut replaced = true;
+
+		while replaced {
+			replaced = false;
+			let words = self.split_input();
+			let mut new_input = String::new();
+
+			for mut word in words {
+				if let Some(alias) = aliases.get(&word) {
+					word = alias.clone();
+					replaced = true;
+				}
+				new_input.push_str(&word);
+			}
+
+			self.input = new_input;
+		}
+
+		self.char_stream = input.chars().collect::<VecDeque<char>>();
+
+		Ok(())
+	}
+	fn var_pass(&mut self) -> RshResult<()> {
+		let vartable = read_vars(|v| v.clone())?;
+		let mut input = self.input.clone();
+		let mut replaced = true;
+
+		while replaced {
+			replaced = false;
+			let words = self.split_input();
+			let mut new_input = String::new();
+
+			for mut word in words {
+				if word.starts_with('$') {
+					dbg!(&word);
+					let var_candidate = word.strip_prefix('$').unwrap();
+					dbg!(&var_candidate);
+					if let Some(var) = vartable.get_var(var_candidate) {
+						word = var.to_string();
+						replaced = true;
+					}
+				}
+				new_input.push_str(&word);
+			}
+
+			self.input = new_input;
+		}
+
+		self.char_stream = self.input.chars().collect::<VecDeque<char>>();
+
+		Ok(())
+	}
+	fn cmd_sub_pass(&mut self) -> RshResult<()> {
+		let mut input = self.input.clone();
+		let mut replaced = true;
+
+		while replaced {
+			replaced = false;
+			let words = self.split_input();
+			dbg!(&words);
+			let mut new_input = String::new();
+
+			for mut word in words {
+				if helper::has_valid_delims(&word, "$(", ")") && (!word.starts_with('\'') && !word.ends_with('\'')) {
+					if let Some((left, middle, right)) = word.split_twice("$(", ")") {
+						dbg!(&left,&middle,&right);
+						let dummy_tk = Tk {
+							tk_type: TkType::CommandSub,
+							wd: WordDesc {
+								text: middle.to_string(),
+								span: Span::new(),
+								flags: WdFlags::empty(),
+							},
+						};
+						let new_tk = expand::expand_cmd_sub(dummy_tk)?;
+						word = format!("{}{}{}", left, new_tk.text(), right);
+						dbg!(&word);
+						replaced = true;
+					}
+				}
+				new_input.push_str(&word);
+			}
+
+			self.input = new_input;
+		}
+
+		self.char_stream = self.input.chars().collect::<VecDeque<char>>();
+
+		Ok(())
+	}
+	pub fn tokenize_one(&mut self) -> RshResult<Vec<Tk>> {
 		use crate::interp::token::TkState::*;
+		if !self.expanded { // Replacing these first is the simplest way
+			self.alias_pass()?;
+			self.var_pass()?;
+			self.cmd_sub_pass()?;
+			self.expanded = true;
+		}
 		let mut wd = WordDesc::empty();
 		while !self.char_stream.is_empty() {
 			self.span.start = self.span.end;
@@ -591,7 +756,7 @@ impl RshTokenizer {
 				_ => { /* Do nothing */ }
 			}
 			match *self.ctx() {
-				Command => self.command_context(take(&mut wd),ctx.clone())?,
+				Command => self.command_context(take(&mut wd))?,
 				Arg => self.arg_context(take(&mut wd))?,
 				DQuote | SQuote => self.string_context(take(&mut wd))?,
 				VarDec | SingleVarDec => self.vardec_context(take(&mut wd))?,
@@ -604,16 +769,16 @@ impl RshTokenizer {
 						self.advance();
 					}
 					self.advance(); // Consume the newline too
-					self.push_ctx(Command)
+					self.pop_ctx();
 				}
 				_ => unreachable!("{:?},{:?}",self.context,self.char_stream.iter().collect::<String>())
 			}
 		}
 		Ok(take(&mut self.tokens))
 	}
-	fn command_context(&mut self, mut wd: WordDesc, ctx: TkizerCtx) -> RshResult<()> {
+	fn command_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
 		use crate::interp::token::TkState::*;
-		wd = self.complete_word(wd);
+		wd = self.complete_word(wd,false);
 		if wd.text.ends_with("()") {
 			wd.text = wd.text.strip_suffix("()").unwrap().to_string();
 			self.tokens.push(Tk { tk_type: TkType::FuncDef, wd });
@@ -643,20 +808,6 @@ impl RshTokenizer {
 				"select" => self.tokens.push(Tk { tk_type: TkType::Select, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				_ => unreachable!("text: {}", wd.text)
 			}
-		} else if ctx.get_alias_exp().is_none_or(|name| name != wd.text) && read_logic(|l| l.get_alias(wd.text.as_str()))?.is_some()  {
-			if let Some(content) = read_logic(|l| l.get_alias(wd.text.as_str())).unwrap() {
-				let mut sub_tokenizer = RshTokenizer::new(&content);
-				loop {
-					let deck = sub_tokenizer.tokenize_one(TkizerCtx::with_alias(wd.text.as_str()))?;
-					if deck.is_empty() { break };
-					let mut deck = deck[1..].to_vec(); // Shave off the SOI/EOI tokens
-					for tk in deck.iter_mut() {
-						tk.wd.flags |= WdFlags::FROM_ALIAS
-					}
-
-					self.tokens.append(&mut deck);
-				}
-			}
 		} else if matches!(wd.text.as_str(), ";" | "\n") {
 			self.tokens.push(Tk::cmdsep(&wd, self.span.end));
 			self.span.start = self.span.end;
@@ -677,7 +828,13 @@ impl RshTokenizer {
 				let (var,val) = wd.text.split_once("=").unwrap();
 				let mut val_wd = wd.clone();
 				val_wd.text = val.to_string();
-				let mut val_tk = Tk { tk_type: TkType::Ident, wd: val_wd };
+				let mut sub_tokenizer = RshTokenizer::new(&val_wd.text);
+				let mut val_tk = VecDeque::from(sub_tokenizer.tokenize_one()?);
+				val_tk.pop_front();
+				if val_tk.is_empty() {
+					return Err(ShError::from_syntax("No value found for this assignment", self.span))
+				}
+				let mut val_tk = val_tk.pop_front().unwrap();
 
 				if val.starts_with('"') && val.ends_with('"') {
 					val_tk.tk_type = TkType::String;
@@ -685,10 +842,15 @@ impl RshTokenizer {
 				}
 
 				let mut expanded = expand::expand_token(val_tk, true)?;
-				while let Some(mut tk) = expanded.pop_front() {
-					tk.tk_type = TkType::Assignment;
-					tk.wd.text = format!("{}={}",var,tk.text());
-					self.tokens.push(tk);
+				dbg!(&var,&val);
+				dbg!(&expanded);
+				if let Some(tk) = expanded.pop_front() {
+					dbg!(&tk);
+					let ass_token = Tk {
+						tk_type: TkType::Assignment { key: var.to_string(), value: Box::new(tk) },
+						wd
+					};
+					self.tokens.push(ass_token);
 				}
 				self.push_ctx(Arg)
 			} else {
@@ -700,7 +862,7 @@ impl RshTokenizer {
 	}
 	fn arg_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
 		use crate::interp::token::TkState::*;
-		wd = self.complete_word(wd);
+		wd = self.complete_word(wd,false);
 		match wd.text.as_str() {
 			"||" | "&&" | "|" | "|&" => {
 				while self.char_stream.front().is_some_and(|ch| *ch == '\n') {
@@ -828,7 +990,7 @@ impl RshTokenizer {
 			if self.char_stream.is_empty() {
 				return Err(ShError::from_parse("Did not find an `in` keyword for this statement", span))
 			}
-			wd = self.complete_word(wd);
+			wd = self.complete_word(wd,false);
 			match wd.text.as_str() {
 				"in" => {
 					if !found {
@@ -856,7 +1018,7 @@ impl RshTokenizer {
 		let mut found = false;
 		while self.char_stream.front().is_some_and(|ch| !matches!(ch, ';' | '\n')) {
 			found = true;
-			wd = self.complete_word(wd);
+			wd = self.complete_word(wd,false);
 			wd.span = self.span;
 			self.tokens.push(Tk { tk_type: TkType::Ident, wd: take(&mut wd) });
 			wd = wd.set_span(self.span)
@@ -984,7 +1146,7 @@ impl RshTokenizer {
 			}
 			let mut body_tokenizer = RshTokenizer::new(&body);
 			let mut body_tokens = vec![];
-			while let Ok(mut block) = body_tokenizer.tokenize_one(TkizerCtx::new()) {
+			while let Ok(mut block) = body_tokenizer.tokenize_one() {
 				if !block.is_empty() {
 					body_tokens.append(&mut block);
 				}
@@ -995,7 +1157,7 @@ impl RshTokenizer {
 		self.push_ctx(DeadEnd);
 		Ok(())
 	}
-	fn complete_word(&mut self, mut wd: WordDesc) -> WordDesc {
+	fn complete_word(&mut self, mut wd: WordDesc, raw: bool) -> WordDesc {
 		let mut dub_quote = false;
 		let mut sng_quote = false;
 		let mut paren_stack = vec![];
@@ -1032,7 +1194,7 @@ impl RshTokenizer {
 				'\'' if !dub_quote => {
 					// Single quote handling
 					sng_quote = !sng_quote;
-					wd = wd.add_char(ch);
+					wd = wd.add_flag(WdFlags::SNG_QUOTED).add_char(ch);
 				}
 				'"' if !sng_quote => {
 					// Double quote handling
@@ -1051,6 +1213,10 @@ impl RshTokenizer {
 					wd = wd.add_char(ch)
 				}
 				'\n' | ';' => {
+					if raw {
+						wd = wd.add_char(ch);
+						break
+					}
 					// Preserve cmdsep for tokenizing
 					self.char_stream.push_front(ch);
 					self.span.end -= 1;
@@ -1058,6 +1224,10 @@ impl RshTokenizer {
 					break;
 				}
 				' ' | '\t' => {
+					if raw {
+						wd = wd.add_char(ch);
+						break
+					}
 					// Whitespace handling
 					self.char_stream.push_front(ch);
 					self.span.end -= 1;
@@ -1075,16 +1245,6 @@ impl RshTokenizer {
 		}
 		wd
 	}
-	fn clean_tokens(&mut self) {
-		let mut buffer = VecDeque::new();
-		let mut tokens = VecDeque::from(take(&mut self.tokens));
-		while let Some(token) = tokens.pop_front() {
-			if matches!(token.tk_type, TkType::SOI | TkType::EOI | TkType::Cmdsep) || !token.text().is_empty() {
-				buffer.push_back(token);
-			}
-		}
-		self.tokens.extend(buffer.drain(..));
-	}
 }
 
 // TODO: Case tests, select tests
@@ -1092,7 +1252,7 @@ impl RshTokenizer {
 mod tests {
 	use nix::unistd::{getuid, User};
 
-	use crate::{interp::token::TkizerCtx, shellenv::write_vars};
+	use crate::shellenv::write_vars;
 
 	use super::*;
 	fn token(tk_type: TkType, text: &str, start: usize, end: usize, flags: WdFlags) -> Tk {
@@ -1111,7 +1271,7 @@ mod tests {
 		let input = "echo hello";
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
@@ -1125,7 +1285,7 @@ mod tests {
 		let input = "ls -l /home/user";
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(TkType::Ident, "ls", 0, 2, WdFlags::empty()),
@@ -1140,7 +1300,7 @@ mod tests {
 		let input = "echo \"Hello, world!\"";
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
@@ -1154,7 +1314,7 @@ mod tests {
 		let input = "echo 'single quoted arg'";
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
@@ -1169,7 +1329,7 @@ mod tests {
 		let user = User::from_uid(getuid()).unwrap().unwrap().name;
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
@@ -1183,7 +1343,7 @@ mod tests {
 		let input = "ls | grep file";
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(TkType::Ident, "ls", 0, 2, WdFlags::empty()),
@@ -1200,7 +1360,7 @@ mod tests {
 		let input = "echo hello > output.txt";
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(TkType::Ident, "echo", 0, 4, WdFlags::BUILTIN),
@@ -1216,7 +1376,7 @@ mod tests {
 		let input = "(echo hi)";
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(TkType::Subshell, "echo hi", 0, 9, WdFlags::empty()),
@@ -1231,7 +1391,7 @@ print(\"hello world\")
 )";
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(
@@ -1253,7 +1413,7 @@ print(\"hello world\")
 		}";
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(TkType::FuncDef, "func", 0, 6, WdFlags::empty()),
@@ -1271,7 +1431,7 @@ print(\"hello world\")
 		write_vars(|v| v.set_param("3".into(), "three".into())).unwrap();
 		write_vars(|v| v.set_param("4".into(), "four".into())).unwrap();
 
-		let tokenizer = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokenizer = tokenizer.tokenize_one().unwrap();
 
 		insta::assert_debug_snapshot!(tokenizer)
 	}
@@ -1281,7 +1441,7 @@ print(\"hello world\")
 		let input = "if true; then echo hi; elif false; then echo hello; else echo greetings; fi";
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(TkType::If, "if", 0, 2, WdFlags::KEYWORD),
@@ -1312,7 +1472,7 @@ print(\"hello world\")
 		let input = "for i in 1 2 3; do echo $i; done";
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(TkType::For, "for", 0, 3, WdFlags::KEYWORD),
@@ -1336,7 +1496,7 @@ print(\"hello world\")
 		let input = "while true; do echo working; done";
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(TkType::While, "while", 0, 5, WdFlags::KEYWORD),
@@ -1356,7 +1516,7 @@ print(\"hello world\")
 		let input = "until true; do echo waiting; done";
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			token(TkType::Until, "until", 0, 5, WdFlags::KEYWORD),
@@ -1376,7 +1536,7 @@ print(\"hello world\")
 		let input = "if while if true; then echo while condition; fi; do if true; then echo inside first while; fi; done; then echo wow; elif until while if true; then echo double loop; fi; do if true; then echo another double loop; fi; done; do echo; done; then echo again; else echo; fi";
 		let mut tokenizer = RshTokenizer::new(input);
 
-		let tokens = tokenizer.tokenize_one(TkizerCtx::new()).unwrap();
+		let tokens = tokenizer.tokenize_one().unwrap();
 		let expected = vec![
 			Tk::start_of_input(),
 			// if while if true

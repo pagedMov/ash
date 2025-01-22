@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use bitflags::bitflags;
+use nix::NixPath;
 use once_cell::sync::Lazy;
 use std::mem::take;
 
@@ -9,7 +10,7 @@ use crate::shellenv::read_logic;
 use crate::{builtin, RshResult};
 
 use super::helper::{self, flatten_tree};
-use super::token::{Redir, TkizerCtx, WdFlags};
+use super::token::{Redir, WdFlags};
 
 bitflags! {
 	#[derive(Debug,Copy,Clone,PartialEq)]
@@ -306,7 +307,7 @@ impl DescentContext {
 	}
 }
 
-pub fn descend(tokenizer: &mut RshTokenizer) -> RshResult<Option<ParseState>> {
+pub fn descend(tokenizer: &mut RshTokenizer) -> RshResult<ParseState> {
 	let input = tokenizer.input();
 	let mut state = ParseState {
 		input: input.clone(),
@@ -320,12 +321,12 @@ pub fn descend(tokenizer: &mut RshTokenizer) -> RshResult<Option<ParseState>> {
 		}
 	};
 
-	let deck = tokenizer.tokenize_one(TkizerCtx::new())?;
+	let deck = tokenizer.tokenize_one()?;
 	state.tokens = deck.into();
 
 	state = parse(state)?;
 
-	Ok(Some(state))
+	Ok(state)
 }
 
 /// The purpose of this function is mainly just to be an entry point for the parsing logic
@@ -430,7 +431,7 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentCon
 				ctx.tokens.push_front(tk);
 				ctx = build_func_def(ctx)?;
 			}
-			Assignment => {
+			Assignment {..} => {
 				ctx.tokens.push_front(tk);
 				ctx = build_assignment(ctx)?;
 			}
@@ -1438,7 +1439,7 @@ pub fn build_func_def(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		};
 
 		loop {
-			let mut deck = tokenizer.tokenize_one(TkizerCtx::new())?;
+			let mut deck = tokenizer.tokenize_one()?;
 			if deck.is_empty() { break };
 			state.tokens.extend(deck.drain(..));
 		}
@@ -1459,14 +1460,19 @@ pub fn build_func_def(mut ctx: DescentContext) -> RshResult<DescentContext> {
 
 pub fn build_assignment(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let ass = ctx.next_tk().unwrap();
-	if let TkType::Assignment = ass.tk_type {
-		let (var, val) = ass.text().split_once('=').unwrap();
+	dbg!(&ass);
+	if let TkType::Assignment { key, value } = &ass.tk_type {
+		let value = if value.text().is_empty() {
+			None
+		} else {
+			Some(value.text().to_string())
+		};
 		let span = ass.span();
 		let node = Node {
 			command: None,
 			nd_type: NdType::Assignment {
-				name: var.to_string(),
-				value: Some(val.to_string()),
+				name: key.to_string(),
+				value
 			},
 			span,
 			flags: NdFlags::VALID_OPERAND,
@@ -1517,7 +1523,7 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				break // Background operator '&' is always the last argument
 			}
 			TkType::Subshell => continue, // Don't include the subshell token in the args
-			TkType::Ident | TkType::CommandSub | TkType::String | TkType::VariableSub | TkType::Assignment => {
+			TkType::Ident | TkType::CommandSub | TkType::String | TkType::VariableSub | TkType::Assignment {..} => {
 				// Add to argv
 				argv.push_back(tk);
 			}
@@ -1619,7 +1625,7 @@ mod test {
 
 		let mut flat_nodes = Vec::new(); // Collect nodes directly
 		loop {
-			let state = descend(&mut tokenizer).unwrap().unwrap();
+			let state = descend(&mut tokenizer).unwrap();
 			if state.tokens.is_empty() {
 				break;
 			}
@@ -1642,7 +1648,7 @@ mod test {
 
 		let mut flat_nodes = Vec::new();
 		loop {
-			let state = descend(&mut tokenizer).unwrap().unwrap();
+			let state = descend(&mut tokenizer).unwrap();
 			if state.tokens.is_empty() {
 				break;
 			}
@@ -1664,7 +1670,7 @@ mod test {
 
 		let mut flat_nodes = Vec::new();
 		loop {
-			let state = descend(&mut tokenizer).unwrap().unwrap();
+			let state = descend(&mut tokenizer).unwrap();
 			if state.tokens.is_empty() {
 				break;
 			}
@@ -1686,7 +1692,7 @@ mod test {
 
 		let mut flat_nodes = Vec::new();
 		loop {
-			let state = descend(&mut tokenizer).unwrap().unwrap();
+			let state = descend(&mut tokenizer).unwrap();
 			if state.tokens.is_empty() {
 				break;
 			}
@@ -1708,7 +1714,7 @@ mod test {
 
 		let mut flat_nodes = Vec::new();
 		loop {
-			let state = descend(&mut tokenizer).unwrap().unwrap();
+			let state = descend(&mut tokenizer).unwrap();
 			if state.tokens.is_empty() {
 				break;
 			}
@@ -1730,7 +1736,7 @@ mod test {
 
 		let mut flat_nodes = Vec::new();
 		loop {
-			let state = descend(&mut tokenizer).unwrap().unwrap();
+			let state = descend(&mut tokenizer).unwrap();
 			if state.tokens.is_empty() {
 				break;
 			}
@@ -1752,7 +1758,7 @@ mod test {
 
 		let mut flat_nodes = Vec::new();
 		loop {
-			let state = descend(&mut tokenizer).unwrap().unwrap();
+			let state = descend(&mut tokenizer).unwrap();
 			if state.tokens.is_empty() {
 				break;
 			}
@@ -1774,7 +1780,7 @@ mod test {
 
 		let mut flat_nodes = Vec::new();
 		loop {
-			let state = descend(&mut tokenizer).unwrap().unwrap();
+			let state = descend(&mut tokenizer).unwrap();
 			if state.tokens.is_empty() {
 				break;
 			}
@@ -1796,7 +1802,7 @@ mod test {
 
 		let mut flat_nodes = Vec::new();
 		loop {
-			let state = descend(&mut tokenizer).unwrap().unwrap();
+			let state = descend(&mut tokenizer).unwrap();
 			if state.tokens.is_empty() {
 				break;
 			}
@@ -1817,7 +1823,7 @@ mod test {
 
 		let mut flat_nodes = Vec::new();
 		loop {
-			let state = descend(&mut tokenizer).unwrap().unwrap();
+			let state = descend(&mut tokenizer).unwrap();
 			if state.tokens.is_empty() {
 				break;
 			}

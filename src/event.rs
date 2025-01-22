@@ -202,7 +202,7 @@ pub fn main_loop() -> RshResult<()> {
 			loop {
 				let result = descend(&mut tokenizer);
 				match result {
-					Ok(Some(state)) => {
+					Ok(state) => {
 						let deck = helper::extract_deck_from_root(&state.ast)?;
 						if !deck.is_empty() {
 							// Send each deck immediately for execution
@@ -213,7 +213,6 @@ pub fn main_loop() -> RshResult<()> {
 							break;
 						}
 					}
-					Ok(None) => break,
 					Err(e) => {
 						throw(e)?;
 					}

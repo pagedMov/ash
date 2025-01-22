@@ -19,7 +19,7 @@ pub fn check_globs(tk: Tk) -> bool {
 	let text = tk.text();
 	let flags = tk.flags();
 
-	if !flags.contains(WdFlags::IS_ARG) {
+	if !flags.contains(WdFlags::IS_ARG) || flags.contains(WdFlags::SNG_QUOTED) {
 		return false; // Skip if not an argument
 	}
 
@@ -220,6 +220,7 @@ pub fn check_home_expansion(text: &str) -> bool {
 }
 
 pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
+	dbg!(&token);
 	let mut working_buffer: VecDeque<Tk> = VecDeque::new();
 	let mut product_buffer: VecDeque<Tk> = VecDeque::new();
 	let split_words = token.tk_type != TkType::String;
@@ -232,7 +233,7 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 		// If expand_glob is true, then check for globs. Otherwise, is_glob is false
 		let is_glob = if expand_glob { check_globs(token.clone()) } else { expand_glob };
 		let is_brace_expansion = helper::is_brace_expansion(token.text());
-		let is_cmd_sub = helper::has_valid_delims(token.text(), "$(", ")");
+		let is_cmd_sub = helper::has_valid_delims(token.text(), "$(", ")") || token.tk_type == TkType::CommandSub;
 
 		if is_cmd_sub {
 			let new_token = expand_cmd_sub(token)?;
@@ -372,6 +373,7 @@ pub fn expand_cmd_sub(token: Tk) -> RshResult<Tk> {
 		let io = ProcIO::from(None, Some(w_pipe.mk_shared()), None);
 		execute::handle_subshell(node, io)?;
 		let buffer = r_pipe.read()?;
+		dbg!(&buffer);
 		new_token = Tk {
 			tk_type: TkType::String,
 			wd: WordDesc {

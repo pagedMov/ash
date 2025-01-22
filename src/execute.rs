@@ -671,6 +671,7 @@ fn handle_chain(node: Node) -> RshResult<RshWait> {
 }
 
 fn handle_assignment(node: Node) -> RshResult<RshWait> {
+	dbg!("assignment");
 	node_operation!(NdType::Assignment { name, value }, node, {
 		let mut value = value.unwrap_or_default();
 		if let Some(body) = value.trim_command_sub() {
@@ -685,6 +686,7 @@ fn handle_assignment(node: Node) -> RshResult<RshWait> {
 			let expanded = expand::expand_cmd_sub(dummy_tk)?;
 			value = expanded.text().to_string();
 		}
+		dbg!(&name, &value);
 		write_vars(|v| v.set_var(&name, RVal::parse(&value).unwrap_or_default()))?;
 	});
 	Ok(RshWait::Success)
@@ -762,7 +764,6 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 	// Perform subshell node operation
 	node_operation!(NdType::Subshell { mut body, mut argv }, node, {
 		let vars = shellenv::borrow_var_table()?;
-		dbg!(&body);
 		if body.is_empty() {
 			return Ok(RshWait::Success);
 		}

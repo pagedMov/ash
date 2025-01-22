@@ -925,6 +925,9 @@ impl LogicTable {
 	pub fn remove_alias(&mut self, name: &str) {
 		self.aliases.remove(name);
 	}
+	pub fn borrow_aliases(&self) -> &HashMap<String,String> {
+		&self.aliases
+	}
 	pub fn get_alias(&self, name: &str) -> Option<String> {
 		self.aliases.get(name).cloned()
 	}
@@ -1198,8 +1201,8 @@ pub fn source_file(path: PathBuf) -> RshResult<()> {
 	let mut tokenizer = RshTokenizer::new(&buffer);
 	loop {
 		let state = descend(&mut tokenizer)?;
-		if state.clone().is_some_and(|ps| ps.tokens.is_empty()) { break }
-		let result = execute::traverse_ast(state.unwrap().ast)?;
+		if state.tokens.is_empty() { break }
+		let result = execute::traverse_ast(state.ast)?;
 		if let RshWait::Fail { code, cmd } = result {
 			if code == 127 {
 				if let Some(cmd) = cmd {
