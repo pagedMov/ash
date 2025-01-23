@@ -130,7 +130,7 @@ impl Node {
 		}
 	}
 
-	fn boxed(self) -> Box<Self> {
+	pub fn boxed(self) -> Box<Self> {
 		Box::new(self)
 	}
 	fn with_flags(self,flags: NdFlags) -> Self {
@@ -210,11 +210,11 @@ pub enum NdType {
 	Chain { commands: VecDeque<Node>, op: Box<Node> },
 	BraceGroup { body: Box<Node> },
 	Subshell { body: String, argv: VecDeque<Tk> }, // It's a string because we're going to parse it in a subshell later
-	FuncDef { name: String, body: Box<Node> },
+	FuncDef { name: String, body: String },
 	Assignment {name: String, value: Option<String> },
 	Command { argv: VecDeque<Tk> },
 	Builtin { argv: VecDeque<Tk> },
-	Function { body: Box<Node>, argv: VecDeque<Tk> },
+	Function { body: String, argv: VecDeque<Tk> },
 	Redirection { redir: Redir },
 	And,
 	Or,
@@ -1431,23 +1431,9 @@ pub fn build_func_def(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		let name = def.text();
 		let body_tk = ctx.next_tk().unwrap(); // We can be reasonably sure that this exists
 		let body = body_tk.text();
-		let mut tokenizer = RshTokenizer::new(body);
-		let mut state = ParseState {
-			input: body.into(),
-			tokens: VecDeque::new(),
-			ast: Node::new()
-		};
-
-		loop {
-			let mut deck = tokenizer.tokenize_one()?;
-			if deck.is_empty() { break };
-			state.tokens.extend(deck.drain(..));
-		}
-		let state = parse(state)?;
-		let func_tree = state.ast.boxed();
 		let node = Node {
 			command: Some(def.clone()),
-			nd_type: NdType::FuncDef { name: name.to_string(), body: func_tree },
+			nd_type: NdType::FuncDef { name: name.to_string(), body: body.to_string() },
 			span: def.span(),
 			flags: NdFlags::empty(),
 			redirs: VecDeque::new()
@@ -1460,7 +1446,6 @@ pub fn build_func_def(mut ctx: DescentContext) -> RshResult<DescentContext> {
 
 pub fn build_assignment(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	let ass = ctx.next_tk().unwrap();
-	dbg!(&ass);
 	if let TkType::Assignment { key, value } = &ass.tk_type {
 		let value = if value.text().is_empty() {
 			None
@@ -1590,7 +1575,7 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		CmdType::Function => {
 			Node {
 				command,
-				nd_type: NdType::Function { body: Box::new(func_body.unwrap()), argv },
+				nd_type: NdType::Function { body: func_body.unwrap(), argv },
 				span,
 				flags: NdFlags::VALID_OPERAND,
 				redirs: VecDeque::new()

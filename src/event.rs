@@ -1,7 +1,9 @@
-use std::{ffi::c_int, fmt::Display, io, panic::Location};
+use std::{collections::VecDeque, ffi::c_int, fmt::Display, io, panic::Location};
 
 
-use crate::{execute::{self, RshWait}, interp::{helper, parse::{descend, Node, Span}, token::RshTokenizer}, prompt, shellenv::{read_meta, write_meta, EnvFlags}, RshResult};
+use bitflags::Flags;
+
+use crate::{execute::{self, RshWait}, interp::{helper, parse::{descend, NdFlags, Node, Span}, token::RshTokenizer}, prompt, shellenv::{read_meta, write_meta, EnvFlags}, RshResult};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShError {
@@ -189,6 +191,39 @@ pub fn throw(err: ShError) -> RshResult<()> {
 	Ok(())
 }
 
+pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>) -> RshResult<()> {
+	if !input.is_empty() {
+		let mut tokenizer = RshTokenizer::new(input);
+
+		loop {
+			let result = descend(&mut tokenizer);
+			match result {
+				Ok(mut state) => {
+					if !flags.is_empty() {
+						state.ast.flags |= flags;
+					}
+					if let Some(ref redirs) = redirs {
+						state.ast.redirs = redirs.clone()
+					}
+					let deck = helper::extract_deck_from_root(&state.ast)?;
+					if !deck.is_empty() {
+						// Send each deck immediately for execution
+						if let Err(e) = execute::traverse_ast(state.ast) {
+							throw(e)?;
+						}
+					} else {
+						break;
+					}
+				}
+				Err(e) => {
+					throw(e)?;
+				}
+			}
+		}
+	}
+	Ok(())
+}
+
 pub fn main_loop() -> RshResult<()> {
 	if read_meta(|m| m.flags().contains(EnvFlags::IN_SUBSH))? {
 		eprintln!("I shouldnt be here");
@@ -196,28 +231,6 @@ pub fn main_loop() -> RshResult<()> {
 	loop {
 		let input = prompt::run()?;
 		write_meta(|m| m.leave_prompt())?;
-		if !input.is_empty() {
-			let mut tokenizer = RshTokenizer::new(&input);
-
-			loop {
-				let result = descend(&mut tokenizer);
-				match result {
-					Ok(state) => {
-						let deck = helper::extract_deck_from_root(&state.ast)?;
-						if !deck.is_empty() {
-							// Send each deck immediately for execution
-							if let Err(e) = execute::traverse_ast(state.ast) {
-								throw(e)?;
-							}
-						} else {
-							break;
-						}
-					}
-					Err(e) => {
-						throw(e)?;
-					}
-				}
-			}
-		}
+		execute(&input, NdFlags::empty(), None)?;
 	}
 }

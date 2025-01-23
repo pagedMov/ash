@@ -4,7 +4,7 @@ use libc::{memfd_create, MFD_CLOEXEC};
 use nix::{errno::Errno, fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
 use std::sync::Mutex;
 
-use crate::{builtin::{self, CdFlags}, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, RshResult};
+use crate::{builtin::{self, CdFlags}, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, RshTokenizer, Tk, TkType, WdFlags}}, shellenv::{self, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, RshResult};
 
 #[macro_export]
 macro_rules! node_operation {
@@ -492,7 +492,7 @@ fn traverse_root(mut root_node: Node, break_condition: Option<bool>, io: ProcIO)
 fn handle_func_def(node: Node) -> RshResult<RshWait> {
 	let last_status = RshWait::new();
 	node_operation!(NdType::FuncDef { name, body }, node, {
-		write_logic(|l| l.new_func(&name, *body.clone()))?;
+		write_logic(|l| l.new_func(&name, &body))?;
 	});
 	Ok(last_status)
 }
@@ -671,7 +671,6 @@ fn handle_chain(node: Node) -> RshResult<RshWait> {
 }
 
 fn handle_assignment(node: Node) -> RshResult<RshWait> {
-	dbg!("assignment");
 	node_operation!(NdType::Assignment { name, value }, node, {
 		let mut value = value.unwrap_or_default();
 		if let Some(body) = value.trim_command_sub() {
@@ -686,7 +685,6 @@ fn handle_assignment(node: Node) -> RshResult<RshWait> {
 			let expanded = expand::expand_cmd_sub(dummy_tk)?;
 			value = expanded.text().to_string();
 		}
-		dbg!(&name, &value);
 		write_vars(|v| v.set_var(&name, RVal::parse(&value).unwrap_or_default()))?;
 	});
 	Ok(RshWait::Success)
@@ -833,20 +831,12 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 fn handle_function(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 	let span = node.span();
 	if let NdType::Function { body, mut argv } = node.nd_type {
-		let mut func = *body; // Unbox the root node for the function
-		func.flags |= NdFlags::FUNCTION;
-		if node.flags.contains(NdFlags::IN_PIPE) {
-			func.flags |= NdFlags::IN_PIPE;
-		}
+		let mut func = body; // Unbox the root node for the function
+		node.flags |= NdFlags::FUNCTION;
 		let mut pos_params = vec![];
 
 		while let Some(tk) = argv.pop_front() {
 			pos_params.push(tk.text().to_string());
-		}
-
-
-		while let Some(redir) = node.redirs.pop_front() {
-			func.redirs.push_back(redir);
 		}
 
 		let env_snapshot = SavedEnv::get_snapshot()?;
@@ -856,13 +846,10 @@ fn handle_function(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 			write_vars(|v| v.set_param((index + 1).to_string(), param))?;
 		}
 
+		let result = event::execute(&func, node.flags, Some(node.redirs.clone()))?;
 
-		let mut result = traverse_root(func, None, io.clone());
-		if let Err(ref mut e) = result {
-			*e = e.overwrite_span(span)
-		}
 		env_snapshot.restore_snapshot()?;
-		result
+		Ok(RshWait::Success)
 	} else { unreachable!() }
 }
 

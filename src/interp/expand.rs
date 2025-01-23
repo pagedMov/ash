@@ -220,7 +220,6 @@ pub fn check_home_expansion(text: &str) -> bool {
 }
 
 pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
-	dbg!(&token);
 	let mut working_buffer: VecDeque<Tk> = VecDeque::new();
 	let mut product_buffer: VecDeque<Tk> = VecDeque::new();
 	let split_words = token.tk_type != TkType::String;
@@ -373,7 +372,6 @@ pub fn expand_cmd_sub(token: Tk) -> RshResult<Tk> {
 		let io = ProcIO::from(None, Some(w_pipe.mk_shared()), None);
 		execute::handle_subshell(node, io)?;
 		let buffer = r_pipe.read()?;
-		dbg!(&buffer);
 		new_token = Tk {
 			tk_type: TkType::String,
 			wd: WordDesc {

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, env, ffi::{CString, OsStr}, fmt, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, sync::{Arc, LazyLock}};
+use std::{collections::{BTreeMap, VecDeque}, env, ffi::{CString, OsStr}, fmt, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, sync::{Arc, LazyLock}};
 use std::collections::HashMap;
 
 use bitflags::bitflags;
@@ -7,7 +7,7 @@ use once_cell::sync::Lazy;
 use std::{fs::File, sync::RwLock};
 
 
-use crate::{event::ShError, execute::{self, RshWait}, interp::{helper, parse::{descend, Node, Span}, token::RshTokenizer}, RshResult};
+use crate::{event::ShError, execute::{self, RshWait}, interp::{helper, parse::{descend, parse, Node, ParseState, Span}, token::RshTokenizer}, RshResult};
 
 #[derive(Debug)]
 pub struct DisplayWaitStatus(pub WaitStatus);
@@ -908,7 +908,7 @@ impl Default for VarTable {
 
 #[derive(Debug,Clone)]
 pub struct LogicTable {
-	functions: HashMap<String,Box<Node>>,
+	functions: HashMap<String,String>,
 	aliases: HashMap<String,String>
 }
 
@@ -931,11 +931,11 @@ impl LogicTable {
 	pub fn get_alias(&self, name: &str) -> Option<String> {
 		self.aliases.get(name).cloned()
 	}
-	pub fn new_func(&mut self, name: &str, node: Node) {
-		self.functions.insert(name.to_string(),Box::new(node));
+	pub fn new_func(&mut self, name: &str, instructions: &str) {
+		self.functions.insert(name.to_string(),instructions.to_string());
 	}
-	pub fn get_func(&self, name: &str) -> Option<Node> {
-		self.functions.get(name).map(|boxed_node| *boxed_node.clone())
+	pub fn get_func(&self, name: &str) -> Option<String> {
+		self.functions.get(name).cloned()
 	}
 	pub fn remove_func(&mut self, name: &str) {
 		self.functions.remove(name);
@@ -1347,35 +1347,6 @@ mod tests {
 		assert_eq!(alias_value, Some("value1".to_string()));
 		assert_eq!(mock_logic.get_alias("nonexistent"), None);
 	}
-
-#[rstest]
-	fn logic_table_new_func(mut mock_logic: LogicTable) {
-		let node = Node::new(); // Assuming a `Node::new()` exists for creating a dummy node.
-		mock_logic.new_func("func1", node.clone());
-		let retrieved_func = mock_logic.get_func("func1");
-		assert_eq!(retrieved_func, Some(node));
-	}
-
-#[rstest]
-	fn logic_table_get_func(mut mock_logic: LogicTable) {
-		let node = Node::new(); // Assuming a `Node::new()` exists for creating a dummy node.
-		mock_logic.new_func("func1", node.clone());
-		let retrieved_func = mock_logic.get_func("func1");
-		assert_eq!(retrieved_func, Some(node));
-
-		// Ensure retrieving a nonexistent function returns `None`
-		assert_eq!(mock_logic.get_func("nonexistent"), None);
-	}
-
-	#[rstest]
-	fn logic_table_remove_func(mut mock_logic: LogicTable) {
-		let node = Node::new(); // Assuming a `Node::new()` exists for creating a dummy node.
-		mock_logic.new_func("func1", node.clone());
-		mock_logic.remove_func("func1");
-		let retrieved_func = mock_logic.get_func("func1");
-		assert_eq!(retrieved_func, None);
-	}
-
 
 	#[rstest]
 	fn vartable_index_array(mut mock_vars: VarTable) {

@@ -583,7 +583,6 @@ impl RshTokenizer {
 						current_word.push(ch);
 						words.push(current_word);
 						current_word = String::new();
-						words.push(ch.to_string());
 					}
 				}
 				_ => {
@@ -596,39 +595,49 @@ impl RshTokenizer {
 		if !current_word.is_empty() {
 			words.push(current_word);
 		}
-
 		words
 	}
 
 	// Push the last word
 	fn alias_pass(&mut self) -> RshResult<()> {
 		let aliases = read_logic(|m| m.borrow_aliases().clone())?;
-		let mut input = self.input.clone();
 		let mut replaced = true;
+		let mut is_command = true;
 
 		while replaced {
 			replaced = false;
-			let words = self.split_input();
+			let mut words = self.split_input();
+			let mut words = words.iter_mut().peekable();
 			let mut new_input = String::new();
 
-			for mut word in words {
-				if let Some(alias) = aliases.get(&word) {
-					word = alias.clone();
-					replaced = true;
+			while let Some(word) = words.next() {
+				let is_last_word = words.peek().is_none();
+				if is_command {
+					if let Some(alias) = aliases.get(word.trim()) {
+						*word = alias.clone();
+						replaced = true;
+					}
+					is_command = false;
 				}
-				new_input.push_str(&word);
+				if word.ends_with(';') || word.ends_with('\n') {
+					is_command = true;
+				}
+				if is_last_word {
+					new_input.push_str(word);
+				} else {
+					new_input.push_str(format!("{} ",word).as_str());
+				}
 			}
 
 			self.input = new_input;
 		}
 
-		self.char_stream = input.chars().collect::<VecDeque<char>>();
+		self.char_stream = self.input.chars().collect::<VecDeque<char>>();
 
 		Ok(())
 	}
 	fn var_pass(&mut self) -> RshResult<()> {
 		let vartable = read_vars(|v| v.clone())?;
-		let mut input = self.input.clone();
 		let mut replaced = true;
 
 		while replaced {
@@ -638,9 +647,7 @@ impl RshTokenizer {
 
 			for mut word in words {
 				if word.starts_with('$') {
-					dbg!(&word);
 					let var_candidate = word.strip_prefix('$').unwrap();
-					dbg!(&var_candidate);
 					if let Some(var) = vartable.get_var(var_candidate) {
 						word = var.to_string();
 						replaced = true;
@@ -657,19 +664,18 @@ impl RshTokenizer {
 		Ok(())
 	}
 	fn cmd_sub_pass(&mut self) -> RshResult<()> {
-		let mut input = self.input.clone();
 		let mut replaced = true;
 
 		while replaced {
 			replaced = false;
 			let words = self.split_input();
-			dbg!(&words);
 			let mut new_input = String::new();
 
 			for mut word in words {
-				if helper::has_valid_delims(&word, "$(", ")") && (!word.starts_with('\'') && !word.ends_with('\'')) {
+				let not_sng_quote = !word.starts_with('\'') && !word.ends_with('\'');
+				let not_brace_grp = !word.starts_with('{') && !word.ends_with('}');
+				if helper::has_valid_delims(&word, "$(", ")") && (not_sng_quote || not_brace_grp) {
 					if let Some((left, middle, right)) = word.split_twice("$(", ")") {
-						dbg!(&left,&middle,&right);
 						let dummy_tk = Tk {
 							tk_type: TkType::CommandSub,
 							wd: WordDesc {
@@ -680,7 +686,6 @@ impl RshTokenizer {
 						};
 						let new_tk = expand::expand_cmd_sub(dummy_tk)?;
 						word = format!("{}{}{}", left, new_tk.text(), right);
-						dbg!(&word);
 						replaced = true;
 					}
 				}
@@ -706,7 +711,7 @@ impl RshTokenizer {
 		while !self.char_stream.is_empty() {
 			self.span.start = self.span.end;
 			wd = wd.set_span(self.span);
-			if *self.ctx() == DeadEnd && !matches!(self.char_stream.front().unwrap(), ';' | '\n') {
+			if *self.ctx() == DeadEnd && self.char_stream.front().is_some_and(|ch| !matches!(ch, ';' | '\n')) {
 				return Err(ShError::from_parse("Expected a semicolon or newline here", self.span))
 			}
 			match self.char_stream.front().unwrap() {
@@ -842,10 +847,7 @@ impl RshTokenizer {
 				}
 
 				let mut expanded = expand::expand_token(val_tk, true)?;
-				dbg!(&var,&val);
-				dbg!(&expanded);
 				if let Some(tk) = expanded.pop_front() {
-					dbg!(&tk);
 					let ass_token = Tk {
 						tk_type: TkType::Assignment { key: var.to_string(), value: Box::new(tk) },
 						wd
