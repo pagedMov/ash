@@ -171,14 +171,12 @@ fn main_noninteractive(args: Vec<String>) -> RshResult<RshWait> {
 						}
 					}
 					Err(e) => {
-						eprintln!("{:?}", e);
-						panic!()
+						event::throw(e).unwrap();
 					}
 				}
 			}
 			Err(e) => {
-				eprintln!("{:?}", e);
-				panic!()
+				event::throw(e).unwrap();
 			}
 		}
 	}

@@ -13,6 +13,7 @@ pub enum ShError {
 	ExecFailed(String, i32, Span),
 	IoError(String, u32, String),
 	InternalError(String),
+	Generic(String, Span),
 }
 
 impl ShError {
@@ -48,6 +49,7 @@ impl ShError {
 			ShError::InvalidSyntax(msg,_) => ShError::InvalidSyntax(msg.to_string(),new_span),
 			ShError::ParsingError(msg,_) => ShError::ParsingError(msg.to_string(),new_span),
 			ShError::ExecFailed(msg,code,_) => ShError::ExecFailed(msg.to_string(),*code,new_span),
+			ShError::Generic(msg,_) => ShError::Generic(msg.to_string(),new_span),
 			ShError::InternalError(msg) => ShError::InternalError(msg.to_string()),
 		}
 	}
@@ -59,6 +61,7 @@ impl ShError {
 			ShError::ParsingError(..) => false,
 			ShError::InvalidSyntax(..) => false,
 			ShError::InternalError(..) => false,
+			ShError::Generic(..) => false,
 		}
 	}
 }
@@ -66,22 +69,25 @@ impl ShError {
 impl Display for ShError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			ShError::CommandNotFound(cmd, span) => {
+			ShError::CommandNotFound(cmd, _) => {
 				write!(f, "{}", cmd)
 			}
-			ShError::InvalidSyntax(msg, span) => {
+			ShError::InvalidSyntax(msg, _) => {
 				write!(f, "{}", msg)
 			}
-			ShError::ParsingError(msg, span) => {
+			ShError::ParsingError(msg, _) => {
 				write!(f, "{}", msg)
 			}
-			ShError::ExecFailed(cmd, code, span) => {
+			ShError::ExecFailed(cmd, _, _) => {
 				write!(f, "{}", cmd)
 			}
-			ShError::IoError(msg, code, path) => {
+			ShError::IoError(msg, _, _) => {
 				write!(f, "{}", msg)
 			}
 			ShError::InternalError(msg) => {
+				write!(f, "{}", msg)
+			}
+			ShError::Generic(msg, _) => {
 				write!(f, "{}", msg)
 			}
 		}
@@ -141,34 +147,54 @@ impl ShErrorWindow {
 #[derive(Debug)]
 pub struct ShErrorFull {
 	window: Option<ShErrorWindow>,
-	msg: String
+	err: ShError
 }
 
 impl ShErrorFull {
 	pub fn from(err: ShError, input: &str) -> Self {
-		match err {
-			ShError::CommandNotFound(msg, span) |
-			ShError::InvalidSyntax(msg, span) |
-			ShError::ParsingError(msg, span) |
-			ShError::ExecFailed(msg, _, span) => {
-				let window = Some(ShErrorWindow::new(input, span));
-				Self { window, msg }
+		match &err {
+			ShError::CommandNotFound(_, span) |
+			ShError::InvalidSyntax(_, span) |
+			ShError::ParsingError(_, span) |
+			ShError::Generic(_, span) |
+			ShError::ExecFailed(_, _, span) => {
+				let window = Some(ShErrorWindow::new(input, *span));
+				Self { window, err }
 			}
-			ShError::IoError(msg, _, _) => Self { window: None, msg },
-			ShError::InternalError(msg) => Self { window: None, msg }
+			ShError::IoError(_, _, _) => Self { window: None, err },
+			ShError::InternalError(_) => Self { window: None, err }
 		}
+	}
+
+	pub fn get_err_msg(&self) -> String {
+		match &self.err {
+			ShError::CommandNotFound(msg, _) |
+			ShError::InvalidSyntax(msg, _) |
+			ShError::ParsingError(msg, _) |
+			ShError::ExecFailed(msg, _, _) |
+			ShError::IoError(msg, _, _) |
+			ShError::InternalError(msg) |
+			ShError::Generic(msg, _) => msg.to_string()
+		}
+	}
+
+	pub fn debug(input: &str, span: Span) {
+		let window = Some(ShErrorWindow::new(input,span));
+		let err = ShError::Generic(input.to_string(),span);
+		eprintln!("{}", Self { window, err });
 	}
 }
 
 impl Display for ShErrorFull {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let msg = self.get_err_msg();
 		match &self.window {
 			Some(window) => {
 				let (line,col,window) = window.get_vals();
-				write!(f,"{};{} - {}\n\n{}",line,col,self.msg,window)
+				write!(f,"{};{} - {}\n\n{}",line,col,msg,window)
 			}
 			None => {
-				write!(f,"{}",self.msg)
+				write!(f,"{}",msg)
 			}
 		}
 	}

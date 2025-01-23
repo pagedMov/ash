@@ -1601,7 +1601,6 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	Ok(ctx)
 }
 
-// Turn back now if you value your sanity
 #[cfg(test)]
 mod test {
 	use super::*;

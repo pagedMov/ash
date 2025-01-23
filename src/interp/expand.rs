@@ -323,31 +323,13 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> RshResult<VecDeque<Tk>> {
 		}
 	}
 	if split_words {
-		split_tokens(&mut product_buffer);
+		helper::split_tokens(&mut product_buffer);
+	} else {
+		helper::combine_tokens(&mut product_buffer);
 	}
 	Ok(product_buffer)
 }
 
-pub fn split_tokens(tk_buffer: &mut VecDeque<Tk>) {
-	let mut new_buffer = VecDeque::new();
-
-	while let Some(tk) = tk_buffer.pop_front() {
-		let split = tk.text().split_outside_quotes();
-		for word in split {
-			new_buffer.push_back(Tk {
-				tk_type: TkType::String,
-				wd: WordDesc {
-					text: word,
-					span: tk.span(),
-					flags: tk.flags(),
-				}
-			});
-		}
-	}
-
-	// Replace the original buffer with the new one
-	*tk_buffer = new_buffer;
-}
 
 pub fn clean_escape_chars(token_buffer: &mut VecDeque<Tk>) {
 	for token in token_buffer {
@@ -430,19 +412,11 @@ pub fn expand_cmd_sub(token: Tk) -> RshResult<Tk> {
 	Ok(new_token)
 }
 
-fn cartesian_product_lazy<'a>(
-    left: &'a [String],
-    right: &'a [String],
-) -> impl Iterator<Item = String> + 'a {
-    left.iter().flat_map(move |l| right.iter().map(move |r| format!("{}{}", l, r)))
-}
-
 pub fn build_word(words: &[&str], buffer: &mut String) {
 	for word in words {
 		buffer.push_str(word);
 	}
 }
-
 
 fn precompute_cartesian(left: &[String], right: &[String]) -> VecDeque<String> {
 	use rayon::prelude::*;
@@ -663,7 +637,9 @@ fn expand_params(token: Tk) -> RshResult<VecDeque<Tk>> {
 	for arg in arg_split {
 		// For each arg, make a new token and push it into the deque
 		let new_token = Tk::new(arg.to_string(),token.span(), token.flags() | WdFlags::FROM_VAR);
-		expanded_tokens.push_back(new_token);
+		if !new_token.text().is_empty() {
+			expanded_tokens.push_back(new_token);
+		}
 	}
 	// Now push the right token into the deque
 	if !right_token.text().is_empty() {
@@ -800,7 +776,7 @@ mod tests {
 			token(TkType::String, "arg1 arg2", Span::new(), WdFlags::empty()),
 			token(TkType::String, "foo\"bar baz\"", Span::new(), WdFlags::empty()),
 		]);
-		split_tokens(&mut tokens);
+		helper::split_tokens(&mut tokens);
 		assert_eq!(tokens.len(), 3);
 		assert_eq!(tokens[0].text(), "arg1");
 		assert_eq!(tokens[1].text(), "arg2");

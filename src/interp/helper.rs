@@ -2,7 +2,7 @@ use crate::{event::ShError, interp::token::REGEX, shellenv::{attach_tty, disable
 use nix::{sys::wait::WaitStatus, unistd::dup2};
 use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}};
 
-use super::{parse::{NdType, Node}, token::Tk};
+use super::{parse::{NdType, Node, Span}, token::{Tk, TkType, WdFlags, WordDesc}};
 
 #[macro_export]
 macro_rules! deconstruct {
@@ -65,7 +65,7 @@ pub trait StrExtension {
 }
 
 impl StrExtension for str {
-	/// This function looks for two patterns to split at
+	/// This function looks for two patterns to split at.
 	/// The left one must come first, and the right one second.
 	/// If the string matches this pattern, it will return all three parts as a tuple
 	/// It also respects escaped characters
@@ -297,6 +297,55 @@ pub fn suppress_err<F: FnOnce() -> T, T>(f: F) -> T {
 	let result = f();
 	dup2(stderr_fd,stderr_fd).unwrap();
 	result
+}
+
+pub fn combine_tokens(tokens: &mut VecDeque<Tk>) {
+	if tokens.is_empty() {
+		return;
+	}
+
+	// Combine spans
+	let span_start = tokens.front().unwrap().span().start;
+	let span_end = tokens.back().unwrap().span().end;
+	let span = Span::from(span_start, span_end);
+
+	// Combine text and flags
+	let mut flags = WdFlags::empty();
+	let new_text = tokens.iter().map(|token| {
+		flags |= token.flags();  // Accumulate flags
+		token.text()
+	}).collect::<Vec<_>>().join(" ");
+
+	// Return a new combined token
+	*tokens = VecDeque::from(vec![Tk {
+		tk_type: TkType::String,
+		wd: WordDesc {
+			text: new_text,
+			span,
+			flags,
+		},
+	}])
+}
+
+pub fn split_tokens(tokens: &mut VecDeque<Tk>) {
+	let mut new_buffer = VecDeque::new();
+
+	while let Some(tk) = tokens.pop_front() {
+		let split = tk.text().split_outside_quotes();
+		for word in split {
+			new_buffer.push_back(Tk {
+				tk_type: TkType::String,
+				wd: WordDesc {
+					text: word,
+					span: tk.span(),
+					flags: tk.flags(),
+				}
+			});
+		}
+	}
+
+	// Replace the original buffer with the new one
+	*tokens = new_buffer;
 }
 
 pub fn which(command: &str) -> Option<String> {

@@ -837,6 +837,7 @@ fn handle_function(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 		node.flags |= NdFlags::FUNCTION;
 		let mut pos_params = vec![];
 
+		argv.pop_front(); // Ignore function name
 		while let Some(tk) = argv.pop_front() {
 			pos_params.push(tk.text().to_string());
 		}
