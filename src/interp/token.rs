@@ -1226,24 +1226,26 @@ impl RshTokenizer {
 						wd = wd.add_char(char)
 					}
 				}
-				'[' if paren_stack.is_empty() => {
+				'[' if paren_stack.is_empty() && !sng_quote && !dub_quote => {
 					bracket_stack.push(ch);
-					wd = wd.add_char(ch)
+					wd = wd.add_char(ch);
 				}
-				']' if !bracket_stack.is_empty() => {
+				']' if !bracket_stack.is_empty() && !sng_quote && !dub_quote => {
 					bracket_stack.pop();
-					wd = wd.add_char(ch)
+					wd = wd.add_char(ch);
 				}
-				'(' if bracket_stack.is_empty() => {
+				'(' if bracket_stack.is_empty() && !sng_quote && !dub_quote => {
 					paren_stack.push(ch);
-					wd = wd.add_char(ch)
+					wd = wd.add_char(ch);
 				}
-				')' if !paren_stack.is_empty() => {
+				')' if !paren_stack.is_empty() && !sng_quote && !dub_quote => {
 					paren_stack.pop();
 					wd = wd.add_char(ch);
 					// Now we check for words in a command context that look like `this()`
 					// If it does, it's a function definition, so break here
-					if *self.ctx() == TkState::Command && wd.text.ends_with("()") { break }
+					if *self.ctx() == TkState::Command && wd.text.ends_with("()") {
+						break;
+					}
 				}
 				'\'' if !dub_quote => {
 					// Single quote handling
@@ -1294,11 +1296,6 @@ impl RshTokenizer {
 		}
 
 		wd.span = self.spans.pop_front().unwrap_or_default();
-		if !bracket_stack.is_empty() || !paren_stack.is_empty() {
-			let delim_kind = if !bracket_stack.is_empty() { "bracket" } else { "parenthesis" };
-			return Err(ShError::from_syntax(format!("Missing a closing {} here",delim_kind).as_str(), wd.span))
-		}
-		dbg!(&wd.text);
 		Ok(wd)
 	}
 }
