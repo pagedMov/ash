@@ -170,7 +170,10 @@ impl Node {
 	pub fn get_argv(&self) -> RshResult<Vec<Tk>> {
 		let mut arg_vec = vec![];
 		match &self.nd_type {
-			NdType::Command { argv } | NdType::Builtin { argv } | NdType::Subshell { body: _, argv } => {
+			NdType::Command { argv } |
+			NdType::Function { body: _, argv } |
+			NdType::Builtin { argv } |
+			NdType::Subshell { body: _, argv } => {
 				for arg in argv {
 					arg_vec.push(arg.clone());
 				}

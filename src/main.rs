@@ -161,7 +161,7 @@ fn main_noninteractive(args: Vec<String>) -> RshResult<RshWait> {
 				if deconstruct!(NdType::Root { deck }, &parse_state.ast.nd_type, {
 					deck.is_empty()
 				}) { break Ok(RshWait::Success) }
-				let result = traverse_ast(parse_state.ast);
+				let result = traverse_ast(parse_state.ast, None);
 				match result {
 					Ok(code) => {
 						if let RshWait::Fail { code, cmd } = code {

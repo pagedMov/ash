@@ -150,9 +150,9 @@ impl ChildProc {
     };
 		let mut child = Self { pgid: pid, pid, command, status };
 		if let Some(pgid) = pgid {
-			child.setpgid(pgid).ok();
+			child.setpgid(pgid);
 		} else {
-			child.setpgid(pid).ok();
+			child.setpgid(pid);
 		}
 		Ok(child)
 	}
@@ -175,9 +175,9 @@ impl ChildProc {
 		}
 		result
 	}
-	pub fn setpgid(&mut self, pgid: Pid) -> RshResult<()> {
+	pub fn setpgid(&mut self, pgid: Pid) {
 		self.pgid = pgid;
-		setpgid(self.pid, pgid).map_err(|_| ShError::from_io())
+		setpgid(self.pid, pgid);
 	}
 	pub fn set_status(&mut self, status: WaitStatus) {
 		self.status = status;
@@ -1091,9 +1091,11 @@ pub fn attach_tty(pgid: Pid) -> RshResult<()> {
 	}
 
 	// Attempt to set the process group for the terminal
-	unsafe {
-		tcsetpgrp(BorrowedFd::borrow_raw(0), pgid)
-			.map_err(|e| ShError::from_internal(format!("Failed to attach tty to pgid {}: {}", pgid, e).as_str()))
+	// TODO: If this fails, it fails silently. Consider finding a more robust way to do this.
+	let result = unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), pgid) };
+	match result {
+		Ok(_) => Ok(()),
+		Err(_) => unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), Pid::this()).unwrap(); Ok(()) }
 	}
 }
 
@@ -1201,7 +1203,7 @@ pub fn source_file(path: PathBuf) -> RshResult<()> {
 	file.read_to_string(&mut buffer).map_err(|_| ShError::from_io())?;
 	write_meta(|meta| meta.set_last_input(&buffer.clone()))?;
 
-	event::execute(&buffer, NdFlags::empty(), None)
+	event::execute(&buffer, NdFlags::empty(), None, None)
 }
 
 #[cfg(test)]

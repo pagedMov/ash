@@ -528,6 +528,7 @@ impl RshTokenizer {
 		let mut single_quote = false;
 		let mut paren_stack = vec![];
 		let mut bracket_stack = vec![];
+		let mut brace_stack = vec![];
 		let mut chars = input.chars().peekable();
 
 		while let Some(ch) = chars.next() {
@@ -549,7 +550,7 @@ impl RshTokenizer {
 					single_quote = !single_quote;
 					current_word.push(ch);
 				}
-				'(' if !single_quote && !double_quote && bracket_stack.is_empty() => {
+				'(' if !single_quote && !double_quote && brace_stack.is_empty() && bracket_stack.is_empty() => {
 					// Open parenthesis
 					paren_stack.push(ch);
 					current_word.push(ch);
@@ -559,7 +560,17 @@ impl RshTokenizer {
 					paren_stack.pop();
 					current_word.push(ch);
 				}
-				'[' if !single_quote && !double_quote && paren_stack.is_empty() => {
+				'{' if !single_quote && !double_quote && paren_stack.is_empty() && bracket_stack.is_empty() => {
+					// Open bracket
+					brace_stack.push(ch);
+					current_word.push(ch);
+				}
+				'}' if !single_quote && !double_quote && !brace_stack.is_empty() => {
+					// Close bracket
+					brace_stack.pop();
+					current_word.push(ch);
+				}
+				'[' if !single_quote && !double_quote && paren_stack.is_empty() && brace_stack.is_empty() => {
 					// Open bracket
 					bracket_stack.push(ch);
 					current_word.push(ch);
@@ -569,7 +580,7 @@ impl RshTokenizer {
 					bracket_stack.pop();
 					current_word.push(ch);
 				}
-				' ' | '\t' if !double_quote && !single_quote && paren_stack.is_empty() && bracket_stack.is_empty() => {
+				' ' | '\t' if !double_quote && !single_quote && paren_stack.is_empty() && bracket_stack.is_empty() && brace_stack.is_empty() => {
 					// End of word (outside quotes, parentheses, and brackets)
 					current_word.push(ch);
 					if !current_word.is_empty() {
@@ -577,7 +588,7 @@ impl RshTokenizer {
 						current_word = String::new();
 					}
 				}
-				'\n' | ';' if !double_quote && !single_quote && paren_stack.is_empty() && bracket_stack.is_empty() => {
+				'\n' | ';' if !double_quote && !single_quote && paren_stack.is_empty() && bracket_stack.is_empty() && brace_stack.is_empty() => {
 					// End of word and standalone separator (outside quotes, parentheses, and brackets)
 					if !current_word.is_empty() {
 						current_word.push(ch);
@@ -674,9 +685,11 @@ impl RshTokenizer {
 			let mut new_input = String::new();
 
 			for mut word in words {
-				let not_sng_quote = !word.starts_with('\'') && !word.ends_with('\'');
-				let not_brace_grp = !word.starts_with('{') && !word.ends_with('}');
-				if helper::has_valid_delims(&word, "$(", ")") && (not_sng_quote || not_brace_grp) {
+				let not_sng_quote = !(word.starts_with('\'') || word.ends_with('\''));
+				let not_brace_grp = !(word.starts_with('{') || word.ends_with('}'));
+
+				// Ensure expansion only runs when the word is not enclosed in single quotes or braces
+				if helper::has_valid_delims(&word, "$(", ")") && not_sng_quote && not_brace_grp {
 					if let Some((left, middle, right)) = word.split_twice("$(", ")") {
 						let dummy_tk = Tk {
 							tk_type: TkType::CommandSub,

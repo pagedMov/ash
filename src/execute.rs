@@ -381,11 +381,12 @@ impl Default for ProcIO {
 	}
 }
 
-pub fn traverse_ast(ast: Node) -> RshResult<RshWait> {
+pub fn traverse_ast(ast: Node, io: Option<ProcIO>) -> RshResult<RshWait> {
 	let saved_in = RustFd::from_stdin()?;
 	let saved_out = RustFd::from_stdout()?;
 	let saved_err = RustFd::from_stderr()?;
-	let status = traverse(ast, ProcIO::new())?;
+	let io = if let Some(proc_io) = io { proc_io } else { ProcIO::new() };
+	let status = traverse(ast, io)?;
 	saved_in.dup2(&0)?;
 	saved_out.dup2(&1)?;
 	saved_err.dup2(&2)?;
@@ -847,7 +848,7 @@ fn handle_function(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 			write_vars(|v| v.set_param((index + 1).to_string(), param))?;
 		}
 
-		let result = event::execute(&func, node.flags, Some(node.redirs.clone()))?;
+		event::execute(&func, node.flags, Some(node.redirs.clone()), Some(io))?;
 
 		env_snapshot.restore_snapshot()?;
 		Ok(RshWait::Success)

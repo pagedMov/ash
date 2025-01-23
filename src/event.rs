@@ -3,7 +3,7 @@ use std::{collections::VecDeque, ffi::c_int, fmt::Display, io, panic::Location};
 
 use bitflags::Flags;
 
-use crate::{execute::{self, RshWait}, interp::{helper, parse::{descend, NdFlags, Node, Span}, token::RshTokenizer}, prompt, shellenv::{read_meta, write_meta, EnvFlags}, RshResult};
+use crate::{execute::{self, ProcIO, RshWait}, interp::{helper, parse::{descend, NdFlags, Node, Span}, token::RshTokenizer}, prompt, shellenv::{read_meta, write_meta, EnvFlags}, RshResult};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShError {
@@ -191,7 +191,7 @@ pub fn throw(err: ShError) -> RshResult<()> {
 	Ok(())
 }
 
-pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>) -> RshResult<()> {
+pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: Option<ProcIO>) -> RshResult<()> {
 	if !input.is_empty() {
 		let mut tokenizer = RshTokenizer::new(input);
 
@@ -208,7 +208,7 @@ pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>) -> R
 					let deck = helper::extract_deck_from_root(&state.ast)?;
 					if !deck.is_empty() {
 						// Send each deck immediately for execution
-						if let Err(e) = execute::traverse_ast(state.ast) {
+						if let Err(e) = execute::traverse_ast(state.ast, io.clone()) {
 							throw(e)?;
 						}
 					} else {
@@ -231,6 +231,6 @@ pub fn main_loop() -> RshResult<()> {
 	loop {
 		let input = prompt::run()?;
 		write_meta(|m| m.leave_prompt())?;
-		execute(&input, NdFlags::empty(), None)?;
+		execute(&input, NdFlags::empty(), None, None)?;
 	}
 }
