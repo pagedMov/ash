@@ -373,38 +373,38 @@ pub enum TkState {
 	Ident, // Generic words used for var and arr declarations
 	Arg, // Command arguments; only appear after commands
 	Command, // Starting point for the tokenizer
-	FuncDef, // defining a function like() { this }
-FuncBody, // The stuff { inside braces }
-Array, // Used in for loops and select statements
-If, // If statement opener
-For, // For loop opener
-Loop, // While/Until opener
-Case, // Case opener
-Select, // Select opener
-In, // Used in for, case, and select statements
-CaseBlock, // this)kind of thing;;
-CaseIn, // 'In' context used for case statements, signaling the tokenizer to look for stuff 'like)this;;esac'
-CasePat, // the left side of this)kind of thing
-CaseBody, // the right side of this)kind of thing
-Elif, // Secondary if/then blocks
-Else, // Else statements
-Do, // Select, for, and while/until condition/body separator
-Then, // If statement condition/body separator
-Done, // Select, for, and while/until closer
-Fi, // If statement closer
-Esac, // Case statement closer
-Subshell, // Subshells, look (like this)
-SQuote, // 'Single quoted strings'
-DQuote, // "Double quoted strings"
-Escaped, // Used to denote an escaped character like \a
-Redirect, // >, <, <<, <<<, 1>&2, 2>, etc.
-Comment, // #Comments like this
-Whitespace, // Space or tabs
-CommandSub, // $(Command substitution)
-Operator, // operators
-Separator, // Semicolon or newline to end an invocation
-DeadEnd, // Used for closing keywords like 'fi' and 'done' that demand a separator immediately after
-Invalid // Used when an unexpected state is discovered
+	FuncDef, // Function names
+	FuncBody, // Function bodies
+	Array, // Used in for loops and select statements
+	If, // If statement opener
+	For, // For loop opener
+	Loop, // While/Until opener
+	Case, // Case opener
+	Select, // Select opener
+	In, // Used in for, case, and select statements
+	CaseBlock, // this)kind of thing;;
+	CaseIn, // 'In' context used for case statements, signaling the tokenizer to look for stuff 'like)this;;esac'
+	CasePat, // the left side of this)kind of thing
+	CaseBody, // the right side of this)kind of thing
+	Elif, // Secondary if/then blocks
+	Else, // Else statements
+	Do, // Select, for, and while/until condition/body separator
+	Then, // If statement condition/body separator
+	Done, // Select, for, and while/until closer
+	Fi, // If statement closer
+	Esac, // Case statement closer
+	Subshell, // Subshells, look (like this)
+	SQuote, // 'Single quoted strings'
+	DQuote, // "Double quoted strings"
+	Escaped, // Used to denote an escaped character like \a
+	Redirect, // >, <, <<, <<<, 1>&2, 2>, etc.
+	Comment, // #Comments like this
+	Whitespace, // Space or tabs
+	CommandSub, // $(Command substitution)
+	Operator, // operators
+	Separator, // Semicolon or newline to end an invocation
+	DeadEnd, // Used for closing keywords like 'fi' and 'done' that demand a separator immediately after
+	Invalid // Used when an unexpected state is discovered
 }
 
 impl TkState {
@@ -1191,7 +1191,10 @@ impl RshTokenizer {
 				}
 				')' if !paren_stack.is_empty() => {
 					paren_stack.pop();
-					wd = wd.add_char(ch)
+					wd = wd.add_char(ch);
+					// Now we check for words in a command context that look like `this()`
+					// If it does, it's a function definition, so break here
+					if *self.ctx() == TkState::Command && wd.text.ends_with("()") { break }
 				}
 				'\'' if !dub_quote => {
 					// Single quote handling
