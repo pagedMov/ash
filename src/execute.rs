@@ -702,6 +702,7 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 		"pushd" => builtin::pushd(node)?,
 		"popd" => builtin::popd(node)?,
 		"int" => builtin::int(node)?,
+		"read_func" => builtin::read_func(node, io)?,
 		"bool" => builtin::bool(node)?,
 		"float" => builtin::float(node)?,
 		"arr" => builtin::array(node)?,

@@ -359,11 +359,11 @@ pub enum RedirType {
 	Output,
 	Append,
 	Input,
-	Heredoc,
 	Herestring
 }
 
-
+// Contexts for the state machine
+// Some of these aren't used
 #[derive(Eq,Debug,Hash,PartialEq)]
 pub enum TkState {
 	Root, // Outer contex, allows for anything and everything. Closed by the EOI token
@@ -598,7 +598,7 @@ impl RshTokenizer {
 		words
 	}
 
-	// Push the last word
+	// First pass over input: expand aliases
 	fn alias_pass(&mut self) -> RshResult<()> {
 		let aliases = read_logic(|m| m.borrow_aliases().clone())?;
 		let mut replaced = true;
@@ -636,6 +636,7 @@ impl RshTokenizer {
 
 		Ok(())
 	}
+	// Second pass over input: expand variables
 	fn var_pass(&mut self) -> RshResult<()> {
 		let vartable = read_vars(|v| v.clone())?;
 		let mut replaced = true;
@@ -663,6 +664,7 @@ impl RshTokenizer {
 
 		Ok(())
 	}
+	// Third pass over input: expand command subs
 	fn cmd_sub_pass(&mut self) -> RshResult<()> {
 		let mut replaced = true;
 

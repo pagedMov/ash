@@ -22,8 +22,8 @@ use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_log
 use crate::event::ShError;
 use crate::{deconstruct, node_operation, RshResult};
 
-pub const BUILTINS: [&str; 32] = [
-	"pushd", "popd", "type", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "wait",
+pub const BUILTINS: [&str; 33] = [
+	"pushd", "popd", "type", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
 ];
 
 bitflags! {
@@ -141,6 +141,23 @@ pub fn r#type(node: Node) -> RshResult<RshWait> {
 		}
 	}
 	Ok(RshWait::Success)
+}
+
+pub fn read_func(node: Node, io: ProcIO) -> RshResult<RshWait> {
+	let span = node.span();
+	let functions = read_logic(|l| l.borrow_functions().clone())?;
+	let mut argv = deconstruct!(NdType::Builtin { argv }, node.nd_type, { argv });
+	argv.pop_front(); // Ignore 'read_func'
+
+	while let Some(arg) = argv.pop_front() {
+		let text = arg.text();
+		if let Some(func) = functions.get(text) {
+			println!("{}",func);
+		} else {
+			return Err(ShError::from_execf(format!("Failed to find function: `{}`",text).as_str(), 1, span))
+		}
+	}
+	Ok(RshWait::new())
 }
 
 pub fn int(node: Node) -> RshResult<RshWait> {

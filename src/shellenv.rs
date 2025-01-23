@@ -7,7 +7,7 @@ use once_cell::sync::Lazy;
 use std::{fs::File, sync::RwLock};
 
 
-use crate::{event::ShError, execute::{self, RshWait}, interp::{helper, parse::{descend, parse, Node, ParseState, Span}, token::RshTokenizer}, RshResult};
+use crate::{event::{self, ShError}, execute::{self, RshWait}, interp::{helper, parse::{descend, parse, NdFlags, Node, ParseState, Span}, token::RshTokenizer}, RshResult};
 
 #[derive(Debug)]
 pub struct DisplayWaitStatus(pub WaitStatus);
@@ -937,6 +937,9 @@ impl LogicTable {
 	pub fn get_func(&self, name: &str) -> Option<String> {
 		self.functions.get(name).cloned()
 	}
+	pub fn borrow_functions(&self) -> &HashMap<String,String> {
+		&self.functions
+	}
 	pub fn remove_func(&mut self, name: &str) {
 		self.functions.remove(name);
 	}
@@ -1198,21 +1201,7 @@ pub fn source_file(path: PathBuf) -> RshResult<()> {
 	file.read_to_string(&mut buffer).map_err(|_| ShError::from_io())?;
 	write_meta(|meta| meta.set_last_input(&buffer.clone()))?;
 
-	let mut tokenizer = RshTokenizer::new(&buffer);
-	loop {
-		let state = descend(&mut tokenizer)?;
-		if state.tokens.is_empty() { break }
-		let result = execute::traverse_ast(state.ast)?;
-		if let RshWait::Fail { code, cmd } = result {
-			if code == 127 {
-				if let Some(cmd) = cmd {
-					eprintln!("Command not found: {}",cmd);
-					break
-				}
-			}
-		}
-	}
-	Ok(())
+	event::execute(&buffer, NdFlags::empty(), None)
 }
 
 #[cfg(test)]
