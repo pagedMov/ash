@@ -815,7 +815,9 @@ fn compute_span(tokens: &VecDeque<Tk>) -> Span {
 
 fn parse_and_attach(mut tokens: VecDeque<Tk>, mut root: VecDeque<Node>) -> RshResult<VecDeque<Node>> {
 	let mut sub_ctx = DescentContext::new(take(&mut tokens));
-	sub_ctx = parse_linear(sub_ctx,true)?;
+	while !sub_ctx.tokens.is_empty() {
+		sub_ctx = parse_linear(sub_ctx,true)?;
+	}
 	while let Some(node) = sub_ctx.root.pop_back() {
 		root.push_front(node);
 	}
@@ -857,6 +859,8 @@ pub fn build_redirection(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				.ok_or_else(|| ShError::from_parse("Did not find an output for this redirection operator", span))?;
 
 				if !matches!(target.class(), TkType::Ident | TkType::String) {
+					dbg!(&redir);
+					dbg!(&target);
 					return Err(ShError::from_parse(format!("Expected identifier after redirection operator, found this: {}",target.text()).as_str(), span))
 				}
 
@@ -1266,6 +1270,7 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 				}
 			}
 			_ if phase == Phase::Body && ctx.front_tk().is_some_and(|f_tk| f_tk.tk_type == TkType::CasePat) => {
+				block_tokens.push_back(tk);
 				let block_span = compute_span(&block_tokens);
 				block_root = parse_and_attach(take(&mut block_tokens), block_root)?;
 				let block_node = Node::from(take(&mut block_root), block_span);
@@ -1290,7 +1295,9 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 							block_root.push_back(node);
 						}
 					},
-					_ => block_tokens.push_back(tk),
+					_ => {
+						block_tokens.push_back(tk);
+					}
 				}
 			}
 			_ => {
@@ -1483,12 +1490,12 @@ pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
 
 	let cmd = ctx.front_tk().unwrap().clone();
 	let func_body = read_logic(|l| l.get_func(cmd.text()))?;
-	let cmd_type = if builtin::BUILTINS.contains(&cmd.text()) {
-		CmdType::Builtin
+	let cmd_type = if func_body.is_some() {
+		CmdType::Function
 	} else if cmd.tk_type == TkType::Subshell {
 		CmdType::Subshell
-	} else if func_body.is_some() {
-		CmdType::Function
+	} else if builtin::BUILTINS.contains(&cmd.text()) {
+		CmdType::Builtin
 	} else {
 		CmdType::Command
 	};

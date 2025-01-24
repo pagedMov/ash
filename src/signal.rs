@@ -1,6 +1,6 @@
 use nix::{sys::{signal::{killpg, signal, SigHandler, Signal} , wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{getpgid, Pid}};
 
-use crate::{event::ShError, shellenv::{self, read_jobs, write_jobs, JobCmdFlags, JobID, RSH_PGRP}, RshResult};
+use crate::{event::ShError, interp::helper, shellenv::{self, read_jobs, write_jobs, JobCmdFlags, JobID, RSH_PGRP}, RshResult};
 
 
 pub fn sig_handler_setup() {
@@ -76,12 +76,15 @@ pub extern "C" fn handle_sigchld(_: libc::c_int) {
 	}
 }
 
+//TODO: extract some of this logic from the closure to spend less time holding a write lock
 pub fn handle_child_signal(pid: Pid, sig: Signal) -> RshResult<()> {
 	let pgid = getpgid(Some(pid)).unwrap_or(pid);
 	write_jobs(|j| {
 		if let Some(job) = j.query_mut(JobID::Pgid(pgid)) {
 			let child = job.get_children_mut().iter_mut().find(|chld| pid == chld.pid()).unwrap();
-			child.set_status(WaitStatus::Signaled(pid, sig, false));
+			let status = WaitStatus::Signaled(pid, sig, false);
+			helper::set_last_status(&status).unwrap();
+			child.set_status(status);
 		}
 	})?;
 	if matches!(sig,Signal::SIGINT) {
@@ -95,7 +98,9 @@ pub fn handle_child_stop(pid: Pid, signal: Signal) -> RshResult<()> {
 	write_jobs(|j| {
 		if let Some(job) = j.query_mut(JobID::Pgid(pgid)) {
 			let child = job.get_children_mut().iter_mut().find(|chld| pid == chld.pid()).unwrap();
-			child.set_status(WaitStatus::Stopped(pid, signal));
+			let status = WaitStatus::Stopped(pid, signal);
+			helper::set_last_status(&status).unwrap();
+			child.set_status(status);
 		} else if j.get_fg_mut().is_some_and(|fg| fg.pgid() == pgid) {
 			j.fg_to_bg(WaitStatus::Stopped(pid, signal)).unwrap();
 		}
@@ -126,6 +131,7 @@ pub fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
 			let is_finished = !job.is_alive();
 
 			if let Some(child) = job.get_children_mut().iter_mut().find(|chld| pid == chld.pid()) {
+				helper::set_last_status(&status).unwrap();
 				child.set_status(status);
 			}
 

@@ -70,59 +70,45 @@ impl StrExtension for str {
 	/// If the string matches this pattern, it will return all three parts as a tuple
 	/// It also respects escaped characters
 	fn split_twice(&self, left: &str, right: &str) -> Option<(String, String, String)> {
-		let mut found_left = false;
-		let mut product = String::new();
 		let mut prefix = String::new();
-		let mut suffix = String::new();
+		let mut product = String::new();
+
+		// Search for the left delimiter
 		let mut chars = self.chars();
-		let mut buffer = String::new(); // Temporary buffer for matching delimiters
+		let mut buffer = String::new(); // Buffer for matching the left delimiter
 
 		while let Some(ch) = chars.next() {
-			match ch {
-				'\\' => {
-					// Skip escaped characters
-					if let Some(escaped) = chars.next() {
-						if found_left {
-							product.push(escaped);
-						} else {
-							prefix.push(escaped);
-						}
-					}
-				}
-				_ => {
-					if found_left {
-						product.push(ch);
-						buffer.push(ch);
+			buffer.push(ch);
+			if buffer.ends_with(left) {
+				// Found the left delimiter, move remaining chars to `product`
+				prefix.push_str(&buffer[..buffer.len() - left.len()]);
+				product = chars.collect();
+				break;
+			}
+			if buffer.len() > left.len() {
+				buffer.drain(..buffer.len() - left.len());
+			}
+		}
 
-						// Check if we've reached the right delimiter
-						if buffer.ends_with(right) {
-							product.truncate(product.len() - right.len());
-							suffix = chars.collect(); // Remaining characters form the suffix
-							return Some((prefix, product, suffix));
-						}
+		// If no left delimiter was found, return None
+		if product.is_empty() {
+			return None;
+		}
 
-						// Trim the buffer to the length of `right`
-						if buffer.len() > right.len() {
-							buffer.drain(..buffer.len() - right.len());
-						}
-					} else {
-						buffer.push(ch);
-						prefix.push(ch);
+		// Search for the right delimiter from the right
+		let mut buffer = String::new(); // Buffer for matching the right delimiter
+		let mut product_chars: Vec<char> = product.chars().collect();
 
-						// Check if we've reached the left delimiter
-						if buffer.ends_with(left) {
-							found_left = true;
-							product.clear();
-							buffer.clear();
-							prefix.truncate(prefix.len() - left.len()); // Remove the delimiter from prefix
-						}
-
-						// Trim the buffer to the length of `left`
-						if buffer.len() > left.len() {
-							buffer.drain(..buffer.len() - left.len());
-						}
-					}
-				}
+		while let Some(ch) = product_chars.pop() {
+			buffer.insert(0, ch); // Insert at the front (reverse order search)
+			if buffer.starts_with(right) {
+				// Found the right delimiter, split the product and suffix
+				let suffix = product_chars.split_off(product_chars.len() - buffer.len() + right.len());
+				product = product_chars.into_iter().collect(); // Remaining chars are the product
+				return Some((prefix, product, suffix.into_iter().collect()));
+			}
+			if buffer.len() > right.len() {
+				buffer.pop(); // Remove excess characters from the end
 			}
 		}
 
@@ -403,6 +389,20 @@ pub fn unset_var_conflicts(key: &str) -> RshResult<()> {
 		write_vars(|v| v.unset_evar(key))?;
 	}
 
+	Ok(())
+}
+
+pub fn set_last_status(status: &WaitStatus) -> RshResult<()> {
+	match status {
+		WaitStatus::Exited(pid, code) => {
+			write_vars(|v| v.set_param("?".into(), code.to_string()))?;
+		}
+		WaitStatus::Signaled(_, signal, _) | WaitStatus::Stopped(_,signal) => {
+			write_vars(|v| v.set_param("?".into(), (*signal as i32).to_string()))?;
+		}
+		WaitStatus::Continued(_) | WaitStatus::StillAlive => { /* Do nothing */ }
+		_ => unimplemented!()
+	}
 	Ok(())
 }
 

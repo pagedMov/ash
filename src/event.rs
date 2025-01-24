@@ -103,9 +103,7 @@ pub struct ShErrorWindow {
 
 impl ShErrorWindow {
 	pub fn new(input: &str, span: Span) -> Self {
-		assert!(span.start <= input.len(), "span.start is out of bounds");
-		assert!(span.end <= input.len(), "span.end is out of bounds");
-		let delta = span.end - span.start;
+		let delta = span.end.saturating_sub(span.start);
 		let mut chars = input.chars();
 		let mut lines = input.lines();
 

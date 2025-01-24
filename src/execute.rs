@@ -4,7 +4,7 @@ use libc::{memfd_create, MFD_CLOEXEC};
 use nix::{errno::Errno, fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
 use std::sync::Mutex;
 
-use crate::{builtin::{self, CdFlags}, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, RshTokenizer, Tk, TkType, WdFlags}}, shellenv::{self, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, RshResult};
+use crate::{builtin::{self, CdFlags}, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, RshTokenizer, Tk, TkType, WdFlags}}, shellenv::{self, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, RshResult};
 
 #[macro_export]
 macro_rules! node_operation {
@@ -585,16 +585,17 @@ fn handle_loop(node: Node, io: ProcIO) -> RshResult<RshWait> {
 		let cond = *logic.condition;
 		let body = *logic.body;
 		loop {
-			let condition_status = traverse_root(cond.clone(), Some(condition),cond_io.clone())?;
+			traverse_root(cond.clone(), Some(condition),cond_io.clone())?;
+			let is_success = read_vars(|v| v.get_param("?").is_some_and(|val| val == "0"))?;
 
 			match condition {
 				true => {
-					if !matches!(condition_status,RshWait::Success) {
+					if !is_success {
 						break
 					}
 				}
 				false => {
-					if matches!(condition_status,RshWait::Success) {
+					if is_success {
 						break
 					}
 				}
@@ -619,15 +620,7 @@ fn handle_if(node: Node, io: ProcIO) -> RshResult<RshWait> {
 			let body = *block.body;
 
 			traverse(cond, cond_io.clone())?;
-			let statuses = write_jobs(|j| {
-				if let Some(job) = j.get_fg_mut() {
-					job.wait_pgrp().unwrap()
-				} else {
-					vec![]
-				}
-			})?;
-
-			let is_success = statuses.iter().all(|stat| matches!(stat, WaitStatus::Exited(_, 0)));
+			let is_success = read_vars(|v| v.get_param("?").is_some_and(|val| val == "0"))?;
 			if is_success {
 				traverse(body, body_io.clone())?;
 				return Ok(last_status)
@@ -722,6 +715,15 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 				argv.pop_front();
 				node.nd_type = NdType::Builtin { argv };
 				handle_builtin(node, io)?
+			} else {
+				unreachable!()
+			}
+		}
+		"command" => {
+			if let NdType::Builtin { mut argv } = node.nd_type {
+				argv.pop_front();
+				node.nd_type = NdType::Command { argv };
+				handle_command(node, io)?
 			} else {
 				unreachable!()
 			}
@@ -842,7 +844,6 @@ fn handle_function(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 			pos_params.push(tk.text().to_string());
 		}
 
-		let env_snapshot = SavedEnv::get_snapshot()?;
 		write_vars(|v| v.reset_params())?;
 		write_meta(|m| m.mod_flags(|f| *f &= !EnvFlags::INTERACTIVE))?;
 		for (index,param) in pos_params.into_iter().enumerate() {
@@ -851,7 +852,6 @@ fn handle_function(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 
 		event::execute(&func, node.flags, Some(node.redirs.clone()), Some(io))?;
 
-		env_snapshot.restore_snapshot()?;
 		Ok(RshWait::Success)
 	} else { unreachable!() }
 }
@@ -1118,12 +1118,23 @@ fn handle_autocd(node: Node, argv: Vec<Tk>,flags: WdFlags,io: ProcIO) -> RshResu
 	let cd_token = Tk::new("cd".into(), node.span(), flags);
 	let mut autocd_argv = VecDeque::from(argv);
 	autocd_argv.push_front(cd_token.clone());
-	let autocd = Node {
-		command: Some(cd_token),
-		nd_type: NdType::Builtin { argv: autocd_argv },
-		span: node.span(),
-		flags: node.flags,
-		redirs: node.redirs
+	let autocd = if let Some(body) = read_logic(|l| l.get_func("cd"))? {
+		// Let's also handle the rare case of 'cd' being wrapped in a function
+		Node {
+			command: Some(cd_token),
+			nd_type: NdType::Function { body, argv: autocd_argv },
+			span: node.span(),
+			flags: node.flags,
+			redirs: node.redirs
+		}
+	} else {
+		Node {
+			command: Some(cd_token),
+			nd_type: NdType::Builtin { argv: autocd_argv },
+			span: node.span(),
+			flags: node.flags,
+			redirs: node.redirs
+		}
 	};
 	traverse(autocd,io)
 }

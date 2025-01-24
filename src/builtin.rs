@@ -22,8 +22,8 @@ use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_log
 use crate::event::ShError;
 use crate::{deconstruct, node_operation, RshResult};
 
-pub const BUILTINS: [&str; 33] = [
-	"pushd", "popd", "type", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
+pub const BUILTINS: [&str; 34] = [
+	"command", "pushd", "popd", "type", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
 ];
 
 bitflags! {

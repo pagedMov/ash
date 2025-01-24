@@ -372,6 +372,10 @@ impl Job {
 				}
 			}
 		}
+
+		if let Some(status) = statuses.last() {
+			helper::set_last_status(status)?
+		}
 		Ok(statuses)
 	}
 	pub fn display(&self, job_order: &[usize], flags: JobCmdFlags) -> String {
@@ -867,6 +871,7 @@ impl VarTable {
 	}
 
 	pub fn set_var(&mut self, key: &str, val: RVal) {
+		dbg!(&val);
 		self.vars.insert(key.to_string(),val);
 	}
 	pub fn unset_var(&mut self, key: &str) {
