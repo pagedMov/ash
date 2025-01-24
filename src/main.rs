@@ -30,12 +30,12 @@ pub mod builtin;
 pub mod comp;
 pub mod signal;
 
-use std::{env, os::fd::AsRawFd, path::PathBuf};
+use std::{env, fs::OpenOptions, os::fd::AsRawFd, path::PathBuf};
 
 use event::ShError;
 use execute::{traverse_ast, OxideWait, RustFd};
 use interp::{parse::{descend, NdType}, token::OxideTokenizer};
-use nix::{fcntl::OFlag, sys::{stat::Mode, termios::{self, LocalFlags}}, unistd::isatty};
+use nix::{fcntl::OFlag, sys::{stat::Mode, termios::{self, LocalFlags}}, unistd::{Pid,isatty}};
 use shellenv::{read_vars, write_meta, write_vars, EnvFlags, RSH_PATH, RSH_PGRP};
 use termios::Termios;
 
@@ -52,6 +52,35 @@ fn set_termios() -> Option<Termios> {
 	} else {
 		None
 	}
+}
+
+fn set_panic_hook() {
+	use std::io::Write;
+	std::panic::set_hook(Box::new(|info| {
+		let crash_log_path = "crash.log"; // Replace with your desired path
+
+		let mut file = match OpenOptions::new()
+			.create(true)
+			.append(true)
+			.open(crash_log_path)
+			{
+				Ok(file) => file,
+				Err(e) => {
+					eprintln!("Failed to open crash log file: {}", e);
+					return;
+				}
+			};
+
+		let panic_message = info.payload();
+
+		let location = info.location()
+			.map(|loc| format!(" at {}:{}:{}", loc.file(), loc.line(), loc.column()))
+			.unwrap_or_else(|| " at unknown location".to_string());
+
+			if let Err(e) = writeln!(file, "Panic occurred: {}{}", panic_message.downcast_ref::<String>().unwrap(), location) {
+				eprintln!("Failed to write to crash log: {}", e);
+			}
+	}));
 }
 
 fn restore_termios(orig: &Option<Termios>) {
@@ -73,6 +102,7 @@ fn initialize_proc_constants() {
 #[tokio::main]
 async fn main() {
 	env_logger::init();
+	set_panic_hook();
 	initialize_proc_constants();
 	let mut interactive = true;
 	let mut args = env::args().collect::<Vec<String>>();
@@ -83,14 +113,16 @@ async fn main() {
 	if args[0].starts_with('-') {
 		// TODO: handle unwrap
 		let home = read_vars(|vars| vars.get_evar("HOME")).unwrap().unwrap();
-		let path = PathBuf::from(format!("{}/.rsh_profile",home));
-		shellenv::source_file(path).unwrap();
+		let path = PathBuf::from(format!("{}/.oxide_profile",home));
+		if path.exists() {
+			shellenv::source_file(path).unwrap();
+		}
 	}
 	if !args.contains(&"--no-rc".into()) && !args.contains(&"--subshell".into()) {
 		let home = read_vars(|vars| vars.get_evar("HOME")).unwrap().unwrap();
 		let path = PathBuf::from(format!("{}/.oxiderc",home));
-		if let Err(e) = shellenv::source_file(path) {
-			eprintln!("Failed to source rc file: {:?}",e);
+		if path.exists() {
+			shellenv::source_file(path).unwrap();
 		}
 	}
 	if args.iter().any(|arg| arg == "--subshell") {
@@ -141,7 +173,7 @@ fn main_noninteractive(args: Vec<String>) -> OxideResult<OxideWait> {
 			}
 			Err(e) => {
 				eprintln!("Error opening file: {}\n", e);
-					return Ok(OxideWait::Fail { code: 1, cmd: None, });
+				return Ok(OxideWait::Fail { code: 1, cmd: None, });
 			}
 		}
 	}

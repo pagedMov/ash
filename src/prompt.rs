@@ -81,7 +81,6 @@ fn load_history(rl: &mut Editor<OxideHelper, DefaultHistory>) -> OxideResult<()>
 
 pub fn run() -> OxideResult<String> {
 	write_meta(|m| m.enter_prompt())?;
-	shellenv::attach_tty(*RSH_PGRP)?;
 
 	let mut rl = init_prompt()?;
 	let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE"))?.unwrap_or_else(|| -> String {

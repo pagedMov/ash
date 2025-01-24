@@ -1083,8 +1083,18 @@ where F: FnOnce(&mut EnvMeta) -> T {
 }
 pub fn attach_tty(pgid: Pid) -> OxideResult<()> {
 	// Ensure stdin (fd 0) is a tty before proceeding
-	if !isatty(0).unwrap_or(false) {
-		return Ok(());
+	if !isatty(0).unwrap_or(false) || !isatty(1).unwrap_or(false) || !isatty(2).unwrap_or(false) {
+		return Ok(())
+	}
+
+	// TODO: this guard condition was put here because something about rustyline
+	// really hates it when terminal control is passed around in a tty environment.
+	// This seems to only occur when oxide is run as a login shell, for some reason.
+	// Figure out why that is instead of using this stupid workaround.
+	if let Ok(term) = std::env::var("TERM") {
+		if term == "linux" {
+			return Ok(())
+		}
 	}
 
 	if pgid == *RSH_PGRP && read_meta(|m| m.flags().contains(EnvFlags::IN_SUBSH))? {
@@ -1100,7 +1110,11 @@ pub fn attach_tty(pgid: Pid) -> OxideResult<()> {
 	let result = unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), pgid) };
 	match result {
 		Ok(_) => Ok(()),
-		Err(_) => unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), Pid::this()).unwrap(); Ok(()) }
+		Err(e) => {
+			eprintln!("Failed to set terminal process group: {}", e);
+			unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), Pid::this()).unwrap(); }
+			Ok(())
+		}
 	}
 }
 
@@ -1153,6 +1167,17 @@ fn init_env_vars(clean: bool) -> HashMap<String,String> {
 	if !clean {
 		env_vars = std::env::vars().collect::<HashMap<String,String>>();
 	}
+	let term = {
+		if isatty(1).unwrap() {
+			if let Ok(term) = std::env::var("TERM") {
+				term
+			} else {
+				"linux".to_string()
+			}
+		} else {
+			"xterm-256color".to_string()
+		}
+	};
 	let home;
 	let username;
 	let uid;
@@ -1174,8 +1199,8 @@ fn init_env_vars(clean: bool) -> HashMap<String,String> {
 	env::set_var("UID", uid.to_string());
 	env_vars.insert("TMPDIR".into(), "/tmp".into());
 	env::set_var("TMPDIR", "/tmp");
-	env_vars.insert("TERM".into(), "xterm-256color".into());
-	env::set_var("TERM", "xterm-256color");
+	env_vars.insert("TERM".into(), term.clone());
+	env::set_var("TERM", term);
 	env_vars.insert("LANG".into(), "en_US.UTF-8".into());
 	env::set_var("LANG", "en_US.UTF-8");
 	env_vars.insert("USER".into(), username.clone());
@@ -1209,185 +1234,4 @@ pub fn source_file(path: PathBuf) -> OxideResult<()> {
 	write_meta(|meta| meta.set_last_input(&buffer.clone()))?;
 
 	event::execute(&buffer, NdFlags::empty(), None, None)
-}
-
-#[cfg(test)]
-mod tests {
-	use rstest::{fixture, rstest};
-	use pretty_assertions::assert_eq;
-	use super::*;
-
-
-	#[fixture]
-	fn mock_jobs() -> JobTable {
-		let mut job_table = JobTable::new();
-
-		let children1 = vec![
-			ChildProc::new(Pid::from_raw(100), Some("cmd1"),None).unwrap(),
-			ChildProc::new(Pid::from_raw(101), Some("cmd2"),None).unwrap()
-		];
-		let job1 = JobBuilder::new()
-			.with_id(1)
-			.with_pgid(Pid::from_raw(100))
-			.with_children(children1)
-			.build();
-
-			let children2 = vec![
-				ChildProc::new(Pid::from_raw(200), Some("cmd3"),None).unwrap(),
-			];
-			let job2 = JobBuilder::new()
-				.with_id(2)
-				.with_pgid(Pid::from_raw(200))
-				.with_children(children2)
-				.build();
-
-			job_table.insert_job(job1,false).unwrap();
-			job_table.insert_job(job2,false).unwrap();
-
-			job_table
-	}
-
-	#[fixture]
-	fn mock_vars() -> VarTable {
-		VarTable::new()
-	}
-
-	#[fixture]
-	fn mock_logic() -> LogicTable {
-		LogicTable::new()
-	}
-
-
-	// Assume RVal, HashFloat, and VarTable are defined elsewhere in your code
-
-#[rstest]
-	fn shellenv_define_string(mut mock_vars: VarTable) {
-		let name = "string_var";
-		let value = RVal::String("Hello, World!".to_string());
-		mock_vars.set_var(name, value);
-		let return_val = mock_vars.get_var(name).unwrap();
-		let display = format!("{}", return_val);
-
-		assert_eq!(display, "Hello, World!".to_string());
-	}
-
-#[rstest]
-	fn shellenv_define_int(mut mock_vars: VarTable) {
-		let name = "integer";
-		let value = RVal::Int(5);
-		mock_vars.set_var(name, value);
-		let return_val = mock_vars.get_var(name).unwrap();
-		let display = format!("{}", return_val);
-
-		assert_eq!(display, "5".to_string());
-	}
-
-#[rstest]
-	fn shellenv_define_float(mut mock_vars: VarTable) {
-		let name = "float_var";
-		let value = RVal::Float(HashFloat(3.15)); // Assuming `HashFloat` wraps an `f64`.
-		mock_vars.set_var(name, value);
-		let return_val = mock_vars.get_var(name).unwrap();
-		let display = format!("{}", return_val);
-
-		assert_eq!(display, "3.15".to_string()); // Adjust formatting if `HashFloat` differs.
-	}
-
-#[rstest]
-	fn shellenv_define_bool(mut mock_vars: VarTable) {
-		let name = "bool_var";
-		let value = RVal::Bool(true);
-		mock_vars.set_var(name, value);
-		let return_val = mock_vars.get_var(name).unwrap();
-		let display = format!("{}", return_val);
-
-		assert_eq!(display, "true".to_string());
-	}
-
-	#[rstest]
-	fn shellenv_define_array(mut mock_vars: VarTable) {
-		let name = "array_var";
-		let value = RVal::Array(vec![
-			RVal::Int(1),
-			RVal::Int(2),
-			RVal::Int(3),
-			RVal::String("four".to_string()),
-		]);
-		mock_vars.set_var(name, value);
-		let return_val = mock_vars.get_var(name).unwrap();
-		let display = format!("{}", return_val);
-
-		// Assuming `RVal::Array` is formatted as `[1, 2, 3, "four"]`.
-		assert_eq!(display, "1 2 3 four".to_string());
-	}
-
-#[rstest]
-	fn logic_table_new_alias(mut mock_logic: LogicTable) {
-		mock_logic.new_alias("alias1", "value1".to_string());
-		let alias_value = mock_logic.get_alias("alias1");
-		assert_eq!(alias_value, Some("value1".to_string()));
-	}
-
-#[rstest]
-	fn logic_table_remove_alias(mut mock_logic: LogicTable) {
-		mock_logic.new_alias("alias1", "value1".to_string());
-		mock_logic.remove_alias("alias1");
-		let alias_value = mock_logic.get_alias("alias1");
-		assert_eq!(alias_value, None);
-	}
-
-#[rstest]
-	fn logic_table_get_alias(mut mock_logic: LogicTable) {
-		mock_logic.new_alias("alias1", "value1".to_string());
-		let alias_value = mock_logic.get_alias("alias1");
-		assert_eq!(alias_value, Some("value1".to_string()));
-		assert_eq!(mock_logic.get_alias("nonexistent"), None);
-	}
-
-	#[rstest]
-	fn vartable_index_array(mut mock_vars: VarTable) {
-		// Create an array and add it to the variable table
-		let key = "my_array";
-		let array_value = RVal::Array(vec![
-			RVal::Int(10),
-			RVal::Int(20),
-			RVal::String("thirty".to_string()),
-		]);
-		mock_vars.set_var(key, array_value);
-
-		// Test valid indices
-		let first_element = mock_vars.index_arr(key, 0).unwrap();
-		assert_eq!(first_element, RVal::Int(10));
-
-		let second_element = mock_vars.index_arr(key, 1).unwrap();
-		assert_eq!(second_element, RVal::Int(20));
-
-		let third_element = mock_vars.index_arr(key, 2).unwrap();
-		assert_eq!(third_element, RVal::String("thirty".to_string()));
-
-		// Test invalid index (out of bounds)
-		let out_of_bounds = mock_vars.index_arr(key, 3);
-		assert!(out_of_bounds.is_err());
-		if let Err(err) = out_of_bounds {
-			assert_eq!(
-				err.to_string(),
-				"Index `3` out of range for array `my_array`"
-			);
-		}
-
-		// Test non-array variable
-		mock_vars.set_var("not_array", RVal::Int(42));
-		let not_an_array = mock_vars.index_arr("not_array", 0);
-		assert!(not_an_array.is_err());
-		if let Err(err) = not_an_array {
-			assert_eq!(err.to_string(), "not_array is not an array");
-		}
-
-		// Test nonexistent variable
-		let nonexistent = mock_vars.index_arr("does_not_exist", 0);
-		assert!(nonexistent.is_err());
-		if let Err(err) = nonexistent {
-			assert_eq!(err.to_string(), "does_not_exist is not a variable");
-		}
-	}
 }

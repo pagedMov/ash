@@ -1,9 +1,10 @@
-use std::{collections::VecDeque, ffi::c_int, fmt::Display, io, panic::Location};
+use std::{collections::VecDeque, ffi::c_int, fmt::Display, io, panic::Location, thread};
 
 
 use bitflags::Flags;
+use nix::unistd::{isatty, Pid};
 
-use crate::{execute::{self, ProcIO, OxideWait}, interp::{helper, parse::{descend, NdFlags, Node, Span}, token::OxideTokenizer}, prompt, shellenv::{read_meta, write_meta, EnvFlags}, OxideResult};
+use crate::{execute::{self, OxideWait, ProcIO}, interp::{helper, parse::{descend, NdFlags, Node, Span}, token::OxideTokenizer}, prompt, shellenv::{self, read_meta, read_vars, write_meta, EnvFlags}, OxideResult};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShError {
@@ -152,13 +153,13 @@ impl ShErrorFull {
 	pub fn from(err: ShError, input: &str) -> Self {
 		match &err {
 			ShError::CommandNotFound(_, span) |
-			ShError::InvalidSyntax(_, span) |
-			ShError::ParsingError(_, span) |
-			ShError::Generic(_, span) |
-			ShError::ExecFailed(_, _, span) => {
-				let window = Some(ShErrorWindow::new(input, *span));
-				Self { window, err }
-			}
+				ShError::InvalidSyntax(_, span) |
+				ShError::ParsingError(_, span) |
+				ShError::Generic(_, span) |
+				ShError::ExecFailed(_, _, span) => {
+					let window = Some(ShErrorWindow::new(input, *span));
+					Self { window, err }
+				}
 			ShError::IoError(_, _, _) => Self { window: None, err },
 			ShError::InternalError(_) => Self { window: None, err }
 		}
@@ -167,12 +168,12 @@ impl ShErrorFull {
 	pub fn get_err_msg(&self) -> String {
 		match &self.err {
 			ShError::CommandNotFound(msg, _) |
-			ShError::InvalidSyntax(msg, _) |
-			ShError::ParsingError(msg, _) |
-			ShError::ExecFailed(msg, _, _) |
-			ShError::IoError(msg, _, _) |
-			ShError::InternalError(msg) |
-			ShError::Generic(msg, _) => msg.to_string()
+				ShError::InvalidSyntax(msg, _) |
+				ShError::ParsingError(msg, _) |
+				ShError::ExecFailed(msg, _, _) |
+				ShError::IoError(msg, _, _) |
+				ShError::InternalError(msg) |
+				ShError::Generic(msg, _) => msg.to_string()
 		}
 	}
 
@@ -253,7 +254,21 @@ pub fn main_loop() -> OxideResult<()> {
 		eprintln!("I shouldnt be here");
 	}
 	loop {
-		let input = prompt::run()?;
+		let result = prompt::run();
+		if result.is_err() {
+			let controller = shellenv::term_controller();
+			let oxide_pid = Pid::this();
+			let stdout_isatty = isatty(1).unwrap();
+			let stdin_isatty = isatty(0).unwrap();
+			let term = read_vars(|v| v.get_evar("TERM")).unwrap();
+			dbg!(controller);
+			dbg!(oxide_pid);
+			dbg!(stdout_isatty);
+			dbg!(stdin_isatty);
+			dbg!(term);
+			thread::park();
+		}
+		let input = result.unwrap();
 		write_meta(|m| m.leave_prompt())?;
 		execute(&input, NdFlags::empty(), None, None)?;
 	}
