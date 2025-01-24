@@ -8,7 +8,7 @@ use crate::interp::parse::NdFlags;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
 use crate::interp::helper::{self,StrExtension};
 use crate::shellenv::{self, read_logic, read_vars, RVal, VarTable, RSH_PATH};
-use crate::OxideResult;
+use crate::OxResult;
 
 use super::parse::{NdType, Node, Span};
 use super::token::REGEX;
@@ -30,7 +30,7 @@ pub fn check_globs(tk: Tk) -> bool {
 	has_globs || has_brackets
 }
 
-pub fn expand_shebang(mut body: String) -> OxideResult<String> {
+pub fn expand_shebang(mut body: String) -> OxResult<String> {
 	// If no shebang, use the path to rsh
 	// and attach the '--subshell' argument to signal to the rsh subprocess that it is in a subshell context
 	if !body.starts_with("#!") {
@@ -70,7 +70,7 @@ pub fn expand_shebang(mut body: String) -> OxideResult<String> {
 	Ok(body)
 }
 
-pub fn expand_arguments(node: &mut Node) -> OxideResult<Vec<Tk>> {
+pub fn expand_arguments(node: &mut Node) -> OxResult<Vec<Tk>> {
 	let argv = node.get_argv()?;
 	let mut cmd_name = None;
 	let mut glob = true;
@@ -127,7 +127,7 @@ pub fn expand_time(fmt: &str) -> String {
 	right_here_right_now.format(fmt).to_string()
 }
 
-pub fn expand_prompt() -> OxideResult<String> {
+pub fn expand_prompt() -> OxResult<String> {
 	// Determine the default color based on the user ID
 	let default_color = if read_vars(|vars| vars.get_evar("UID").is_some_and(|uid| uid == "0"))? {
 		"31" // Red if uid is 0, aka root user
@@ -204,7 +204,7 @@ pub fn expand_prompt() -> OxideResult<String> {
 }
 
 
-pub fn expand_alias(alias: &str) -> OxideResult<String> {
+pub fn expand_alias(alias: &str) -> OxResult<String> {
 	if let Some(alias_content) = read_logic(|log| log.get_alias(alias))? {
 		Ok(alias_content)
 	} else {
@@ -219,7 +219,7 @@ pub fn check_home_expansion(text: &str) -> bool {
 	)
 }
 
-pub fn expand_token(token: Tk, expand_glob: bool) -> OxideResult<VecDeque<Tk>> {
+pub fn expand_token(token: Tk, expand_glob: bool) -> OxResult<VecDeque<Tk>> {
 	let mut working_buffer: VecDeque<Tk> = VecDeque::new();
 	let mut product_buffer: VecDeque<Tk> = VecDeque::new();
 	let split_words = token.tk_type != TkType::String;
@@ -339,7 +339,7 @@ pub fn clean_escape_chars(token_buffer: &mut VecDeque<Tk>) {
 	}
 }
 
-pub fn expand_cmd_sub(token: Tk) -> OxideResult<Tk> {
+pub fn expand_cmd_sub(token: Tk) -> OxResult<Tk> {
 	let new_token;
 	if let TkType::CommandSub = token.tk_type {
 		let body = token.text().to_string();
@@ -441,7 +441,7 @@ fn split_braces(word: &str) -> Option<(&str, &str, &str)> {
 	None
 }
 
-pub fn expand_braces(word: String) -> OxideResult<VecDeque<String>> {
+pub fn expand_braces(word: String) -> OxResult<VecDeque<String>> {
 	let mut result = VecDeque::new(); // Final results
 	let mut working_buffer = String::new(); // Reusable buffer
 	let mut product_stack = VecDeque::new(); // First pass results
@@ -545,7 +545,7 @@ pub fn expand_amble(amble: &str) -> Vec<String> {
 	result
 }
 
-pub fn expand_var(mut string: String, var_table: &VarTable) -> OxideResult<String> {
+pub fn expand_var(mut string: String, var_table: &VarTable) -> OxResult<String> {
 	loop {
 		let mut left = String::new();
 		let mut right = String::new();
@@ -618,7 +618,7 @@ pub fn expand_var(mut string: String, var_table: &VarTable) -> OxideResult<Strin
 	}
 }
 
-fn expand_params(token: Tk) -> OxideResult<VecDeque<Tk>> {
+fn expand_params(token: Tk) -> OxResult<VecDeque<Tk>> {
 	let mut expanded_tokens = VecDeque::new();
 	// Get the positional parameter string from shellenv and split it
 	let arg_string = read_vars(|vars| vars.get_param("@").unwrap_or_default())?;

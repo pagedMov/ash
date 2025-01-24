@@ -13,14 +13,14 @@ use nix::sys::stat::Mode;
 use nix::unistd::{access, fork, isatty, setpgid, AccessFlags, ForkResult, Pid};
 use regex::Regex;
 
-use crate::execute::{ProcIO, OxideWait, RustFd};
+use crate::execute::{ProcIO, OxWait, RustFd};
 use crate::interp::helper::{self, StrExtension, VecDequeExtension};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType, WdFlags};
 use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, HashFloat, JobBuilder, JobCmdFlags, JobID, RVal, RSH_PGRP};
 use crate::event::ShError;
-use crate::{deconstruct, node_operation, OxideResult};
+use crate::{deconstruct, node_operation, OxResult};
 
 pub const BUILTINS: [&str; 34] = [
 	"command", "pushd", "popd", "type", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
@@ -41,7 +41,7 @@ bitflags! {
 	}
 }
 
-fn open_file_descriptors(redirs: VecDeque<Node>) -> OxideResult<Vec<RustFd>> {
+fn open_file_descriptors(redirs: VecDeque<Node>) -> OxResult<Vec<RustFd>> {
 	let mut fd_stack: Vec<RustFd> = Vec::new();
 	let mut fd_dupes: Vec<(i32,i32)> = Vec::new();
 
@@ -104,7 +104,7 @@ pub fn catstr(mut c_strings: VecDeque<CString>,newline: bool) -> CString {
 	CString::from_vec_with_nul(cat).unwrap()
 }
 
-pub fn r#type(node: Node) -> OxideResult<OxideWait> {
+pub fn r#type(node: Node) -> OxResult<OxWait> {
 	let index_re = Regex::new(r"(\w+)\[(\d+)\]").unwrap();
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `int`
@@ -140,10 +140,10 @@ pub fn r#type(node: Node) -> OxideResult<OxideWait> {
 			}
 		}
 	}
-	Ok(OxideWait::Success)
+	Ok(OxWait::Success)
 }
 
-pub fn read_func(node: Node, io: ProcIO) -> OxideResult<OxideWait> {
+pub fn read_func(node: Node, io: ProcIO) -> OxResult<OxWait> {
 	let span = node.span();
 	let functions = read_logic(|l| l.borrow_functions().clone())?;
 	let mut argv = deconstruct!(NdType::Builtin { argv }, node.nd_type, { argv });
@@ -157,10 +157,10 @@ pub fn read_func(node: Node, io: ProcIO) -> OxideResult<OxideWait> {
 			return Err(ShError::from_execf(format!("Failed to find function: `{}`",text).as_str(), 1, span))
 		}
 	}
-	Ok(OxideWait::new())
+	Ok(OxWait::new())
 }
 
-pub fn int(node: Node) -> OxideResult<OxideWait> {
+pub fn int(node: Node) -> OxResult<OxWait> {
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `int`
 	while let Some(arg) = argv.pop_front() {
@@ -175,10 +175,10 @@ pub fn int(node: Node) -> OxideResult<OxideWait> {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
 		}
 	}
-	Ok(OxideWait::Success)
+	Ok(OxWait::Success)
 }
 
-pub fn string(node: Node) -> OxideResult<OxideWait> {
+pub fn string(node: Node) -> OxResult<OxWait> {
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `int`
 	while let Some(arg) = argv.pop_front() {
@@ -189,10 +189,10 @@ pub fn string(node: Node) -> OxideResult<OxideWait> {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
 		}
 	}
-	Ok(OxideWait::Success)
+	Ok(OxWait::Success)
 }
 
-pub fn bool(node: Node) -> OxideResult<OxideWait> {
+pub fn bool(node: Node) -> OxResult<OxWait> {
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `int`
 	while let Some(arg) = argv.pop_front() {
@@ -205,10 +205,10 @@ pub fn bool(node: Node) -> OxideResult<OxideWait> {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
 		}
 	}
-	Ok(OxideWait::Success)
+	Ok(OxWait::Success)
 }
 
-pub fn float(node: Node) -> OxideResult<OxideWait> {
+pub fn float(node: Node) -> OxResult<OxWait> {
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `int`
 	while let Some(arg) = argv.pop_front() {
@@ -221,10 +221,10 @@ pub fn float(node: Node) -> OxideResult<OxideWait> {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
 		}
 	}
-	Ok(OxideWait::Success)
+	Ok(OxWait::Success)
 }
 
-pub fn array(node: Node) -> OxideResult<OxideWait> {
+pub fn array(node: Node) -> OxResult<OxWait> {
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `int`
 	while let Some(arg) = argv.pop_front() {
@@ -237,7 +237,7 @@ pub fn array(node: Node) -> OxideResult<OxideWait> {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
 		}
 	}
-	Ok(OxideWait::Success)
+	Ok(OxWait::Success)
 }
 
 /// Performs a test on a single argument by transforming it and then applying a property check.
@@ -262,7 +262,7 @@ pub fn array(node: Node) -> OxideResult<OxideWait> {
 /// ```
 /// let mut args = VecDeque::new();
 /// args.push_back("42".to_string());
-/// let transform = |s: String| -> OxideResult<i32> { Ok(s.parse::<i32>().unwrap()) };
+/// let transform = |s: String| -> OxResult<i32> { Ok(s.parse::<i32>().unwrap()) };
 /// let property = |x: &i32| -> bool { *x > 0 };
 /// let result = do_test(&mut args, transform, property);
 /// assert!(result.unwrap());
@@ -272,9 +272,9 @@ fn do_test<T, F1, F2>(
 	transform: F1,
 	property: F2,
 	span: Span
-) -> OxideResult<bool>
+) -> OxResult<bool>
 where
-		F1: FnOnce(Tk) -> OxideResult<T>,
+		F1: FnOnce(Tk) -> OxResult<T>,
 		F2: FnOnce(&T) -> bool
 {
 	if let Some(st) = args.pop_front() {
@@ -312,7 +312,7 @@ where
 /// ```
 /// let mut args = VecDeque::new();
 /// args.push_back("42".to_string());
-/// let transform = |s: String| -> OxideResult<i32> { Ok(s.parse::<i32>().unwrap()) };
+/// let transform = |s: String| -> OxResult<i32> { Ok(s.parse::<i32>().unwrap()) };
 /// let comparison = |x: &i32, y: &i32| -> bool { x == y };
 /// let result = do_cmp("42".to_string(), &mut args, transform, comparison);
 /// assert!(result.unwrap());
@@ -322,9 +322,9 @@ fn do_cmp<T, F1, F2>(
 	args: &mut VecDeque<Tk>,
 	transform: F1,
 	comparison: F2
-) -> OxideResult<bool>
+) -> OxResult<bool>
 where
-		F1: Fn(Tk) -> OxideResult<T>,
+		F1: Fn(Tk) -> OxResult<T>,
 		F2: FnOnce(&T, &T) -> bool
 {
 	if let Some(st) = args.pop_front() {
@@ -364,9 +364,9 @@ fn do_logical_op(
 	command: Tk,
 	result1: bool,
 	operator: Tk
-) -> OxideResult<bool> {
+) -> OxResult<bool> {
 	args.push_front(command);
-	let result2 = test(std::mem::take(args)).map(|res| matches!(res,OxideWait::Success ))?;
+	let result2 = test(std::mem::take(args)).map(|res| matches!(res,OxWait::Success ))?;
 	match operator.text() {
 		"!" => { Ok(!result2) },
 		"-a" => { Ok(result1 && result2) },
@@ -386,7 +386,7 @@ fn do_logical_op(
 ///
 /// # Returns
 ///
-/// * `Ok(OxideWait)` - Returns a success or failure status based on the evaluation of the conditional expression.
+/// * `Ok(OxWait)` - Returns a success or failure status based on the evaluation of the conditional expression.
 /// * `Err(ShError)` - Returns an appropriate `ShError` if there is a syntax error or other issues with the arguments.
 ///
 /// # Examples
@@ -470,19 +470,19 @@ fn do_logical_op(
 /// # Panics
 ///
 /// This function does not panic.
-pub fn test(mut argv: VecDeque<Tk>) -> OxideResult<OxideWait> {
+pub fn test(mut argv: VecDeque<Tk>) -> OxResult<OxWait> {
 	let span = Span::from(argv.front().unwrap().span().start,argv.back().unwrap().span().end);
-	let is_false = || -> OxideResult<OxideWait> { Ok(OxideWait::Fail { code: 1, cmd: Some("test".into()), }) };
-	let is_true = || -> OxideResult<OxideWait> { Ok(OxideWait::Success ) };
+	let is_false = || -> OxResult<OxWait> { Ok(OxWait::Fail { code: 1, cmd: Some("test".into()), }) };
+	let is_true = || -> OxResult<OxWait> { Ok(OxWait::Success ) };
 	let is_int = |tk: &Tk| -> bool { tk.text().parse::<i32>().is_ok() };
-	let to_int = |tk: Tk| -> OxideResult<i32> {
+	let to_int = |tk: Tk| -> OxResult<i32> {
 		tk.text().parse::<i32>().map_err(|_| ShError::from_syntax("Expected an integer in test", tk.span()))
 	};
 	let is_path = |tk: &Tk| -> bool { PathBuf::from(tk.text()).exists() };
-	let to_meta = |tk: Tk| -> OxideResult<fs::Metadata> {
+	let to_meta = |tk: Tk| -> OxResult<fs::Metadata> {
 		fs::metadata(tk.text()).map_err(|_| ShError::from_syntax(&format!("Test: Path '{}' does not exist", tk.text()), tk.span()))
 	};
-	let string_noop = |tk: Tk| -> OxideResult<String> { Ok(tk.text().into()) };
+	let string_noop = |tk: Tk| -> OxResult<String> { Ok(tk.text().into()) };
 	let command = argv.pop_front().unwrap();
 	let is_bracket = match command.text() {
 		"[" => true,
@@ -776,7 +776,7 @@ fn float_to_string(value: f64) -> String {
 	}
 }
 
-pub fn expr(node: Node, io: ProcIO) -> OxideResult<OxideWait> {
+pub fn expr(node: Node, io: ProcIO) -> OxResult<OxWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front(); // Ignore `expr`
 
@@ -849,7 +849,7 @@ pub fn expr(node: Node, io: ProcIO) -> OxideResult<OxideWait> {
 }
 
 
-pub fn alias(node: Node) -> OxideResult<OxideWait> {
+pub fn alias(node: Node) -> OxResult<OxWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front();
 	while let Some(arg) = argv.pop_front() {
@@ -860,10 +860,10 @@ pub fn alias(node: Node) -> OxideResult<OxideWait> {
 		let value = value.trim_quotes();
 		write_logic(|l| l.new_alias(alias, value.to_string()))?;
 	}
-	Ok(OxideWait::Success )
+	Ok(OxWait::Success )
 }
 
-pub fn unalias(node: Node) -> OxideResult<OxideWait> {
+pub fn unalias(node: Node) -> OxResult<OxWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front();
 	while let Some(arg) = argv.pop_front() {
@@ -874,10 +874,10 @@ pub fn unalias(node: Node) -> OxideResult<OxideWait> {
 			eprintln!("Alias not found for `{}`",alias)
 		}
 	}
-	Ok(OxideWait::Success)
+	Ok(OxWait::Success)
 }
 
-pub fn cd(node: Node, flags: CdFlags) -> OxideResult<OxideWait> {
+pub fn cd(node: Node, flags: CdFlags) -> OxResult<OxWait> {
 	let mut argv = node
 		.get_argv()?
 		.iter()
@@ -909,10 +909,10 @@ pub fn cd(node: Node, flags: CdFlags) -> OxideResult<OxideWait> {
 		let path = Path::new(new_pwd.to_str().unwrap());
 		std::env::set_current_dir(path).map_err(|_| ShError::from_io())?;
 		write_vars(|v| v.export_var("PWD", std::env::current_dir().unwrap().to_str().unwrap()))?;
-		Ok(OxideWait::Success)
+		Ok(OxWait::Success)
 }
 
-pub fn cd_internal(path: String, span: Span, flags: CdFlags) -> OxideResult<OxideWait> {
+pub fn cd_internal(path: String, span: Span, flags: CdFlags) -> OxResult<OxWait> {
 	let mut tokens = vec![
 		Tk {
 			tk_type: TkType::Ident,
@@ -965,15 +965,15 @@ pub fn cd_internal(path: String, span: Span, flags: CdFlags) -> OxideResult<Oxid
 ///    - Handle any errors that may occur during this step.
 ///
 /// 5. Return the result:
-///    - If the job was successfully foregrounded, return `OxideWait::Success`.
-///    - If the job does not exist or cannot be foregrounded, return `OxideWait::Fail` with appropriate details.
+///    - If the job was successfully foregrounded, return `OxWait::Success`.
+///    - If the job does not exist or cannot be foregrounded, return `OxWait::Fail` with appropriate details.
 ///
 /// Key Considerations:
 /// - Ensure the `job_order` in the job table reflects the correct order of jobs for determining the "current job."
 /// - Handle cases where no jobs exist gracefully.
 /// - Carefully manage the interaction between the job table and the process group state.
 /// - Ensure terminal attachment and signal handling are robust to avoid leaving the shell in an inconsistent state.
-pub fn fg(node: Node) -> OxideResult<OxideWait> {
+pub fn fg(node: Node) -> OxResult<OxWait> {
 	let argv = node.get_argv()?;
 	let mut argv = VecDeque::from(argv);
 	argv.pop_front(); // Ignore 'fg'
@@ -1001,10 +1001,10 @@ pub fn fg(node: Node) -> OxideResult<OxideWait> {
 	})??;
 	job.killpg(Signal::SIGCONT).map_err(|_| ShError::from_io())?;
 	helper::handle_fg(job)?;
-	Ok(OxideWait::Success)
+	Ok(OxWait::Success)
 }
 
-pub fn bg(node: Node) -> OxideResult<OxideWait> {
+pub fn bg(node: Node) -> OxResult<OxWait> {
 	let argv = node.get_argv()?;
 	let mut argv = VecDeque::from(argv);
 	argv.pop_front(); // Ignore 'bg'
@@ -1035,10 +1035,10 @@ pub fn bg(node: Node) -> OxideResult<OxideWait> {
 
 	write_jobs(|j| j.insert_job(job,true))??;
 
-	Ok(OxideWait::Success)
+	Ok(OxWait::Success)
 }
 
-pub fn pushd(node: Node) -> OxideResult<OxideWait> {
+pub fn pushd(node: Node) -> OxResult<OxWait> {
 	let tk_to_str = |tk: Tk| -> String { tk.text().to_string() };
 	node_operation!(NdType::Builtin { mut argv }, node, {
 
@@ -1052,12 +1052,12 @@ pub fn pushd(node: Node) -> OxideResult<OxideWait> {
 		if let Some(path) = args.last() {
 			cd_internal(path.to_string(), node.span(), CdFlags::PUSH)
 		} else {
-			Ok(OxideWait::Fail { code: 1, cmd: Some("pushd".into()) })
+			Ok(OxWait::Fail { code: 1, cmd: Some("pushd".into()) })
 		}
 	})
 }
 
-pub fn popd(node: Node) -> OxideResult<OxideWait> {
+pub fn popd(node: Node) -> OxResult<OxWait> {
 	let argv = deconstruct!(NdType::Builtin { argv }, node.nd_type.clone(), {
 		argv
 	});
@@ -1069,14 +1069,14 @@ pub fn popd(node: Node) -> OxideResult<OxideWait> {
 		if let Some(string) = path.to_str() {
 			cd_internal(string.to_string(), node.span(), CdFlags::POP)
 		} else {
-			Ok(OxideWait::Fail { code: 1, cmd: Some("popd".into()) })
+			Ok(OxWait::Fail { code: 1, cmd: Some("popd".into()) })
 		}
 	} else {
-		Ok(OxideWait::Fail { code: 1, cmd: Some("popd".into()) })
+		Ok(OxWait::Fail { code: 1, cmd: Some("popd".into()) })
 	}
 }
 
-fn parse_job_id(arg: &str, span: Span) -> OxideResult<usize> {
+fn parse_job_id(arg: &str, span: Span) -> OxResult<usize> {
 	if arg.starts_with('%') {
 		let arg = arg.strip_prefix('%').unwrap();
 		if arg.chars().all(|ch| ch.is_ascii_digit()) {
@@ -1115,7 +1115,7 @@ fn parse_job_id(arg: &str, span: Span) -> OxideResult<usize> {
 	}
 }
 
-pub fn source(node: Node) -> OxideResult<OxideWait> {
+pub fn source(node: Node) -> OxResult<OxWait> {
 	let mut argv = node
 		.get_argv()?
 		.iter()
@@ -1126,7 +1126,7 @@ pub fn source(node: Node) -> OxideResult<OxideWait> {
 			let file_path = Path::new(OsStr::from_bytes(path.as_bytes()));
 			shellenv::source_file(file_path.to_path_buf()).unwrap()
 		}
-		Ok(OxideWait::Success )
+		Ok(OxWait::Success )
 }
 
 fn flags_from_chars(chars: &str) -> EnvFlags {
@@ -1159,7 +1159,7 @@ fn flags_from_chars(chars: &str) -> EnvFlags {
 	env_flags
 }
 
-pub fn set_or_unset(node: Node, set: bool) -> OxideResult<OxideWait> {
+pub fn set_or_unset(node: Node, set: bool) -> OxResult<OxWait> {
 	let span = node.span();
 	if let NdType::Builtin { mut argv } = node.nd_type {
 		argv.pop_front(); // Ignore 'set'
@@ -1174,22 +1174,22 @@ pub fn set_or_unset(node: Node, set: bool) -> OxideResult<OxideWait> {
 			true => write_meta(|m| m.mod_flags(|f| *f |= env_flags))?,
 			false => write_meta(|m| m.mod_flags(|f| *f &= !env_flags))?,
 		}
-		Ok(OxideWait::new())
+		Ok(OxWait::new())
 	} else { unreachable!() }
 }
 
-pub fn pwd(span: Span) -> OxideResult<OxideWait> {
+pub fn pwd(span: Span) -> OxResult<OxWait> {
 	if let Some(pwd) = read_vars(|v| v.get_evar("PWD"))? {
 		let stdout = RustFd::from_stdout()?;
 		stdout.write(pwd.as_bytes())?;
-		Ok(OxideWait::Success )
+		Ok(OxWait::Success )
 	} else {
 		Err(ShError::from_execf("PWD environment variable is unset", 1, span))
 	}
 }
 
-pub fn export(node: Node) -> OxideResult<OxideWait> {
-	let last_status = OxideWait::Success ;
+pub fn export(node: Node) -> OxResult<OxWait> {
+	let last_status = OxWait::Success ;
 	if let NdType::Builtin { mut argv } = node.nd_type {
 		argv.pop_front(); // Ignore "export"
 		while let Some(ass) = argv.pop_front() {
@@ -1203,7 +1203,7 @@ pub fn export(node: Node) -> OxideResult<OxideWait> {
 	} else { unreachable!() }
 }
 
-pub fn jobs(node: Node, mut io: ProcIO,) -> OxideResult<OxideWait> {
+pub fn jobs(node: Node, mut io: ProcIO,) -> OxResult<OxWait> {
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
 	argv.pop_front();
 	let mut flags = JobCmdFlags::empty();
@@ -1250,11 +1250,11 @@ pub fn jobs(node: Node, mut io: ProcIO,) -> OxideResult<OxideWait> {
 		}
 		Err(_) => return Err(ShError::from_internal("Failed to fork in print_jobs()"))
 	}
-	Ok(OxideWait::Success)
+	Ok(OxWait::Success)
 }
 
 /// Used to call echo internally by passing a vector of strings. Makes it very simple to re-use the I/O logic present in echo elsewhere in the codebase.
-pub fn echo_internal(argv: Vec<String>, io: ProcIO, span: Span, flags: NdFlags, redirs: VecDeque<Node>) -> OxideResult<OxideWait> {
+pub fn echo_internal(argv: Vec<String>, io: ProcIO, span: Span, flags: NdFlags, redirs: VecDeque<Node>) -> OxResult<OxWait> {
 	let mut tokens = vec![
 		Tk {
 			tk_type: TkType::Ident,
@@ -1288,7 +1288,7 @@ pub fn echo_internal(argv: Vec<String>, io: ProcIO, span: Span, flags: NdFlags, 
 	echo(echo_call, io)
 }
 
-pub fn echo(node: Node, mut io: ProcIO,) -> OxideResult<OxideWait> {
+pub fn echo(node: Node, mut io: ProcIO,) -> OxResult<OxWait> {
 	let mut flags = EchoFlags::empty();
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
 	argv.pop_front(); // Remove 'echo' from argv
@@ -1393,5 +1393,5 @@ pub fn echo(node: Node, mut io: ProcIO,) -> OxideResult<OxideWait> {
 	}
 
 	io.restore_fildescs()?;
-	Ok(OxideWait::Success)
+	Ok(OxWait::Success)
 }

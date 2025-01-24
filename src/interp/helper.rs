@@ -1,4 +1,4 @@
-use crate::{event::ShError, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, RVal, RSH_PGRP }, OxideResult};
+use crate::{event::ShError, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, RVal, RSH_PGRP }, OxResult};
 use nix::{sys::wait::WaitStatus, unistd::dup2, NixPath};
 use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread};
 
@@ -371,7 +371,7 @@ pub fn is_exec(path: &Path) -> bool {
 		.unwrap_or(false)
 }
 
-pub fn handle_autocd_check(node: &Node, argv: &[Tk]) -> OxideResult<bool> {
+pub fn handle_autocd_check(node: &Node, argv: &[Tk]) -> OxResult<bool> {
 	if read_meta(|m| m.get_shopt("autocd").is_some_and(|opt| opt > 0))? && argv.len() == 1 {
 		let path_cand = argv.first().unwrap();
 		let is_relative = path_cand.text().starts_with('.');
@@ -385,21 +385,21 @@ pub fn handle_autocd_check(node: &Node, argv: &[Tk]) -> OxideResult<bool> {
 	Ok(false)
 }
 
-pub fn overwrite_func(alias: &str) -> OxideResult<()> {
+pub fn overwrite_func(alias: &str) -> OxResult<()> {
 	if read_logic(|l| l.get_func(alias))?.is_some() {
 		write_logic(|l| l.remove_func(alias))?;
 	}
 	Ok(())
 }
 
-pub fn overwrite_alias(func: &str) -> OxideResult<()> {
+pub fn overwrite_alias(func: &str) -> OxResult<()> {
 	if read_logic(|l| l.get_alias(func))?.is_some() {
 		write_logic(|l| l.remove_alias(func))?;
 	}
 	Ok(())
 }
 
-pub fn unset_var_conflicts(key: &str) -> OxideResult<()> {
+pub fn unset_var_conflicts(key: &str) -> OxResult<()> {
 	if read_vars(|v| v.get_var(key))?.is_some() {
 		write_vars(|v| v.unset_var(key))?
 	}
@@ -411,7 +411,7 @@ pub fn unset_var_conflicts(key: &str) -> OxideResult<()> {
 	Ok(())
 }
 
-pub fn set_last_status(status: &WaitStatus) -> OxideResult<()> {
+pub fn set_last_status(status: &WaitStatus) -> OxResult<()> {
 	match status {
 		WaitStatus::Exited(pid, code) => {
 			write_vars(|v| v.set_param("?".into(), code.to_string()))?;
@@ -425,7 +425,7 @@ pub fn set_last_status(status: &WaitStatus) -> OxideResult<()> {
 	Ok(())
 }
 
-pub fn handle_fg(job: Job) -> OxideResult<()> {
+pub fn handle_fg(job: Job) -> OxResult<()> {
 	disable_reaping();
 	let statuses = write_jobs(|j| j.new_fg(job))??;
 	for status in statuses {
@@ -469,7 +469,7 @@ pub fn flatten_tree(left: Node, right: Node) -> VecDeque<Node> {
 }
 
 /// Handles octal escape sequences.
-pub fn escseq_octal_escape(chars: &mut VecDeque<char>, first_digit: char) -> OxideResult<char> {
+pub fn escseq_octal_escape(chars: &mut VecDeque<char>, first_digit: char) -> OxResult<char> {
 	let mut octal_digits = String::new();
 	octal_digits.push(first_digit); // Add the first digit
 
@@ -516,7 +516,7 @@ pub fn escseq_non_printing_sequence(chars: &mut VecDeque<char>, result: &mut Str
 }
 
 /// Handles the current working directory.
-pub fn escseq_working_directory() -> OxideResult<String> {
+pub fn escseq_working_directory() -> OxResult<String> {
 	let mut cwd = read_vars(|vars| vars.get_evar("PWD").map_or(String::new(), |pwd| pwd.to_string()))?;
 	let home = read_vars(|vars| vars.get_evar("HOME").map_or("".into(), |home| home))?;
 	if cwd.starts_with(&home) {
@@ -536,7 +536,7 @@ pub fn escseq_working_directory() -> OxideResult<String> {
 }
 
 /// Handles the basename of the current working directory.
-pub fn escseq_basename_working_directory() -> OxideResult<String> {
+pub fn escseq_basename_working_directory() -> OxResult<String> {
 	let cwd = PathBuf::from(read_vars(|vars| vars.get_evar("PWD").map_or("".to_string(), |pwd| pwd.to_string()))?);
 	let mut cwd = cwd.components().last().map(|comp| comp.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
 	let home = read_vars(|vars| vars.get_evar("HOME").map_or("".into(), |home| home))?;
@@ -547,13 +547,13 @@ pub fn escseq_basename_working_directory() -> OxideResult<String> {
 }
 
 /// Handles the full hostname.
-pub fn escseq_full_hostname() -> OxideResult<String> {
+pub fn escseq_full_hostname() -> OxResult<String> {
 	let hostname: String = read_vars(|vars| vars.get_evar("HOSTNAME").map_or("unknown host".into(), |host| host))?;
 	Ok(hostname)
 }
 
 /// Handles the short hostname.
-pub fn escseq_short_hostname() -> OxideResult<String> {
+pub fn escseq_short_hostname() -> OxResult<String> {
 	let hostname = read_vars(|vars| vars.get_evar("HOSTNAME").map_or("unknown host".into(), |host| host))?;
 	if let Some((hostname, _)) = hostname.split_once('.') {
 		Ok(hostname.to_string())
@@ -563,19 +563,19 @@ pub fn escseq_short_hostname() -> OxideResult<String> {
 }
 
 /// Handles the shell name.
-pub fn escseq_shell_name() -> OxideResult<String> {
+pub fn escseq_shell_name() -> OxResult<String> {
 	let sh_name = read_vars(|vars| vars.get_evar("SHELL").map_or("rsh".into(), |sh| sh))?;
 	Ok(sh_name)
 }
 
 /// Handles the username.
-pub fn escseq_username() -> OxideResult<String> {
+pub fn escseq_username() -> OxResult<String> {
 	let user = read_vars(|vars| vars.get_evar("USER").map_or("unknown".into(), |user| user))?;
 	Ok(user)
 }
 
 /// Handles the prompt symbol based on the user ID.
-pub fn escseq_prompt_symbol() -> OxideResult<char> {
+pub fn escseq_prompt_symbol() -> OxResult<char> {
 	let uid = read_vars(|vars| vars.get_evar("UID").map_or("0".into(), |uid| uid))?;
 	match uid.as_str() {
 		"0" => Ok('#'),
@@ -648,7 +648,7 @@ pub fn process_ansi_escapes(input: &str) -> String {
 	result
 }
 
-pub fn extract_deck_from_root(node: &Node) -> OxideResult<VecDeque<Node>> {
+pub fn extract_deck_from_root(node: &Node) -> OxResult<VecDeque<Node>> {
 	if let NdType::Root { deck } = &node.nd_type {
 		Ok(deck.clone())
 	} else {

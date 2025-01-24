@@ -11,7 +11,7 @@
         let
           overlays = [ (import rust-overlay) ];
           cargoNix = crate2nix.tools.${system}.appliedCargoNix {
-            name = "oxide";
+            name = "ox";
             src = ./.;
           };
           pkgs = import nixpkgs {

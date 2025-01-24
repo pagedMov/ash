@@ -120,7 +120,7 @@ dependencies = [
  "addr2line",
  "cfg-if",
  "libc",
- "miniz_oxide",
+ "miniz_ox",
  "object",
  "rustc-demangle",
  "windows-targets",
@@ -885,7 +885,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "miniz_oxide"
+name = "miniz_ox"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ffbe83022cedc1d264172192511ae958937694cd57ce297164951b8b3568394"
@@ -984,7 +984,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1261fe7e33c73b354eab43b1273a57c8f967d0391e80353e51f764ac02cf6775"
 
 [[package]]
-name = "oxide"
+name = "ox"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.6.0",

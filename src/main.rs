@@ -33,15 +33,15 @@ pub mod signal;
 use std::{env, fs::OpenOptions, os::fd::AsRawFd, path::PathBuf};
 
 use event::ShError;
-use execute::{traverse_ast, OxideWait, RustFd};
-use interp::{parse::{descend, NdType}, token::OxideTokenizer};
+use execute::{traverse_ast, OxWait, RustFd};
+use interp::{parse::{descend, NdType}, token::OxTokenizer};
 use nix::{fcntl::OFlag, sys::{stat::Mode, termios::{self, LocalFlags}}, unistd::{Pid,isatty}};
 use shellenv::{read_vars, write_meta, write_vars, EnvFlags, RSH_PATH, RSH_PGRP};
 use termios::Termios;
 
 //use crate::event::EventLoop;
 
-pub type OxideResult<T> = Result<T, ShError>;
+pub type OxResult<T> = Result<T, ShError>;
 
 fn set_termios() -> Option<Termios> {
 	if isatty(std::io::stdin().as_raw_fd()).unwrap() {
@@ -83,14 +83,14 @@ async fn main() {
 	if args[0].starts_with('-') {
 		// TODO: handle unwrap
 		let home = read_vars(|vars| vars.get_evar("HOME")).unwrap().unwrap();
-		let path = PathBuf::from(format!("{}/.oxide_profile",home));
+		let path = PathBuf::from(format!("{}/.ox_profile",home));
 		if path.exists() {
 			shellenv::source_file(path).unwrap();
 		}
 	}
 	if !args.contains(&"--no-rc".into()) && !args.contains(&"--subshell".into()) {
 		let home = read_vars(|vars| vars.get_evar("HOME")).unwrap().unwrap();
-		let path = PathBuf::from(format!("{}/.oxiderc",home));
+		let path = PathBuf::from(format!("{}/.oxrc",home));
 		if path.exists() {
 			shellenv::source_file(path).unwrap();
 		}
@@ -118,7 +118,7 @@ async fn main() {
 
 
 
-fn main_noninteractive(args: Vec<String>) -> OxideResult<OxideWait> {
+fn main_noninteractive(args: Vec<String>) -> OxResult<OxWait> {
 	let mut pos_params: Vec<String> = vec![];
 	let input;
 
@@ -126,7 +126,7 @@ fn main_noninteractive(args: Vec<String>) -> OxideResult<OxideWait> {
 	if args[1] == "-c" {
 		if args.len() < 3 {
 			eprintln!("Expected a command after '-c' flag");
-			return Ok(OxideWait::Fail { code: 1, cmd: None, });
+			return Ok(OxWait::Fail { code: 1, cmd: None, });
 		}
 		input = args[2].clone(); // Store the command string
 	} else {
@@ -143,7 +143,7 @@ fn main_noninteractive(args: Vec<String>) -> OxideResult<OxideWait> {
 			}
 			Err(e) => {
 				eprintln!("Error opening file: {}\n", e);
-				return Ok(OxideWait::Fail { code: 1, cmd: None, });
+				return Ok(OxWait::Fail { code: 1, cmd: None, });
 			}
 		}
 	}
@@ -154,19 +154,19 @@ fn main_noninteractive(args: Vec<String>) -> OxideResult<OxideWait> {
 		let key = format!("{}",index + 1);
 		write_vars(|v| v.set_param(key, param))?;
 	}
-	let mut tokenizer = OxideTokenizer::new(&input);
-	let mut last_result = OxideWait::new();
+	let mut tokenizer = OxTokenizer::new(&input);
+	let mut last_result = OxWait::new();
 	loop {
 		let state = descend(&mut tokenizer);
 		match state {
 			Ok(parse_state) => {
 				if deconstruct!(NdType::Root { deck }, &parse_state.ast.nd_type, {
 					deck.is_empty()
-				}) { break Ok(OxideWait::Success) }
+				}) { break Ok(OxWait::Success) }
 				let result = traverse_ast(parse_state.ast, None);
 				match result {
 					Ok(code) => {
-						if let OxideWait::Fail { code, cmd } = code {
+						if let OxWait::Fail { code, cmd } = code {
 							panic!()
 						} else {
 							last_result = code;

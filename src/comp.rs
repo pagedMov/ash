@@ -171,12 +171,12 @@ pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 
 
 #[derive(Hinter,Highlighter,Helper)]
-pub struct OxideHelper {
+pub struct OxHelper {
 	filename_comp: FilenameCompleter,
 	commands: Vec<String>, // List of built-in or cached commands
 }
 
-impl Validator for OxideHelper {
+impl Validator for OxHelper {
 	fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
 		// Get the current input from the context
 		let input = ctx.input();
@@ -196,7 +196,7 @@ impl Validator for OxideHelper {
 	}
 }
 
-impl OxideHelper {
+impl OxHelper {
 	pub fn new() -> Self {
 		// Prepopulate some built-in commands (could also load dynamically)
 		let commands = vec![
@@ -206,7 +206,7 @@ impl OxideHelper {
 			"exit".to_string(),
 		];
 
-		let mut helper = OxideHelper {
+		let mut helper = OxHelper {
 			filename_comp: FilenameCompleter::new(),
 			commands,
 		};
@@ -232,13 +232,13 @@ impl OxideHelper {
 	}
 }
 
-impl Default for OxideHelper {
+impl Default for OxHelper {
 	fn default() -> Self {
 		Self::new()
 	}
 }
 
-impl Completer for OxideHelper {
+impl Completer for OxHelper {
 	type Candidate = String;
 
 	fn complete(
@@ -255,7 +255,7 @@ impl Completer for OxideHelper {
 			//TODO: Handle these unwraps
 			let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE")).unwrap().unwrap_or_else(|| -> String {
 				let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
-				format!("{}/.oxide_hist",home)
+				format!("{}/.ox_hist",home)
 			});
 			let hist_path = PathBuf::from(hist_path);
 

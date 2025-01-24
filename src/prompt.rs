@@ -1,4 +1,4 @@
-use crate::{comp::OxideHelper, event::ShError, shellenv::{self, read_meta, read_vars, write_meta, RSH_PGRP}, OxideResult};
+use crate::{comp::OxHelper, event::ShError, shellenv::{self, read_meta, read_vars, write_meta, RSH_PGRP}, OxResult};
 use std::path::{Path, PathBuf};
 use nix::{sys::signal::{kill, Signal}, unistd::Pid};
 
@@ -8,14 +8,14 @@ use crate::interp::expand;
 
 
 
-fn init_prompt() -> OxideResult<Editor<OxideHelper, DefaultHistory>> {
+fn init_prompt() -> OxResult<Editor<OxHelper, DefaultHistory>> {
 	let config = build_editor_config()?;
 	let mut rl = initialize_editor(config)?;
 	load_history(&mut rl)?;
 	Ok(rl)
 }
 
-fn build_editor_config() -> OxideResult<Config> {
+fn build_editor_config() -> OxResult<Config> {
 	let mut config = Config::builder();
 
 	let max_size = read_shell_option("max_hist", 1000)?;
@@ -49,28 +49,28 @@ fn build_editor_config() -> OxideResult<Config> {
 		Ok(config.build())
 }
 
-fn read_shell_option(option: &str, default: usize) -> OxideResult<usize> {
+fn read_shell_option(option: &str, default: usize) -> OxResult<usize> {
 	read_meta(|m| m.get_shopt(option).unwrap_or(default))
 }
 
-fn read_shell_option_bool(option: &str) -> OxideResult<bool> {
+fn read_shell_option_bool(option: &str) -> OxResult<bool> {
 	read_meta(|m| m.get_shopt(option).is_some_and(|opt| opt > 0))
 }
 
-fn initialize_editor(config: Config) -> OxideResult<Editor<OxideHelper, DefaultHistory>> {
+fn initialize_editor(config: Config) -> OxResult<Editor<OxHelper, DefaultHistory>> {
 	let mut rl = Editor::with_config(config).unwrap_or_else(|e| {
 		eprintln!("Failed to initialize Rustyline editor: {}", e);
 		std::process::exit(1);
 	});
 	rl.set_completion_type(rustyline::CompletionType::List);
-	rl.set_helper(Some(OxideHelper::new()));
+	rl.set_helper(Some(OxHelper::new()));
 	Ok(rl)
 }
 
-fn load_history(rl: &mut Editor<OxideHelper, DefaultHistory>) -> OxideResult<()> {
+fn load_history(rl: &mut Editor<OxHelper, DefaultHistory>) -> OxResult<()> {
 	let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE"))?.unwrap_or_else(|| {
 		let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
-		format!("{}/.oxide_hist", home)
+		format!("{}/.ox_hist", home)
 	});
 	let hist_path = PathBuf::from(hist_path);
 	if let Err(e) = rl.load_history(&hist_path) {
@@ -79,13 +79,13 @@ fn load_history(rl: &mut Editor<OxideHelper, DefaultHistory>) -> OxideResult<()>
 	Ok(())
 }
 
-pub fn run() -> OxideResult<String> {
+pub fn run() -> OxResult<String> {
 	write_meta(|m| m.enter_prompt())?;
 
 	let mut rl = init_prompt()?;
 	let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE"))?.unwrap_or_else(|| -> String {
 		let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
-		format!("{}/.oxide_hist",home)
+		format!("{}/.ox_hist",home)
 	});
 	let prompt = expand::expand_prompt()?;
 
