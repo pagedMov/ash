@@ -1,12 +1,12 @@
 use crossterm::{
-	cursor::{MoveTo, RestorePosition, Show}, execute, style::Print, terminal::{disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen}
+	cursor::{self, MoveTo, RestorePosition, Show}, execute, style::Print, terminal::{disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen}
 };
 use once_cell::sync::Lazy;
 use rustyline::{completion::{Candidate, Completer, FilenameCompleter}, error::ReadlineError, history::{FileHistory, History}, validate::{ValidationContext, ValidationResult, Validator}, Context, Helper, Highlighter, Hinter, Validator};
-use skim::{prelude::{SkimItemReader, SkimOptionsBuilder}, Skim};
+use skim::{prelude::{Key, SkimItemReader, SkimOptionsBuilder}, Skim};
 use std::{collections::{HashMap, HashSet}, env, io::stdout, path::PathBuf};
 
-use crate::{event::ShError, interp::parse::Span, shellenv::read_vars};
+use crate::{event::ShError, interp::{helper, parse::Span}, shellenv::read_vars};
 
 static DELIM_PAIRS: Lazy<HashMap<String, Vec<String>>> = Lazy::new(|| {
 	let mut m = HashMap::new();
@@ -268,11 +268,19 @@ impl Completer for OxideHelper {
 			// Invoke fuzzyfinder if there are matches
 			if !completions.is_empty() && completions.len() > 1 {
 				if let Some(selected) = skim_comp(completions.clone()) {
-					return Ok((start, vec![selected]));
+					let result = helper::slice_completion(line, &selected);
+					let unfinished = line.split_whitespace().last().unwrap();
+					let result = format!("{}{}",unfinished,result);
+					return Ok((start, vec![result]));
 				}
 			}
 
-			return Ok((start, completions));
+			// Return completions, starting from the beginning of the word
+			if let Some(candidate) = completions.pop() {
+				let result = helper::slice_completion(line, &candidate);
+				completions.push(result);
+			}
+			return Ok((pos, completions))
 		}
 
 		// Command completion
@@ -287,72 +295,70 @@ impl Completer for OxideHelper {
 		// Invoke fuzzyfinder if there are matches
 		if completions.len() > 1 {
 			if let Some(selected) = skim_comp(completions.clone()) {
-				return Ok((0, vec![selected]));
+				let result = helper::slice_completion(line, &selected);
+				return Ok((pos, vec![result]));
 			}
 		}
-
+		if let Some(candidate) = completions.pop() {
+			let result = helper::slice_completion(line, &candidate);
+			completions.push(result);
+		}
 		// Return completions, starting from the beginning of the word
-		Ok((0, completions))
+		Ok((pos, completions))
 	}
 }
 
 pub fn skim_comp(options: Vec<String>) -> Option<String> {
 	let mut stdout = stdout();
-
-	// Enter the alternate screen
-	execute!(stdout, EnterAlternateScreen).unwrap();
 	enable_raw_mode().unwrap();
 
-	// Get terminal dimensions
-	let (cols, rows) = size().unwrap();
-	let width = cols.min(50); // Set floating window width
-	let height = rows.min(10); // Set floating window height
-	let start_col = 0;
-	let start_row = (rows - height) / 2;
+	// Get the current cursor position
+	let (prompt_col, prompt_row) = cursor::position().unwrap();
 
-	// Draw the floating window border
-	execute!(
-		stdout,
-		MoveTo(start_col, start_row),
-		Print("┌".to_string() + &"─".repeat(width as usize - 2) + "┐")
-	)
+	// Get terminal dimensions
+	let height = options.len().min(10) as u16; // Set maximum number of options to display
+
+	// Prepare options for skim
+	let options_join = options.join("\n");
+	let input = SkimItemReader::default().of_bufread(std::io::Cursor::new(options_join));
+
+	let skim_options = SkimOptionsBuilder::default()
+		.prompt("Select > ".to_string())
+		.height(format!("{height}")) // Adjust height based on the options
+		.multi(false)
+		.build()
 		.unwrap();
 
-		for i in 1..height - 1 {
-			execute!(
-				stdout,
-				MoveTo(start_col, start_row + i),
-				Print("│".to_string() + &" ".repeat(width as usize - 2) + "│")
-			)
-				.unwrap();
-				}
+				// Run skim and detect if Escape was pressed
+				let selected = Skim::run_with(&skim_options, Some(input))
+					.and_then(|out| {
+						if out.final_key == Key::ESC {
+							None // Return None if Escape is pressed
+						} else {
+							out.selected_items.first().cloned()
+						}
+					})
+				.map(|item| item.output().to_string());
 
-		execute!(
-			stdout,
-			MoveTo(start_col, start_row + height - 1),
-			Print("└".to_string() + &"─".repeat(width as usize - 2) + "┘")
-		)
-			.unwrap();
+				// Clear the rendered options after selection or cancellation
+				for i in 0..height {
+					execute!(
+						stdout,
+						MoveTo(0, prompt_row + 1 + i), // Clear each rendered line
+						Clear(ClearType::CurrentLine)
+					)
+						.unwrap();
+						}
 
-		// Prepare options for skim
-		let options_join = options.join("\n");
-		let input = SkimItemReader::default().of_bufread(std::io::Cursor::new(options_join));
+				// Restore cursor position to where the prompt was
+				execute!(
+					stdout,
+					MoveTo(prompt_col, prompt_row), // Restore original cursor position
+					Clear(ClearType::FromCursorDown) // Clear anything below the prompt
+				)
+					.unwrap();
 
-		let skim_options = SkimOptionsBuilder::default()
-			.prompt("Select > ".to_string())
-			.height("25%".to_string()) // Height in lines relative to floating window
-			.multi(false)
-			.build()
-			.unwrap();
+				disable_raw_mode().unwrap();
 
-		// Run skim within the alternate screen
-		let selected = Skim::run_with(&skim_options, Some(input))
-			.and_then(|out| out.selected_items.first().cloned())
-			.map(|item| item.output().to_string());
-
-		// Leave the alternate screen and restore original content
-		execute!(stdout, Clear(ClearType::All), RestorePosition, LeaveAlternateScreen, Show).unwrap();
-		disable_raw_mode().unwrap();
-
-		selected
+				selected
 }

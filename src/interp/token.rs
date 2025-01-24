@@ -828,10 +828,14 @@ impl OxideTokenizer {
 					self.char_stream.push_front(dollar);
 				}
 				'|' | '&' if matches!(*self.ctx(),Command | Arg) => {
+					if *self.ctx() == Arg {
+						self.pop_ctx();
+					}
 					let op = self.advance().unwrap();
 					match op {
 						'|' => {
 							if self.char_stream.front().is_some_and(|ch| *ch == '|') {
+								self.advance();
 								self.tokens.push(Tk::or(&wd, wd.span.end))
 							} else {
 								self.tokens.push(Tk::pipe(&wd, wd.span.end))
@@ -839,6 +843,7 @@ impl OxideTokenizer {
 						}
 						'&' => {
 							if self.char_stream.front().is_some_and(|ch| *ch == '&') {
+								self.advance();
 								self.tokens.push(Tk::and(&wd, wd.span.end))
 							} else {
 								self.tokens.push(Tk::bg(&wd, wd.span.end))
@@ -846,6 +851,7 @@ impl OxideTokenizer {
 						}
 						_ => unreachable!()
 					}
+					continue
 				}
 				' ' | '\t' => {
 					self.advance();

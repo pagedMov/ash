@@ -1,6 +1,6 @@
 use crate::{event::ShError, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, RVal, RSH_PGRP }, OxideResult};
-use nix::{sys::wait::WaitStatus, unistd::dup2};
-use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}};
+use nix::{sys::wait::WaitStatus, unistd::dup2, NixPath};
+use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread};
 
 use super::{parse::{NdType, Node, Span}, token::{Tk, TkType, WdFlags, WordDesc}};
 
@@ -283,6 +283,25 @@ pub fn suppress_err<F: FnOnce() -> T, T>(f: F) -> T {
 	let result = f();
 	dup2(stderr_fd,stderr_fd).unwrap();
 	result
+}
+
+pub fn slice_completion(line: &str, candidate: &str) -> String {
+	let mut buffer = String::new();
+	let mut chars = candidate.chars();
+	let mut found = false;
+	while let Some(ch) = chars.next() {
+		buffer.push(ch);
+		if line.ends_with(&buffer) {
+			found = true;
+			break
+		}
+	}
+	let result = chars.collect::<String>();
+	if result.is_empty() && !found {
+		buffer
+	} else {
+		result
+	}
 }
 
 pub fn combine_tokens(tokens: &mut VecDeque<Tk>) {

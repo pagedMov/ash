@@ -54,35 +54,6 @@ fn set_termios() -> Option<Termios> {
 	}
 }
 
-fn set_panic_hook() {
-	use std::io::Write;
-	std::panic::set_hook(Box::new(|info| {
-		let crash_log_path = "crash.log"; // Replace with your desired path
-
-		let mut file = match OpenOptions::new()
-			.create(true)
-			.append(true)
-			.open(crash_log_path)
-			{
-				Ok(file) => file,
-				Err(e) => {
-					eprintln!("Failed to open crash log file: {}", e);
-					return;
-				}
-			};
-
-		let panic_message = info.payload();
-
-		let location = info.location()
-			.map(|loc| format!(" at {}:{}:{}", loc.file(), loc.line(), loc.column()))
-			.unwrap_or_else(|| " at unknown location".to_string());
-
-			if let Err(e) = writeln!(file, "Panic occurred: {}{}", panic_message.downcast_ref::<String>().unwrap(), location) {
-				eprintln!("Failed to write to crash log: {}", e);
-			}
-	}));
-}
-
 fn restore_termios(orig: &Option<Termios>) {
 	if let Some(termios) = orig {
 		let fd = std::io::stdin();
@@ -102,7 +73,6 @@ fn initialize_proc_constants() {
 #[tokio::main]
 async fn main() {
 	env_logger::init();
-	set_panic_hook();
 	initialize_proc_constants();
 	let mut interactive = true;
 	let mut args = env::args().collect::<Vec<String>>();

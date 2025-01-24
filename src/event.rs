@@ -254,21 +254,7 @@ pub fn main_loop() -> OxideResult<()> {
 		eprintln!("I shouldnt be here");
 	}
 	loop {
-		let result = prompt::run();
-		if result.is_err() {
-			let controller = shellenv::term_controller();
-			let oxide_pid = Pid::this();
-			let stdout_isatty = isatty(1).unwrap();
-			let stdin_isatty = isatty(0).unwrap();
-			let term = read_vars(|v| v.get_evar("TERM")).unwrap();
-			dbg!(controller);
-			dbg!(oxide_pid);
-			dbg!(stdout_isatty);
-			dbg!(stdin_isatty);
-			dbg!(term);
-			thread::park();
-		}
-		let input = result.unwrap();
+		let input = prompt::run()?;
 		write_meta(|m| m.leave_prompt())?;
 		execute(&input, NdFlags::empty(), None, None)?;
 	}
