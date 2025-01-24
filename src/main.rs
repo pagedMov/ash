@@ -33,15 +33,15 @@ pub mod signal;
 use std::{env, os::fd::AsRawFd, path::PathBuf};
 
 use event::ShError;
-use execute::{traverse_ast, RshWait, RustFd};
-use interp::{parse::{descend, NdType}, token::RshTokenizer};
+use execute::{traverse_ast, OxideWait, RustFd};
+use interp::{parse::{descend, NdType}, token::OxideTokenizer};
 use nix::{fcntl::OFlag, sys::{stat::Mode, termios::{self, LocalFlags}}, unistd::isatty};
 use shellenv::{read_vars, write_meta, write_vars, EnvFlags, RSH_PATH, RSH_PGRP};
 use termios::Termios;
 
 //use crate::event::EventLoop;
 
-pub type RshResult<T> = Result<T, ShError>;
+pub type OxideResult<T> = Result<T, ShError>;
 
 fn set_termios() -> Option<Termios> {
 	if isatty(std::io::stdin().as_raw_fd()).unwrap() {
@@ -88,7 +88,7 @@ async fn main() {
 	}
 	if !args.contains(&"--no-rc".into()) && !args.contains(&"--subshell".into()) {
 		let home = read_vars(|vars| vars.get_evar("HOME")).unwrap().unwrap();
-		let path = PathBuf::from(format!("{}/.rshrc",home));
+		let path = PathBuf::from(format!("{}/.oxiderc",home));
 		if let Err(e) = shellenv::source_file(path) {
 			eprintln!("Failed to source rc file: {:?}",e);
 		}
@@ -116,7 +116,7 @@ async fn main() {
 
 
 
-fn main_noninteractive(args: Vec<String>) -> RshResult<RshWait> {
+fn main_noninteractive(args: Vec<String>) -> OxideResult<OxideWait> {
 	let mut pos_params: Vec<String> = vec![];
 	let input;
 
@@ -124,7 +124,7 @@ fn main_noninteractive(args: Vec<String>) -> RshResult<RshWait> {
 	if args[1] == "-c" {
 		if args.len() < 3 {
 			eprintln!("Expected a command after '-c' flag");
-			return Ok(RshWait::Fail { code: 1, cmd: None, });
+			return Ok(OxideWait::Fail { code: 1, cmd: None, });
 		}
 		input = args[2].clone(); // Store the command string
 	} else {
@@ -141,7 +141,7 @@ fn main_noninteractive(args: Vec<String>) -> RshResult<RshWait> {
 			}
 			Err(e) => {
 				eprintln!("Error opening file: {}\n", e);
-					return Ok(RshWait::Fail { code: 1, cmd: None, });
+					return Ok(OxideWait::Fail { code: 1, cmd: None, });
 			}
 		}
 	}
@@ -152,19 +152,19 @@ fn main_noninteractive(args: Vec<String>) -> RshResult<RshWait> {
 		let key = format!("{}",index + 1);
 		write_vars(|v| v.set_param(key, param))?;
 	}
-	let mut tokenizer = RshTokenizer::new(&input);
-	let mut last_result = RshWait::new();
+	let mut tokenizer = OxideTokenizer::new(&input);
+	let mut last_result = OxideWait::new();
 	loop {
 		let state = descend(&mut tokenizer);
 		match state {
 			Ok(parse_state) => {
 				if deconstruct!(NdType::Root { deck }, &parse_state.ast.nd_type, {
 					deck.is_empty()
-				}) { break Ok(RshWait::Success) }
+				}) { break Ok(OxideWait::Success) }
 				let result = traverse_ast(parse_state.ast, None);
 				match result {
 					Ok(code) => {
-						if let RshWait::Fail { code, cmd } = code {
+						if let OxideWait::Fail { code, cmd } = code {
 							panic!()
 						} else {
 							last_result = code;

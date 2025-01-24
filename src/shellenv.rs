@@ -7,7 +7,7 @@ use once_cell::sync::Lazy;
 use std::{fs::File, sync::RwLock};
 
 
-use crate::{event::{self, ShError}, execute::{self, RshWait}, interp::{helper, parse::{descend, parse, NdFlags, Node, ParseState, Span}, token::RshTokenizer}, RshResult};
+use crate::{event::{self, ShError}, execute::{self, OxideWait}, interp::{helper, parse::{descend, parse, NdFlags, Node, ParseState, Span}, token::OxideTokenizer}, OxideResult};
 
 #[derive(Debug)]
 pub struct DisplayWaitStatus(pub WaitStatus);
@@ -141,7 +141,7 @@ pub struct ChildProc {
 }
 
 impl ChildProc {
-	pub fn new(pid: Pid, command: Option<&str>, pgid: Option<Pid>) -> RshResult<Self> {
+	pub fn new(pid: Pid, command: Option<&str>, pgid: Option<Pid>) -> OxideResult<Self> {
 		let command = command.map(|str| str.to_string());
     let status = if kill(pid, None).is_ok() {
         WaitStatus::StillAlive // The process is still running
@@ -182,7 +182,7 @@ impl ChildProc {
 	pub fn set_status(&mut self, status: WaitStatus) {
 		self.status = status;
 	}
-	pub fn kill(&self, signal: Signal) -> RshResult<()> {
+	pub fn kill(&self, signal: Signal) -> OxideResult<()> {
 		kill(self.pid, Some(signal))
 			.map_err(|_| ShError::from_io())
 	}
@@ -278,7 +278,7 @@ impl Job {
 	pub fn get_pids(&self) -> Vec<Pid> {
 		self.children.iter().map(|chld| chld.pid()).collect::<Vec<Pid>>()
 	}
-	pub fn update_by_id(&mut self, id: JobID, status: WaitStatus) -> RshResult<()> {
+	pub fn update_by_id(&mut self, id: JobID, status: WaitStatus) -> OxideResult<()> {
 		match id {
     JobID::Pid(pid) => {
 			let query_result = self.children.iter_mut().find(|chld| chld.pid() == pid);
@@ -311,7 +311,7 @@ impl Job {
 }
 		Ok(())
 	}
-	pub fn poll_children(&mut self) -> RshResult<()> {
+	pub fn poll_children(&mut self) -> OxideResult<()> {
 		for child in self.children.iter_mut() {
 			let pid = child.pid();
 			match waitpid(pid, Some(WaitPidFlag::WNOHANG | WaitPidFlag::WUNTRACED | WaitPidFlag::WCONTINUED)) {
@@ -341,10 +341,10 @@ impl Job {
 	pub fn new_child(&mut self, child: ChildProc) {
 		self.children.push(child);
 	}
-	pub fn to_fg(&self) -> RshResult<()> {
+	pub fn to_fg(&self) -> OxideResult<()> {
 		attach_tty(self.pgid)
 	}
-	pub fn killpg(&mut self, signal: Signal) -> RshResult<()> {
+	pub fn killpg(&mut self, signal: Signal) -> OxideResult<()> {
 		let status = match signal {
 			Signal::SIGTSTP => WaitStatus::Stopped(self.pgid, Signal::SIGTSTP),
 			Signal::SIGCONT => WaitStatus::Continued(self.pgid),
@@ -354,7 +354,7 @@ impl Job {
 		killpg(self.pgid, Some(signal)).map_err(|_| ShError::from_io())?;
 		Ok(())
 	}
-	pub fn wait_pgrp(&mut self) -> RshResult<Vec<WaitStatus>> {
+	pub fn wait_pgrp(&mut self) -> OxideResult<Vec<WaitStatus>> {
 		let mut statuses = Vec::new();
 
 		for child in self.children.iter_mut() {
@@ -443,7 +443,7 @@ impl JobTable {
 			None
 		}
 	}
-	pub fn insert_job(&mut self, mut job: Job, silent: bool) -> RshResult<usize> {
+	pub fn insert_job(&mut self, mut job: Job, silent: bool) -> OxideResult<usize> {
 		self.prune_jobs();
 		let table_position = if let Some(id) = job.table_id() { id } else { self.next_open_pos() };
 		job.set_table_id(table_position);
@@ -462,7 +462,7 @@ impl JobTable {
 	pub fn job_order(&self) -> &[usize] {
 		&self.order
 	}
-	pub fn new_fg(&mut self, job: Job) -> RshResult<Vec<WaitStatus>> {
+	pub fn new_fg(&mut self, job: Job) -> OxideResult<Vec<WaitStatus>> {
 		let pgid = job.pgid();
 		self.fg = Some(job);
 		attach_tty(pgid)?;
@@ -471,7 +471,7 @@ impl JobTable {
 		Ok(statuses)
 	}
 
-	pub fn fg_to_bg(&mut self, status: WaitStatus) -> RshResult<()> {
+	pub fn fg_to_bg(&mut self, status: WaitStatus) -> OxideResult<()> {
 		attach_tty(*RSH_PGRP)?;
 		if self.fg.is_none() {
 			return Ok(())
@@ -492,7 +492,7 @@ impl JobTable {
 			None
 		}
 	}
-	pub fn bg_to_fg(&mut self, id: JobID) -> RshResult<()> {
+	pub fn bg_to_fg(&mut self, id: JobID) -> OxideResult<()> {
 		let job = self.remove_job(id);
 		if let Some(job) = job {
 			helper::handle_fg(job)?;
@@ -652,7 +652,7 @@ impl JobTable {
 			println!("{}", job.display(&self.order,*flags));
 		}
 	}
-	pub fn update_job_statuses(&mut self) -> RshResult<()> {
+	pub fn update_job_statuses(&mut self) -> OxideResult<()> {
 		for job in self.jobs.iter_mut().flatten() {
 			//job.poll_children()?;
 		}
@@ -888,7 +888,7 @@ impl VarTable {
 		}
 	}
 
-	pub fn index_arr(&self, key: &str, index: usize) -> RshResult<RVal> {
+	pub fn index_arr(&self, key: &str, index: usize) -> OxideResult<RVal> {
 		if let Some(var) = self.vars.get(key) {
 			if let RVal::Array(arr) = var {
 				if let Some(value) = arr.get(index) {
@@ -1023,65 +1023,65 @@ pub fn disable_reaping() {
 	unsafe { signal(Signal::SIGCHLD, SigHandler::Handler(crate::signal::ignore_sigchld)) }.unwrap();
 }
 
-pub fn enable_reaping() -> RshResult<()> {
+pub fn enable_reaping() -> OxideResult<()> {
 	write_jobs(|j| j.update_job_statuses())??;
 	unsafe { signal(Signal::SIGCHLD, SigHandler::Handler(crate::signal::handle_sigchld)) }.unwrap();
 	Ok(())
 }
 
-pub fn borrow_var_table() -> RshResult<VarTable> {
+pub fn borrow_var_table() -> OxideResult<VarTable> {
 	Ok(VARS.read().map_err(|_| ShError::from_internal("Failed to clone VarTable"))?.clone())
 }
-pub fn borrow_job_table() -> RshResult<JobTable> {
+pub fn borrow_job_table() -> OxideResult<JobTable> {
 	Ok(JOBS.read().map_err(|_| ShError::from_internal("Failed to clone VarTable"))?.clone())
 }
-pub fn borrow_env_meta() -> RshResult<EnvMeta> {
+pub fn borrow_env_meta() -> OxideResult<EnvMeta> {
 	Ok(META.read().map_err(|_| ShError::from_internal("Failed to clone VarTable"))?.clone())
 }
 
-pub fn read_jobs<F,T>(f: F) -> RshResult<T>
+pub fn read_jobs<F,T>(f: F) -> OxideResult<T>
 where F: FnOnce(&JobTable) -> T {
 	let lock = JOBS.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&lock))
 }
 
-pub fn write_jobs<F,T>(f: F) -> RshResult<T>
+pub fn write_jobs<F,T>(f: F) -> OxideResult<T>
 where F: FnOnce(&mut JobTable) -> T {
 	let mut lock = JOBS.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
 }
 
-pub fn read_vars<F,T>(f: F) -> RshResult<T>
+pub fn read_vars<F,T>(f: F) -> OxideResult<T>
 where F: FnOnce(&VarTable) -> T {
 	let lock = VARS.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&lock))
 }
-pub fn write_vars<F,T>(f: F) -> RshResult<T>
+pub fn write_vars<F,T>(f: F) -> OxideResult<T>
 where F: FnOnce(&mut VarTable) -> T {
 	let mut lock = VARS.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
 }
-pub fn read_logic<F,T>(f: F) -> RshResult<T>
+pub fn read_logic<F,T>(f: F) -> OxideResult<T>
 where F: FnOnce(&LogicTable) -> T {
 	let lock = LOGIC.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&lock))
 }
-pub fn write_logic<F,T>(f: F) -> RshResult<T>
+pub fn write_logic<F,T>(f: F) -> OxideResult<T>
 where F: FnOnce(&mut LogicTable) -> T {
 	let mut lock = LOGIC.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
 }
-pub fn read_meta<F,T>(f: F) -> RshResult<T>
+pub fn read_meta<F,T>(f: F) -> OxideResult<T>
 where F: FnOnce(&EnvMeta) -> T {
 	let lock = META.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&lock))
 }
-pub fn write_meta<F,T>(f: F) -> RshResult<T>
+pub fn write_meta<F,T>(f: F) -> OxideResult<T>
 where F: FnOnce(&mut EnvMeta) -> T {
 	let mut lock = META.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
 }
-pub fn attach_tty(pgid: Pid) -> RshResult<()> {
+pub fn attach_tty(pgid: Pid) -> OxideResult<()> {
 	// Ensure stdin (fd 0) is a tty before proceeding
 	if !isatty(0).unwrap_or(false) {
 		return Ok(());
@@ -1132,13 +1132,13 @@ pub struct SavedEnv {
 }
 
 impl SavedEnv {
-	pub fn get_snapshot() -> RshResult<Self> {
+	pub fn get_snapshot() -> OxideResult<Self> {
 		let vars = read_vars(|vars| vars.clone())?;
 		let logic = read_logic(|log| log.clone())?;
 		let meta = read_meta(|meta| meta.clone())?;
 		Ok(Self { vars, logic, meta })
 	}
-	pub fn restore_snapshot(self) -> RshResult<()> {
+	pub fn restore_snapshot(self) -> OxideResult<()> {
 		write_vars(|vars| *vars = self.vars)?;
 		write_logic(|log| *log = self.logic)?;
 		write_meta(|meta| *meta = self.meta)?;
@@ -1190,19 +1190,19 @@ fn init_env_vars(clean: bool) -> HashMap<String,String> {
 	env::set_var("HOME", home.clone());
 	env_vars.insert("SHELL".into(), pathbuf_to_string(std::env::current_exe()));
 	env::set_var("SHELL", pathbuf_to_string(std::env::current_exe()));
-	env_vars.insert("HIST_FILE".into(),format!("{}/.rsh_hist",home));
-	env::set_var("HIST_FILE",format!("{}/.rsh_hist",home));
+	env_vars.insert("HIST_FILE".into(),format!("{}/.oxide_hist",home));
+	env::set_var("HIST_FILE",format!("{}/.oxide_hist",home));
 
 	env_vars
 }
 
-pub fn get_cstring_evars() -> RshResult<Vec<CString>> {
+pub fn get_cstring_evars() -> OxideResult<Vec<CString>> {
 	let env = read_vars(|v| v.borrow_evars().clone())?;
 	let env = env.iter().map(|(k,v)| CString::new(format!("{}={}",k,v).as_str()).unwrap()).collect::<Vec<CString>>();
 	Ok(env)
 }
 
-pub fn source_file(path: PathBuf) -> RshResult<()> {
+pub fn source_file(path: PathBuf) -> OxideResult<()> {
 	let mut file = File::open(&path).map_err(|_| ShError::from_io())?;
 	let mut buffer = String::new();
 	file.read_to_string(&mut buffer).map_err(|_| ShError::from_io())?;

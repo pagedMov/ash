@@ -4,7 +4,7 @@ use libc::{memfd_create, MFD_CLOEXEC};
 use nix::{errno::Errno, fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
 use std::sync::Mutex;
 
-use crate::{builtin::{self, CdFlags}, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, RshTokenizer, Tk, TkType, WdFlags}}, shellenv::{self, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, RshResult};
+use crate::{builtin::{self, CdFlags}, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, OxideTokenizer, Tk, TkType, WdFlags}}, shellenv::{self, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, OxideResult};
 
 #[macro_export]
 macro_rules! node_operation {
@@ -29,7 +29,7 @@ pub struct RustFd {
 }
 
 impl RustFd {
-	pub fn new(fd: RawFd) -> RshResult<Self> {
+	pub fn new(fd: RawFd) -> OxideResult<Self> {
 		if fd < 0 {
 			return Err(ShError::from_internal("Attempted to create a new RustFd from a negative FD"));
 		}
@@ -37,25 +37,25 @@ impl RustFd {
 	}
 
 	/// Create a `RustFd` from a duplicate of `stdin` (FD 0)
-	pub fn from_stdin() -> RshResult<Self> {
+	pub fn from_stdin() -> OxideResult<Self> {
 		let fd = dup(0).map_err(|_| ShError::from_io())?;
 		Ok(Self { fd })
 	}
 
 	/// Create a `RustFd` from a duplicate of `stdout` (FD 1)
-	pub fn from_stdout() -> RshResult<Self> {
+	pub fn from_stdout() -> OxideResult<Self> {
 		let fd = dup(1).map_err(|_| ShError::from_io())?;
 		Ok(Self { fd })
 	}
 
 	/// Create a `RustFd` from a duplicate of `stderr` (FD 2)
-	pub fn from_stderr() -> RshResult<Self> {
+	pub fn from_stderr() -> OxideResult<Self> {
 		let fd = dup(2).map_err(|_| ShError::from_io())?;
 		Ok(Self { fd })
 	}
 
 	/// Create a `RustFd` from a type that provides an owned or borrowed FD
-	pub fn from_fd<T: AsFd>(fd: T) -> RshResult<Self> {
+	pub fn from_fd<T: AsFd>(fd: T) -> OxideResult<Self> {
 		let raw_fd = fd.as_fd().as_raw_fd();
 		if raw_fd < 0 {
 			return Err(ShError::from_internal("Attempted to convert to RustFd from a negative FD"));
@@ -64,7 +64,7 @@ impl RustFd {
 	}
 
 	/// Create a `RustFd` by consuming ownership of an FD
-	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> RshResult<Self> {
+	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> OxideResult<Self> {
 		let raw_fd = fd.into_raw_fd(); // Consumes ownership
 		if raw_fd < 0 {
 			return Err(ShError::from_internal("Attempted to convert to RustFd from a negative FD"));
@@ -73,7 +73,7 @@ impl RustFd {
 	}
 
 	/// Create a new `RustFd` that points to an in-memory file descriptor. In-memory file descriptors can be interacted with as though they were normal files.
-	pub fn new_memfd(name: &str, executable: bool) -> RshResult<Self> {
+	pub fn new_memfd(name: &str, executable: bool) -> OxideResult<Self> {
 		let c_name = CString::new(name).map_err(|_| ShError::from_internal("Invalid name for memfd"))?;
 		let flags = if executable {
 			0
@@ -85,7 +85,7 @@ impl RustFd {
 	}
 
 	/// Write some bytes to the contained file descriptor
-	pub fn write(&self, buffer: &[u8]) -> RshResult<()> {
+	pub fn write(&self, buffer: &[u8]) -> OxideResult<()> {
 		if !self.is_valid() {
 			return Err(ShError::from_internal("Attempted to write to an invalid RustFd"));
 		}
@@ -97,7 +97,7 @@ impl RustFd {
 		}
 	}
 
-	pub fn read(&self) -> RshResult<String> {
+	pub fn read(&self) -> OxideResult<String> {
 		if !self.is_valid() {
 			return Err(ShError::from_internal("Attempted to read from an invalid RustFd"));
 		}
@@ -108,7 +108,7 @@ impl RustFd {
 	}
 
 	/// Wrapper for nix::unistd::pipe(), simply produces two `RustFds` that point to a read and write pipe respectfully
-	pub fn pipe() -> RshResult<(Self,Self)> {
+	pub fn pipe() -> OxideResult<(Self,Self)> {
 		let (r_pipe,w_pipe) = pipe().map_err(|_| ShError::from_io())?;
 		let r_fd = RustFd::from_owned_fd(r_pipe)?;
 		let w_fd = RustFd::from_owned_fd(w_pipe)?;
@@ -116,7 +116,7 @@ impl RustFd {
 	}
 
 	/// Produce a `RustFd` that points to the same resource as the 'self' `RustFd`
-	pub fn dup(&self) -> RshResult<Self> {
+	pub fn dup(&self) -> OxideResult<Self> {
 		if !self.is_valid() {
 			return Err(ShError::from_internal("Attempted to dup an invalid fd"));
 		}
@@ -126,7 +126,7 @@ impl RustFd {
 
 	/// A wrapper for nix::unistd::dup2(), 'self' is duplicated to the given target file descriptor.
 	#[track_caller]
-	pub fn dup2<T: AsRawFd>(&self, target: &T) -> RshResult<()> {
+	pub fn dup2<T: AsRawFd>(&self, target: &T) -> OxideResult<()> {
 		let target_fd = target.as_raw_fd();
 		if self.fd == target_fd {
 			// Nothing to do here
@@ -141,13 +141,13 @@ impl RustFd {
 	}
 
 	/// Open a file using a file descriptor, with the given OFlags and Mode bits
-	pub fn open(path: &Path, flags: OFlag, mode: Mode) -> RshResult<Self> {
+	pub fn open(path: &Path, flags: OFlag, mode: Mode) -> OxideResult<Self> {
 		let file_fd: RawFd = open(path, flags, mode).map_err(|_| ShError::from_io())?;
 		Ok(Self { fd: file_fd })
 	}
 
 	#[track_caller]
-	pub fn close(&mut self) -> RshResult<()> {
+	pub fn close(&mut self) -> OxideResult<()> {
 		if !self.is_valid() {
 			return Ok(())
 		}
@@ -202,7 +202,7 @@ impl FromRawFd for RustFd {
 }
 
 #[derive(PartialEq,Debug,Clone)]
-pub enum RshWait {
+pub enum OxideWait {
 	Success,
 	Fail { code: i32, cmd: Option<String> },
 	Signaled { sig: Signal },
@@ -220,14 +220,14 @@ pub enum RshWait {
 	SIGRSHEXIT // Internal call to exit early
 }
 
-impl RshWait {
+impl OxideWait {
 	pub fn new() -> Self {
-		RshWait::Success
+		OxideWait::Success
 	}
 	pub fn raw(&self) -> i32 {
 		match *self {
-			RshWait::Success => 0,
-			RshWait::Fail { code, cmd: _ } => code,
+			OxideWait::Success => 0,
+			OxideWait::Fail { code, cmd: _ } => code,
 			_ => unimplemented!("unimplemented signal type: {:?}", self)
 		}
 	}
@@ -235,41 +235,41 @@ impl RshWait {
 		match wait {
 			WaitStatus::Exited(_, code) => {
 				match code {
-					0 => RshWait::Success,
-					_ => RshWait::Fail { code, cmd }
+					0 => OxideWait::Success,
+					_ => OxideWait::Fail { code, cmd }
 				}
 			}
-			WaitStatus::Signaled(_, sig, _) => RshWait::Signaled { sig },
-			WaitStatus::Stopped(_, sig) => RshWait::Stopped { sig },
+			WaitStatus::Signaled(_, sig, _) => OxideWait::Signaled { sig },
+			WaitStatus::Stopped(_, sig) => OxideWait::Stopped { sig },
 			WaitStatus::PtraceEvent(_, _, _) => todo!(),
 			WaitStatus::PtraceSyscall(_) => todo!(),
-			WaitStatus::Continued(_) => RshWait::Continued,
-			WaitStatus::StillAlive => RshWait::Running
+			WaitStatus::Continued(_) => OxideWait::Continued,
+			WaitStatus::StillAlive => OxideWait::Running
 		}
 	}
 }
 
-impl Display for RshWait {
+impl Display for OxideWait {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			RshWait::Success { .. } => write!(f, "done"),
-			RshWait::Fail { code, .. } => write!(f, "exit {}", code),
-			RshWait::Signaled { sig } => write!(f, "exit {}", sig),
-			RshWait::Stopped { .. } => write!(f, "stopped"),
-			RshWait::Terminated { signal } => write!(f, "terminated {}", signal),
-			RshWait::Continued => write!(f, "continued"),
-			RshWait::Running => write!(f, "running"),
-			RshWait::Killed { signal } => write!(f, "killed {}", signal),
-			RshWait::TimeOut => write!(f, "time out"),
+			OxideWait::Success { .. } => write!(f, "done"),
+			OxideWait::Fail { code, .. } => write!(f, "exit {}", code),
+			OxideWait::Signaled { sig } => write!(f, "exit {}", sig),
+			OxideWait::Stopped { .. } => write!(f, "stopped"),
+			OxideWait::Terminated { signal } => write!(f, "terminated {}", signal),
+			OxideWait::Continued => write!(f, "continued"),
+			OxideWait::Running => write!(f, "running"),
+			OxideWait::Killed { signal } => write!(f, "killed {}", signal),
+			OxideWait::TimeOut => write!(f, "time out"),
 			_ => write!(f, "{:?}",self)
 		}
 	}
 }
 
 
-impl Default for RshWait {
+impl Default for OxideWait {
 	fn default() -> Self {
-		RshWait::new()
+		OxideWait::new()
 	}
 }
 
@@ -293,7 +293,7 @@ impl ProcIO {
 			backup: HashMap::new(),
 		}
 	}
-	pub fn close_all(&mut self) -> RshResult<()> {
+	pub fn close_all(&mut self) -> OxideResult<()> {
 		if let Some(fd) = &self.stdin {
 			fd.lock().unwrap().close()?;
 		}
@@ -305,7 +305,7 @@ impl ProcIO {
 		}
 		Ok(())
 	}
-	pub fn backup_fildescs(&mut self) -> RshResult<()> {
+	pub fn backup_fildescs(&mut self) -> OxideResult<()> {
 		let mut backup = HashMap::new();
 		// Get duped file descriptors
 		let dup_in = RustFd::from_stdin()?;
@@ -318,7 +318,7 @@ impl ProcIO {
 		self.backup = backup;
 		Ok(())
 	}
-	pub fn restore_fildescs(&mut self) -> RshResult<()> {
+	pub fn restore_fildescs(&mut self) -> OxideResult<()> {
 		// Get duped file descriptors from hashmap
 		if !self.backup.is_empty() {
 			// Dup2 to restore file descriptors
@@ -337,7 +337,7 @@ impl ProcIO {
 		}
 		Ok(())
 	}
-	pub fn route_input(&mut self) -> RshResult<()> {
+	pub fn route_input(&mut self) -> OxideResult<()> {
 		if let Some(ref mut stdin_fd) = self.stdin {
 			let mut fd = stdin_fd.lock().unwrap();
 			fd.dup2(&0)?;
@@ -345,7 +345,7 @@ impl ProcIO {
 		}
 		Ok(())
 	}
-	pub fn route_output(&mut self) -> RshResult<()> {
+	pub fn route_output(&mut self) -> OxideResult<()> {
 		if let Some(ref mut stdout_fd) = self.stdout {
 			let mut fd = stdout_fd.lock().unwrap();
 			fd.dup2(&1)?;
@@ -358,7 +358,7 @@ impl ProcIO {
 		}
 		Ok(())
 	}
-	pub fn route_io(&mut self) -> RshResult<()> {
+	pub fn route_io(&mut self) -> OxideResult<()> {
 		self.route_input()?;
 		self.route_output()
 	}
@@ -381,7 +381,7 @@ impl Default for ProcIO {
 	}
 }
 
-pub fn traverse_ast(ast: Node, io: Option<ProcIO>) -> RshResult<RshWait> {
+pub fn traverse_ast(ast: Node, io: Option<ProcIO>) -> OxideResult<OxideWait> {
 	let saved_in = RustFd::from_stdin()?;
 	let saved_out = RustFd::from_stdout()?;
 	let saved_err = RustFd::from_stderr()?;
@@ -394,7 +394,7 @@ pub fn traverse_ast(ast: Node, io: Option<ProcIO>) -> RshResult<RshWait> {
 }
 
 
-fn traverse(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
+fn traverse(mut node: Node, io: ProcIO) -> OxideResult<OxideWait> {
 	let last_status;
 
 	// We delay expanding variables in for loop bodies until now; this is done to give the variables time to be properly assigned before execution of the for loop body
@@ -443,7 +443,7 @@ fn traverse(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 			last_status = handle_assignment(node)?;
 		}
 		NdType::Cmdsep => {
-			last_status = RshWait::new();
+			last_status = OxideWait::new();
 		}
 		NdType::Root {..} => {
 			last_status = traverse_root(node, None, io)?;
@@ -453,8 +453,8 @@ fn traverse(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 	Ok(last_status)
 }
 
-fn traverse_root(mut root_node: Node, break_condition: Option<bool>, io: ProcIO) -> RshResult<RshWait> {
-	let mut last_status = RshWait::new();
+fn traverse_root(mut root_node: Node, break_condition: Option<bool>, io: ProcIO) -> OxideResult<OxideWait> {
+	let mut last_status = OxideWait::new();
 	if !root_node.redirs.is_empty() {
 		root_node = parse::propagate_redirections(root_node)?;
 	}
@@ -474,12 +474,12 @@ fn traverse_root(mut root_node: Node, break_condition: Option<bool>, io: ProcIO)
 			if let Some(condition) = break_condition {
 				match condition {
 					true => {
-						if let RshWait::Fail {..} = last_status {
+						if let OxideWait::Fail {..} = last_status {
 							break
 						}
 					}
 					false => {
-						if let RshWait::Success  = last_status {
+						if let OxideWait::Success  = last_status {
 							break
 						}
 					}
@@ -490,15 +490,15 @@ fn traverse_root(mut root_node: Node, break_condition: Option<bool>, io: ProcIO)
 	Ok(last_status)
 }
 
-fn handle_func_def(node: Node) -> RshResult<RshWait> {
-	let last_status = RshWait::new();
+fn handle_func_def(node: Node) -> OxideResult<OxideWait> {
+	let last_status = OxideWait::new();
 	node_operation!(NdType::FuncDef { name, body }, node, {
 		write_logic(|l| l.new_func(&name, &body))?;
 	});
 	Ok(last_status)
 }
 
-fn handle_case(node: Node, io: ProcIO) -> RshResult<RshWait> {
+fn handle_case(node: Node, io: ProcIO) -> OxideResult<OxideWait> {
 	node_operation!(NdType::Case { input_var, cases }, node, {
 		for case in cases {
 			let (pat, body) = case;
@@ -506,12 +506,12 @@ fn handle_case(node: Node, io: ProcIO) -> RshResult<RshWait> {
 				return traverse_root(body.clone(), None, io)
 			}
 		}
-		Ok(RshWait::Fail { code: 1, cmd: Some("case".into()) })
+		Ok(OxideWait::Fail { code: 1, cmd: Some("case".into()) })
 	})
 }
 
-fn handle_for(node: Node,io: ProcIO) -> RshResult<RshWait> {
-	let mut last_status = RshWait::new();
+fn handle_for(node: Node,io: ProcIO) -> OxideResult<OxideWait> {
+	let mut last_status = OxideWait::new();
 
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
@@ -574,8 +574,8 @@ fn handle_for(node: Node,io: ProcIO) -> RshResult<RshWait> {
 	Ok(last_status)
 }
 
-fn handle_loop(node: Node, io: ProcIO) -> RshResult<RshWait> {
-	let mut last_status = RshWait::new();
+fn handle_loop(node: Node, io: ProcIO) -> OxideResult<OxideWait> {
+	let mut last_status = OxideWait::new();
 	let cond_io = ProcIO::from(io.stdin, None, None);
 	let body_io = ProcIO::from(None, io.stdout, io.stderr);
 
@@ -609,8 +609,8 @@ fn handle_loop(node: Node, io: ProcIO) -> RshResult<RshWait> {
 }
 
 
-fn handle_if(node: Node, io: ProcIO) -> RshResult<RshWait> {
-	let last_status = RshWait::new();
+fn handle_if(node: Node, io: ProcIO) -> OxideResult<OxideWait> {
+	let last_status = OxideWait::new();
 	let cond_io = ProcIO::from(io.stdin,None,None);
 	let body_io = ProcIO::from(None,io.stdout,io.stderr);
 
@@ -633,7 +633,7 @@ fn handle_if(node: Node, io: ProcIO) -> RshResult<RshWait> {
 	Ok(last_status)
 }
 
-fn handle_chain(node: Node) -> RshResult<RshWait> {
+fn handle_chain(node: Node) -> OxideResult<OxideWait> {
 	node_operation!(NdType::Chain { commands, op }, node, {
 		let mut commands = commands;
 		while let Some(cmd) = commands.pop_front() {
@@ -661,10 +661,10 @@ fn handle_chain(node: Node) -> RshResult<RshWait> {
 		}
 	});
 
-	Ok(RshWait::Success)
+	Ok(OxideWait::Success)
 }
 
-fn handle_assignment(node: Node) -> RshResult<RshWait> {
+fn handle_assignment(node: Node) -> OxideResult<OxideWait> {
 	node_operation!(NdType::Assignment { name, value }, node, {
 		let mut value = value.unwrap_or_default();
 		if let Some(body) = value.trim_command_sub() {
@@ -681,10 +681,10 @@ fn handle_assignment(node: Node) -> RshResult<RshWait> {
 		}
 		write_vars(|v| v.set_var(&name, RVal::parse(&value).unwrap_or_default()))?;
 	});
-	Ok(RshWait::Success)
+	Ok(OxideWait::Success)
 }
 
-fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
+fn handle_builtin(mut node: Node, io: ProcIO) -> OxideResult<OxideWait> {
 	let argv = node.get_argv()?;
 	match argv.first().unwrap().text() {
 		"echo" => builtin::echo(node, io)?,
@@ -731,10 +731,10 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 		_ => unimplemented!("found this builtin: {}", argv[0].text()),
 	};
 
-	Ok(RshWait::Success)
+	Ok(OxideWait::Success)
 }
 
-pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
+pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> OxideResult<OxideWait> {
 	/*
 	 * rsh subshells work differently than subshells in standard shells like bash and zsh.
 	 *
@@ -767,7 +767,7 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 	node_operation!(NdType::Subshell { mut body, mut argv }, node, {
 		let vars = shellenv::borrow_var_table()?;
 		if body.is_empty() {
-			return Ok(RshWait::Success);
+			return Ok(OxideWait::Success);
 		}
 
 		let mut c_argv = vec![CString::new("anonymous_subshell").unwrap()];
@@ -827,12 +827,12 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 		}
 
 		io.restore_fildescs()?;
-		Ok(RshWait::Success)
+		Ok(OxideWait::Success)
 	})
 }
 
 
-fn handle_function(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
+fn handle_function(mut node: Node, io: ProcIO) -> OxideResult<OxideWait> {
 	let span = node.span();
 	if let NdType::Function { body, mut argv } = node.nd_type {
 		let mut func = body; // Unbox the root node for the function
@@ -852,11 +852,11 @@ fn handle_function(mut node: Node, io: ProcIO) -> RshResult<RshWait> {
 
 		event::execute(&func, node.flags, Some(node.redirs.clone()), Some(io))?;
 
-		Ok(RshWait::Success)
+		Ok(OxideWait::Success)
 	} else { unreachable!() }
 }
 
-pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
+pub fn handle_pipeline(node: Node, mut io: ProcIO) -> OxideResult<OxideWait> {
 	/*
 	 * This one is pretty complex, but it can't really be helped. File descriptors complicate everything they touch.
 	 *
@@ -924,8 +924,8 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 					command.flags |= NdFlags::IN_PIPE;
 					let result = traverse(command, current_io)?;
 					match result {
-						RshWait::Success => std::process::exit(0),
-						RshWait::Fail { code, cmd: _ } => std::process::exit(code),
+						OxideWait::Success => std::process::exit(0),
+						OxideWait::Fail { code, cmd: _ } => std::process::exit(code),
 						_ => todo!(),
 					}
 				}
@@ -973,13 +973,13 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 			}
 			count += 1;
 		}
-		RshWait::new()
+		OxideWait::new()
 	});
 
 	Ok(last_status)
 }
 
-fn handle_command(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
+fn handle_command(node: Node, mut io: ProcIO) -> OxideResult<OxideWait> {
 	/*
 	 * In this function, we first get the arg vector of the command as CStrings, so as to be compatible with execvpe().
 	 *
@@ -1034,10 +1034,10 @@ fn handle_command(node: Node, mut io: ProcIO) -> RshResult<RshWait> {
 
 	// Restore I/O descriptors
 	io.restore_fildescs()?;
-	Ok(RshWait::Success)
+	Ok(OxideWait::Success)
 }
 
-fn handle_parent_process(child: Pid, command: CString, node: &Node) -> RshResult<()> {
+fn handle_parent_process(child: Pid, command: CString, node: &Node) -> OxideResult<()> {
 	let children = vec![
 		ChildProc::new(child, Some(command.to_str().unwrap()), None)?
 	];
@@ -1054,7 +1054,7 @@ fn handle_parent_process(child: Pid, command: CString, node: &Node) -> RshResult
 	Ok(())
 }
 
-fn handle_redirs(mut redirs: VecDeque<Node>) -> RshResult<VecDeque<RustFd>> {
+fn handle_redirs(mut redirs: VecDeque<Node>) -> OxideResult<VecDeque<RustFd>> {
 	let mut fd_queue: VecDeque<RustFd> = VecDeque::new();
 	let mut fd_dupes: VecDeque<Redir> = VecDeque::new();
 
@@ -1091,7 +1091,7 @@ fn handle_redirs(mut redirs: VecDeque<Node>) -> RshResult<VecDeque<RustFd>> {
 	Ok(fd_queue)
 }
 
-fn prepare_execvpe(argv: &[CString]) -> RshResult<(CString, Vec<CString>)> {
+fn prepare_execvpe(argv: &[CString]) -> OxideResult<(CString, Vec<CString>)> {
 	let command = argv[0].clone();
 
 	// Clone the environment variables into a temporary structure
@@ -1114,7 +1114,7 @@ fn prepare_execvpe(argv: &[CString]) -> RshResult<(CString, Vec<CString>)> {
 		Ok((command, envp))
 }
 
-fn handle_autocd(node: Node, argv: Vec<Tk>,flags: WdFlags,io: ProcIO) -> RshResult<RshWait> {
+fn handle_autocd(node: Node, argv: Vec<Tk>,flags: WdFlags,io: ProcIO) -> OxideResult<OxideWait> {
 	let cd_token = Tk::new("cd".into(), node.span(), flags);
 	let mut autocd_argv = VecDeque::from(argv);
 	autocd_argv.push_front(cd_token.clone());
@@ -1146,7 +1146,7 @@ fn handle_autocd(node: Node, argv: Vec<Tk>,flags: WdFlags,io: ProcIO) -> RshResu
 //use pretty_assertions::assert_eq;
 //use rstest::{fixture, rstest};
 	//use std::fs;
-	////use crate::{interp::token::RshTokenizer, signal};
+	////use crate::{interp::token::OxideTokenizer, signal};
 //
 //use super::*;
 //

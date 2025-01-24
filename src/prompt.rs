@@ -1,4 +1,4 @@
-use crate::{comp::RshHelper, event::ShError, shellenv::{self, read_meta, read_vars, write_meta, RSH_PGRP}, RshResult};
+use crate::{comp::OxideHelper, event::ShError, shellenv::{self, read_meta, read_vars, write_meta, RSH_PGRP}, OxideResult};
 use std::path::{Path, PathBuf};
 use nix::{sys::signal::{kill, Signal}, unistd::Pid};
 
@@ -8,14 +8,14 @@ use crate::interp::expand;
 
 
 
-fn init_prompt() -> RshResult<Editor<RshHelper, DefaultHistory>> {
+fn init_prompt() -> OxideResult<Editor<OxideHelper, DefaultHistory>> {
 	let config = build_editor_config()?;
 	let mut rl = initialize_editor(config)?;
 	load_history(&mut rl)?;
 	Ok(rl)
 }
 
-fn build_editor_config() -> RshResult<Config> {
+fn build_editor_config() -> OxideResult<Config> {
 	let mut config = Config::builder();
 
 	let max_size = read_shell_option("max_hist", 1000)?;
@@ -49,28 +49,28 @@ fn build_editor_config() -> RshResult<Config> {
 		Ok(config.build())
 }
 
-fn read_shell_option(option: &str, default: usize) -> RshResult<usize> {
+fn read_shell_option(option: &str, default: usize) -> OxideResult<usize> {
 	read_meta(|m| m.get_shopt(option).unwrap_or(default))
 }
 
-fn read_shell_option_bool(option: &str) -> RshResult<bool> {
+fn read_shell_option_bool(option: &str) -> OxideResult<bool> {
 	read_meta(|m| m.get_shopt(option).is_some_and(|opt| opt > 0))
 }
 
-fn initialize_editor(config: Config) -> RshResult<Editor<RshHelper, DefaultHistory>> {
+fn initialize_editor(config: Config) -> OxideResult<Editor<OxideHelper, DefaultHistory>> {
 	let mut rl = Editor::with_config(config).unwrap_or_else(|e| {
 		eprintln!("Failed to initialize Rustyline editor: {}", e);
 		std::process::exit(1);
 	});
 	rl.set_completion_type(rustyline::CompletionType::List);
-	rl.set_helper(Some(RshHelper::new()));
+	rl.set_helper(Some(OxideHelper::new()));
 	Ok(rl)
 }
 
-fn load_history(rl: &mut Editor<RshHelper, DefaultHistory>) -> RshResult<()> {
+fn load_history(rl: &mut Editor<OxideHelper, DefaultHistory>) -> OxideResult<()> {
 	let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE"))?.unwrap_or_else(|| {
 		let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
-		format!("{}/.rsh_hist", home)
+		format!("{}/.oxide_hist", home)
 	});
 	let hist_path = PathBuf::from(hist_path);
 	if let Err(e) = rl.load_history(&hist_path) {
@@ -79,14 +79,14 @@ fn load_history(rl: &mut Editor<RshHelper, DefaultHistory>) -> RshResult<()> {
 	Ok(())
 }
 
-pub fn run() -> RshResult<String> {
+pub fn run() -> OxideResult<String> {
 	write_meta(|m| m.enter_prompt())?;
 	shellenv::attach_tty(*RSH_PGRP)?;
 
 	let mut rl = init_prompt()?;
 	let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE"))?.unwrap_or_else(|| -> String {
 		let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
-		format!("{}/.rsh_hist",home)
+		format!("{}/.oxide_hist",home)
 	});
 	let prompt = expand::expand_prompt()?;
 

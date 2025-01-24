@@ -16,7 +16,7 @@ use crate::shellenv::read_logic;
 use crate::shellenv::read_meta;
 use crate::shellenv::read_vars;
 use crate::shellenv::write_meta;
-use crate::RshResult;
+use crate::OxideResult;
 use crate::builtin::BUILTINS;
 
 use super::expand;
@@ -269,7 +269,7 @@ impl Tk {
 			}
 		}
 	}
-	pub fn from(wd: WordDesc, context: TkState) -> RshResult<Self> {
+	pub fn from(wd: WordDesc, context: TkState) -> OxideResult<Self> {
 		use crate::interp::token::TkState::*;
 		use crate::interp::token::TkType as TkT;
 		match context {
@@ -506,7 +506,7 @@ impl TkState {
 }
 
 #[derive(Debug)]
-pub struct RshTokenizer {
+pub struct OxideTokenizer {
 	input: String,
 	char_stream: VecDeque<char>,
 	context: Vec<TkState>,
@@ -515,7 +515,7 @@ pub struct RshTokenizer {
 	pub spans: VecDeque<Span>
 }
 
-impl RshTokenizer {
+impl OxideTokenizer {
 	pub fn new(input: &str) -> Self {
 		let mut input = input.trim().to_string();
 		let char_stream = input.chars().collect::<VecDeque<char>>();
@@ -637,7 +637,7 @@ impl RshTokenizer {
 	}
 
 	// First pass over input: expand aliases
-	fn alias_pass(&mut self) -> RshResult<()> {
+	fn alias_pass(&mut self) -> OxideResult<()> {
 		let aliases = read_logic(|m| m.borrow_aliases().clone())?;
 		let mut replaced = true;
 		let mut is_command = true;
@@ -675,7 +675,7 @@ impl RshTokenizer {
 		Ok(())
 	}
 	// Second pass over input: expand variables
-	fn var_pass(&mut self) -> RshResult<()> {
+	fn var_pass(&mut self) -> OxideResult<()> {
 		let vartable = read_vars(|v| v.clone())?;
 		let mut replaced = true;
 
@@ -703,7 +703,7 @@ impl RshTokenizer {
 		Ok(())
 	}
 	// Third pass over input: expand command subs
-	fn cmd_sub_pass(&mut self) -> RshResult<()> {
+	fn cmd_sub_pass(&mut self) -> OxideResult<()> {
 		let mut replaced = true;
 
 		while replaced {
@@ -773,7 +773,7 @@ impl RshTokenizer {
 
 		self.spans = VecDeque::from(spans);
 	}
-	pub fn tokenize_one(&mut self) -> RshResult<Vec<Tk>> {
+	pub fn tokenize_one(&mut self) -> OxideResult<Vec<Tk>> {
 		use crate::interp::token::TkState::*;
 		if !self.expanded { // Replacing these first is the simplest way
 			self.alias_pass()?;
@@ -874,7 +874,7 @@ impl RshTokenizer {
 		}
 		Ok(take(&mut self.tokens))
 	}
-	fn command_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
+	fn command_context(&mut self, mut wd: WordDesc) -> OxideResult<()> {
 		use crate::interp::token::TkState::*;
 		wd = self.complete_word(wd,None)?;
 		if wd.text.ends_with("()") {
@@ -929,7 +929,7 @@ impl RshTokenizer {
 				let (var,val) = wd.text.split_once("=").unwrap();
 				let mut val_wd = wd.clone();
 				val_wd.text = val.to_string();
-				let mut sub_tokenizer = RshTokenizer::new(&val_wd.text);
+				let mut sub_tokenizer = OxideTokenizer::new(&val_wd.text);
 				let mut val_tk = VecDeque::from(sub_tokenizer.tokenize_one()?);
 				val_tk.pop_front();
 				if val_tk.is_empty() {
@@ -958,7 +958,7 @@ impl RshTokenizer {
 		}
 		Ok(())
 	}
-	fn arg_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
+	fn arg_context(&mut self, mut wd: WordDesc) -> OxideResult<()> {
 		use crate::interp::token::TkState::*;
 		wd = self.complete_word(wd,None)?;
 		match wd.text.as_str() {
@@ -1046,7 +1046,7 @@ impl RshTokenizer {
 		}
 		Ok(())
 	}
-	fn string_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
+	fn string_context(&mut self, mut wd: WordDesc) -> OxideResult<()> {
 		use crate::interp::token::TkState::*;
 		// Pop the opening quote
 		self.advance();
@@ -1082,7 +1082,7 @@ impl RshTokenizer {
 		self.pop_ctx();
 		Ok(())
 	}
-	fn vardec_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
+	fn vardec_context(&mut self, mut wd: WordDesc) -> OxideResult<()> {
 		use crate::interp::token::TkState::*;
 		let mut found = false;
 		loop {
@@ -1113,7 +1113,7 @@ impl RshTokenizer {
 		self.push_ctx(ArrDec);
 		Ok(())
 	}
-	fn arrdec_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
+	fn arrdec_context(&mut self, mut wd: WordDesc) -> OxideResult<()> {
 		use crate::interp::token::TkState::*;
 		let mut found = false;
 		while self.char_stream.front().is_some_and(|ch| !matches!(ch, ';' | '\n')) {
@@ -1132,7 +1132,7 @@ impl RshTokenizer {
 		self.push_ctx(Command);
 		Ok(())
 	}
-	fn subshell_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
+	fn subshell_context(&mut self, mut wd: WordDesc) -> OxideResult<()> {
 		use crate::interp::token::TkState::*;
 		self.advance();
 		if *self.ctx() == CommandSub { self.advance(); }
@@ -1181,7 +1181,7 @@ impl RshTokenizer {
 		self.tokens.push(tk);
 		Ok(())
 	}
-	fn func_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
+	fn func_context(&mut self, mut wd: WordDesc) -> OxideResult<()> {
 		use crate::interp::token::TkState::*;
 		self.advance();
 		if *self.ctx() == CommandSub { self.advance(); }
@@ -1213,7 +1213,7 @@ impl RshTokenizer {
 		self.push_ctx(DeadEnd);
 		Ok(())
 	}
-	fn case_context(&mut self, mut wd: WordDesc) -> RshResult<()> {
+	fn case_context(&mut self, mut wd: WordDesc) -> OxideResult<()> {
 		use crate::interp::token::TkState::*;
 		let span = wd.span;
 		let mut closed = false;
@@ -1257,7 +1257,7 @@ impl RshTokenizer {
 					}
 				};
 				let mut body_tokens = vec![];
-				let mut body_tokenizer = RshTokenizer::new(body);
+				let mut body_tokenizer = OxideTokenizer::new(body);
 				while let Ok(mut block) = body_tokenizer.tokenize_one() {
 					if !block.is_empty() {
 						if block.first().is_some_and(|tk| tk.tk_type == TkType::SOI) {
@@ -1278,7 +1278,7 @@ impl RshTokenizer {
 		self.push_ctx(DeadEnd);
 		Ok(())
 	}
-	fn complete_word(&mut self, mut wd: WordDesc, brk_pattern: Option<char>) -> RshResult<WordDesc> {
+	fn complete_word(&mut self, mut wd: WordDesc, brk_pattern: Option<char>) -> OxideResult<WordDesc> {
 		let mut dub_quote = false;
 		let mut sng_quote = false;
 		let mut paren_stack = vec![];
@@ -1381,7 +1381,7 @@ mod tests {
 	#[test]
 	fn tokenizer_simple() {
 		let input = "echo hello";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);
@@ -1390,7 +1390,7 @@ mod tests {
 	#[test]
 	fn tokenizer_multiple_args() {
 		let input = "ls -l /home/user";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);
@@ -1399,7 +1399,7 @@ mod tests {
 	#[test]
 	fn tokenizer_quoted_arg() {
 		let input = "echo \"Hello, world!\"";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);
@@ -1408,7 +1408,7 @@ mod tests {
 	#[test]
 	fn tokenizer_single_quoted_arg() {
 		let input = "echo 'single quoted arg'";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);
@@ -1417,7 +1417,7 @@ mod tests {
 	#[test]
 	fn tokenizer_variable_expansion() {
 		let input = "echo $USER";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);
@@ -1426,7 +1426,7 @@ mod tests {
 	#[test]
 	fn tokenizer_pipeline() {
 		let input = "ls | grep file";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);
@@ -1436,7 +1436,7 @@ mod tests {
 	#[test]
 	fn tokenizer_redirection() {
 		let input = "echo hello > output.txt";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);
@@ -1445,7 +1445,7 @@ mod tests {
 	#[test]
 	fn tokenizer_subshell() {
 		let input = "(echo hi)";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);
@@ -1456,7 +1456,7 @@ mod tests {
 		let input = "(#!python
 print(\"hello world\")
 )";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);
@@ -1468,7 +1468,7 @@ print(\"hello world\")
 			echo hi
 			cat file.txt
 		}";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);
@@ -1477,7 +1477,7 @@ print(\"hello world\")
 	#[test]
 	fn tokenizer_expand_params() {
 		let input = "echo $@";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 		write_vars(|v| v.set_param("1".into(), "one".into())).unwrap();
 		write_vars(|v| v.set_param("2".into(), "two".into())).unwrap();
 		write_vars(|v| v.set_param("3".into(), "three".into())).unwrap();
@@ -1491,7 +1491,7 @@ print(\"hello world\")
 	#[test]
 	fn tokenizer_if() {
 		let input = "if true; then echo hi; elif false; then echo hello; else echo greetings; fi";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);
@@ -1500,7 +1500,7 @@ print(\"hello world\")
 	#[test]
 	fn tokenizer_for_loop() {
 		let input = "for i in 1 2 3; do echo $i; done";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);
@@ -1509,7 +1509,7 @@ print(\"hello world\")
 	#[test]
 	fn tokenizer_while_loop() {
 		let input = "while true; do echo working; done";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);
@@ -1518,7 +1518,7 @@ print(\"hello world\")
 	#[test]
 	fn tokenizer_until_loop() {
 		let input = "until true; do echo waiting; done";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);
@@ -1527,7 +1527,7 @@ print(\"hello world\")
 	#[test]
 	fn tokenizer_final_boss() {
 		let input = "if while if true; then echo while condition; fi; do if true; then echo inside first while; fi; done; then echo wow; elif until while if true; then echo double loop; fi; do if true; then echo another double loop; fi; done; do echo; done; then echo again; else echo; fi";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let tokens = tokenizer.tokenize_one().unwrap();
 		insta::assert_debug_snapshot!(tokens);

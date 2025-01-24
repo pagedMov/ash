@@ -5,9 +5,9 @@ use once_cell::sync::Lazy;
 use std::mem::take;
 
 use crate::event::ShError;
-use crate::interp::token::{RedirType, RshTokenizer, Tk, TkType};
+use crate::interp::token::{RedirType, OxideTokenizer, Tk, TkType};
 use crate::shellenv::read_logic;
-use crate::{builtin, RshResult};
+use crate::{builtin, OxideResult};
 
 use super::helper::{self, flatten_tree};
 use super::token::{Redir, WdFlags};
@@ -155,7 +155,7 @@ impl Node {
 		use crate::interp::parse::NdType::*;
 		matches!(self.nd_type, Command {..} | Builtin {..} | Function {..} | Subshell {..})
 	}
-	pub fn set_argv(&mut self, new_argv: Vec<Tk>) -> RshResult<()> {
+	pub fn set_argv(&mut self, new_argv: Vec<Tk>) -> OxideResult<()> {
 		match &mut self.nd_type {
 			NdType::Command { argv } |
 				NdType::Builtin { argv } |
@@ -167,7 +167,7 @@ impl Node {
 			_ => Err(ShError::from_internal("Attempt to call `set_argv()` on a non-command node")),
 		}
 	}
-	pub fn get_argv(&self) -> RshResult<Vec<Tk>> {
+	pub fn get_argv(&self) -> OxideResult<Vec<Tk>> {
 		let mut arg_vec = vec![];
 		match &self.nd_type {
 			NdType::Command { argv } |
@@ -182,7 +182,7 @@ impl Node {
 			_ => Err(ShError::from_internal("Attempt to call `get_argv()` on a non-command node")),
 		}
 	}
-	pub fn get_redirs(&self) -> RshResult<Vec<Node>> {
+	pub fn get_redirs(&self) -> OxideResult<Vec<Node>> {
 		if !self.flags.contains(NdFlags::VALID_OPERAND) {
 			return Err(ShError::from_internal("Called get_redirs with an invalid operand"))
 		}
@@ -310,7 +310,7 @@ impl DescentContext {
 	}
 }
 
-pub fn descend(tokenizer: &mut RshTokenizer) -> RshResult<ParseState> {
+pub fn descend(tokenizer: &mut OxideTokenizer) -> OxideResult<ParseState> {
 	let input = tokenizer.input();
 	let mut state = ParseState {
 		input: input.clone(),
@@ -337,7 +337,7 @@ pub fn descend(tokenizer: &mut RshTokenizer) -> RshResult<ParseState> {
 /// propagated up here and then converted to a complete ShErrorFull using the context of
 /// ParseState. This is done because propagating errors upwards is probably
 /// cheaper (and definitely easier) than propagating the raw input text downwards.
-pub fn parse(state: ParseState) -> RshResult<ParseState> {
+pub fn parse(state: ParseState) -> OxideResult<ParseState> {
 	let ctx = DescentContext::new(state.tokens.clone());
 
 	get_tree(ctx).map(|ast| {
@@ -349,7 +349,7 @@ pub fn parse(state: ParseState) -> RshResult<ParseState> {
 	})
 }
 
-pub fn get_tree(ctx: DescentContext) -> RshResult<Node> {
+pub fn get_tree(ctx: DescentContext) -> OxideResult<Node> {
 	let span = compute_span(&ctx.tokens.clone());
 	let ctx = parse_linear(ctx,false)?;
 	let tree = Node {
@@ -364,7 +364,7 @@ pub fn get_tree(ctx: DescentContext) -> RshResult<Node> {
 	Ok(tree)
 }
 
-pub fn parse_linear(mut ctx: DescentContext, once: bool) -> RshResult<DescentContext> {
+pub fn parse_linear(mut ctx: DescentContext, once: bool) -> OxideResult<DescentContext> {
 	// First pass just makes nodes without joining at operators
 	while let Some(tk) = ctx.next_tk() {
 		use crate::interp::token::TkType::*;
@@ -521,7 +521,7 @@ pub fn check_valid_operand(node: &Node) -> bool {
 	matches!(node.nd_type, PipelineBranch {..} | Pipeline {..} | Subshell {..} | Chain {..} | If {..} | For {..} | Loop {..} | Case {..} | Select {..} | Function {..} | Command {..} | Builtin {..})
 }
 
-pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
+pub fn join_at_operators(mut ctx: DescentContext) -> OxideResult<DescentContext> {
 	let mut buffer: VecDeque<Node> = VecDeque::new();
 
 	// First pass: Redirection operators
@@ -642,7 +642,7 @@ pub fn join_at_operators(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	ctx.root.extend(buffer.drain(..));
 	Ok(ctx)
 }
-pub fn propagate_redirections(mut node: Node) -> RshResult<Node> {
+pub fn propagate_redirections(mut node: Node) -> OxideResult<Node> {
 	// This function allows for redirections for higher order control flow structures
 	// e.g. `while true; do echo hello world; done > file.txt`
 	// The entire AST is rebuilt in-place, while carrying redirections out to the leaf nodes
@@ -790,7 +790,7 @@ pub fn propagate_redirections(mut node: Node) -> RshResult<Node> {
 	Ok(node)
 }
 
-fn get_flow_ctl_redirections(node: &Node) -> RshResult<(Vec<Node>, Vec<Node>)> {
+fn get_flow_ctl_redirections(node: &Node) -> OxideResult<(Vec<Node>, Vec<Node>)> {
 	// Separates redirections into two baskets; one for conditions and one for bodies
 	// Input redirections like `while read -r line; do echo $line; done < lines.txt` go to the condition
 	// Output redirections like `while true; do echo hello world; done >> hello.txt` go to the body
@@ -813,7 +813,7 @@ fn compute_span(tokens: &VecDeque<Tk>) -> Span {
 	}
 }
 
-fn parse_and_attach(mut tokens: VecDeque<Tk>, mut root: VecDeque<Node>) -> RshResult<VecDeque<Node>> {
+fn parse_and_attach(mut tokens: VecDeque<Tk>, mut root: VecDeque<Node>) -> OxideResult<VecDeque<Node>> {
 	let mut sub_ctx = DescentContext::new(take(&mut tokens));
 	while !sub_ctx.tokens.is_empty() {
 		sub_ctx = parse_linear(sub_ctx,true)?;
@@ -842,7 +842,7 @@ fn get_conditional(cond_root: VecDeque<Node>, cond_span: Span, body_root: VecDeq
 	Conditional { condition, body }
 }
 
-pub fn build_redirection(mut ctx: DescentContext) -> RshResult<DescentContext> {
+pub fn build_redirection(mut ctx: DescentContext) -> OxideResult<DescentContext> {
 	let redir_tk = ctx.next_tk()
 		.ok_or_else(|| ShError::from_internal("Called build_redirection with an empty token queue"))?;
 
@@ -879,7 +879,7 @@ pub fn build_redirection(mut ctx: DescentContext) -> RshResult<DescentContext> {
 		Ok(ctx)
 }
 
-pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
+pub fn build_if(mut ctx: DescentContext) -> OxideResult<DescentContext> {
 	let mut cond_tokens = VecDeque::new();
 	let mut cond_root = VecDeque::new();
 	let mut body_tokens = VecDeque::new();
@@ -1015,7 +1015,7 @@ pub fn build_if(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	Ok(ctx)
 }
 
-pub fn build_for(mut ctx: DescentContext) -> RshResult<DescentContext> {
+pub fn build_for(mut ctx: DescentContext) -> OxideResult<DescentContext> {
 	let mut phase = Phase::Vars;
 
 	let mut loop_vars: VecDeque<Tk> = VecDeque::new();
@@ -1120,7 +1120,7 @@ pub fn build_for(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	Ok(ctx)
 }
 
-pub fn build_loop(condition: bool, mut ctx: DescentContext) -> RshResult<DescentContext> {
+pub fn build_loop(condition: bool, mut ctx: DescentContext) -> OxideResult<DescentContext> {
 	let loop_condition = condition;
 
 	let mut phase = Phase::Condition;
@@ -1212,7 +1212,7 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> RshResult<Descent
 	Ok(ctx)
 }
 
-pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
+pub fn build_case(mut ctx: DescentContext) -> OxideResult<DescentContext> {
 	let mut cases = HashMap::new();
 	let mut block_string = String::new();
 	let mut block_tokens = VecDeque::new();
@@ -1335,7 +1335,7 @@ pub fn build_case(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	Ok(ctx)
 }
 
-pub fn build_select(mut ctx: DescentContext) -> RshResult<DescentContext> {
+pub fn build_select(mut ctx: DescentContext) -> OxideResult<DescentContext> {
 	// TODO: figure out a way to get 'in' to actually be a keyword
 	// Fix the logic in general so this code doesn't have to use awkward work arounds
 	let mut phase = Phase::Condition;
@@ -1432,7 +1432,7 @@ pub fn build_select(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	Ok(ctx)
 }
 
-pub fn build_func_def(mut ctx: DescentContext) -> RshResult<DescentContext> {
+pub fn build_func_def(mut ctx: DescentContext) -> OxideResult<DescentContext> {
 	let def = ctx.next_tk().unwrap();
 	if let TkType::FuncDef = def.tk_type {
 		//TODO: initializing a new shellenv instead of cloning the current one here
@@ -1454,7 +1454,7 @@ pub fn build_func_def(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	} else { unreachable!() }
 }
 
-pub fn build_assignment(mut ctx: DescentContext) -> RshResult<DescentContext> {
+pub fn build_assignment(mut ctx: DescentContext) -> OxideResult<DescentContext> {
 	let ass = ctx.next_tk().unwrap();
 	if let TkType::Assignment { key, value } = &ass.tk_type {
 		let value = if value.text().is_empty() {
@@ -1478,11 +1478,11 @@ pub fn build_assignment(mut ctx: DescentContext) -> RshResult<DescentContext> {
 	} else { unreachable!() }
 }
 
-pub fn build_brace_group(tokens: VecDeque<Tk>) -> RshResult<(Node, VecDeque<Tk>)> {
+pub fn build_brace_group(tokens: VecDeque<Tk>) -> OxideResult<(Node, VecDeque<Tk>)> {
 	todo!("Implement build_brace_group")
 }
 
-pub fn build_command(mut ctx: DescentContext) -> RshResult<DescentContext> {
+pub fn build_command(mut ctx: DescentContext) -> OxideResult<DescentContext> {
 	let mut argv = VecDeque::new();
 	// We handle redirections in join_at_operators(), so hold them here and push them back onto the queue afterward
 	let mut held_redirs = VecDeque::new();
@@ -1615,7 +1615,7 @@ mod test {
 	#[test]
 	fn parser_simple() {
 		let input = "echo hello world";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let mut flat_nodes = Vec::new(); // Collect nodes directly
 		loop {
@@ -1638,7 +1638,7 @@ mod test {
 	#[test]
 	fn parser_multiple_args() {
 		let input = "ls -l /home/user";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let mut flat_nodes = Vec::new();
 		loop {
@@ -1660,7 +1660,7 @@ mod test {
 	#[test]
 	fn parser_redirection_simple() {
 		let input = "echo hello world > file.txt";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let mut flat_nodes = Vec::new();
 		loop {
@@ -1682,7 +1682,7 @@ mod test {
 	#[test]
 	fn parser_redirection_complex() {
 		let input = "cat nonexistantfile.txt 1>&2 2> file.txt";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let mut flat_nodes = Vec::new();
 		loop {
@@ -1704,7 +1704,7 @@ mod test {
 	#[test]
 	fn parser_quoted_args() {
 		let input = "echo \"hello world\"";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let mut flat_nodes = Vec::new();
 		loop {
@@ -1726,7 +1726,7 @@ mod test {
 	#[test]
 	fn parser_for_loop() {
 		let input = "for i in 1 2 3; do echo $i; done";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let mut flat_nodes = Vec::new();
 		loop {
@@ -1748,7 +1748,7 @@ mod test {
 	#[test]
 	fn parser_while_loop() {
 		let input = "while true; do echo hi; done";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let mut flat_nodes = Vec::new();
 		loop {
@@ -1770,7 +1770,7 @@ mod test {
 	#[test]
 	fn parser_until_loop() {
 		let input = "until true; do echo waiting; done";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let mut flat_nodes = Vec::new();
 		loop {
@@ -1792,7 +1792,7 @@ mod test {
 	#[test]
 	fn parser_if_statement() {
 		let input = "if true; then echo hi; else echo bye; fi";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let mut flat_nodes = Vec::new();
 		loop {
@@ -1813,7 +1813,7 @@ mod test {
 	#[test]
 	fn parser_final_boss() {
 		let input = "if while if true; then echo while condition; fi; do if true; then echo inside first while; fi; done; then echo wow; elif until while if true; then echo double loop; fi; do if true; then echo another double loop; fi; done; do echo; done; then echo again; else echo; fi";
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		let mut flat_nodes = Vec::new();
 		loop {

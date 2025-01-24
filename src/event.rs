@@ -3,7 +3,7 @@ use std::{collections::VecDeque, ffi::c_int, fmt::Display, io, panic::Location};
 
 use bitflags::Flags;
 
-use crate::{execute::{self, ProcIO, RshWait}, interp::{helper, parse::{descend, NdFlags, Node, Span}, token::RshTokenizer}, prompt, shellenv::{read_meta, write_meta, EnvFlags}, RshResult};
+use crate::{execute::{self, ProcIO, OxideWait}, interp::{helper, parse::{descend, NdFlags, Node, Span}, token::OxideTokenizer}, prompt, shellenv::{read_meta, write_meta, EnvFlags}, OxideResult};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShError {
@@ -205,19 +205,19 @@ pub enum ShEvent {
 	Exit(i32),
 	Signal(c_int),
 	Error(ShError),
-	LastStatus(RshWait),
+	LastStatus(OxideWait),
 	Prompt
 }
 
-pub fn throw(err: ShError) -> RshResult<()> {
+pub fn throw(err: ShError) -> OxideResult<()> {
 	let input = read_meta(|m| m.get_last_input())?;
 	eprintln!("{}", ShErrorFull::from(err,&input));
 	Ok(())
 }
 
-pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: Option<ProcIO>) -> RshResult<()> {
+pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: Option<ProcIO>) -> OxideResult<()> {
 	if !input.is_empty() {
-		let mut tokenizer = RshTokenizer::new(input);
+		let mut tokenizer = OxideTokenizer::new(input);
 
 		loop {
 			let result = descend(&mut tokenizer);
@@ -248,7 +248,7 @@ pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: 
 	Ok(())
 }
 
-pub fn main_loop() -> RshResult<()> {
+pub fn main_loop() -> OxideResult<()> {
 	if read_meta(|m| m.flags().contains(EnvFlags::IN_SUBSH))? {
 		eprintln!("I shouldnt be here");
 	}

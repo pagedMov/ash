@@ -1,6 +1,6 @@
 use nix::{sys::{signal::{killpg, signal, SigHandler, Signal} , wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{getpgid, Pid}};
 
-use crate::{event::ShError, interp::helper, shellenv::{self, read_jobs, write_jobs, JobCmdFlags, JobID, RSH_PGRP}, RshResult};
+use crate::{event::ShError, interp::helper, shellenv::{self, read_jobs, write_jobs, JobCmdFlags, JobID, RSH_PGRP}, OxideResult};
 
 
 pub fn sig_handler_setup() {
@@ -77,7 +77,7 @@ pub extern "C" fn handle_sigchld(_: libc::c_int) {
 }
 
 //TODO: extract some of this logic from the closure to spend less time holding a write lock
-pub fn handle_child_signal(pid: Pid, sig: Signal) -> RshResult<()> {
+pub fn handle_child_signal(pid: Pid, sig: Signal) -> OxideResult<()> {
 	let pgid = getpgid(Some(pid)).unwrap_or(pid);
 	write_jobs(|j| {
 		if let Some(job) = j.query_mut(JobID::Pgid(pgid)) {
@@ -93,7 +93,7 @@ pub fn handle_child_signal(pid: Pid, sig: Signal) -> RshResult<()> {
 	Ok(())
 }
 
-pub fn handle_child_stop(pid: Pid, signal: Signal) -> RshResult<()> {
+pub fn handle_child_stop(pid: Pid, signal: Signal) -> OxideResult<()> {
 	let pgid = getpgid(Some(pid)).unwrap_or(pid);
 	write_jobs(|j| {
 		if let Some(job) = j.query_mut(JobID::Pgid(pgid)) {
@@ -110,7 +110,7 @@ pub fn handle_child_stop(pid: Pid, signal: Signal) -> RshResult<()> {
 	Ok(())
 }
 
-pub fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
+pub fn handle_child_exit(pid: Pid, status: WaitStatus) -> OxideResult<()> {
 	/*
 	 * Here we are going to get metadata on the exited process by querying the job table with the pid.
 	 * Then if the discovered job is the fg task, return terminal control to rsh
@@ -156,7 +156,7 @@ pub fn handle_child_exit(pid: Pid, status: WaitStatus) -> RshResult<()> {
 	Ok(())
 }
 
-pub fn handle_child_continue(pid: Pid) -> RshResult<()> {
+pub fn handle_child_continue(pid: Pid) -> OxideResult<()> {
 	let pgid = getpgid(Some(pid)).unwrap_or(pid);
 	write_jobs(|j| {
 		if let Some(job) = j.query_mut(JobID::Pgid(pgid)) {
