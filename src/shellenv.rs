@@ -1008,7 +1008,7 @@ impl EnvMeta {
 		&self.shopts
 	}
 	pub fn set_shopt(&mut self, key: &str, val: &str) -> OxResult<()> {
-		let value = Value::from_str(val).unwrap();
+		let value = Value::from_str(&format!("\"{}\"", val)).unwrap();
 		let query = key.split('.').map(|str| str.to_string()).collect::<VecDeque<String>>();
 		self.shopts.set(query,value)
 	}

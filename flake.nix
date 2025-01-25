@@ -34,12 +34,14 @@
             buildInputs = [
               rust-bin.nightly.latest.default
               clang
+              pkg-config
+              openssl
               llvm
               libclang
               pam
             ];
             shellHook = ''
-              exec zsh
+              exec ox
             '';
           };
         }

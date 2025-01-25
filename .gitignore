@@ -4,6 +4,7 @@ target
 *.iml
 /result*
 *.log
+default.nix
 *~
 
 # cachix tmp file

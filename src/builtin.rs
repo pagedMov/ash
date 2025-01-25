@@ -22,8 +22,8 @@ use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_log
 use crate::event::ShError;
 use crate::{deconstruct, node_operation, OxResult};
 
-pub const BUILTINS: [&str; 34] = [
-	"command", "pushd", "popd", "type", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
+pub const BUILTINS: [&str; 36] = [
+	"command", "pushd", "popd", "setopt", "getopt", "type", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
 ];
 
 bitflags! {
@@ -848,6 +848,36 @@ pub fn expr(node: Node, io: ProcIO) -> OxResult<OxWait> {
 	)
 }
 
+pub fn setopt(node: Node) -> OxResult<OxWait> {
+	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
+	argv.pop_front();
+	while let Some(arg) = argv.pop_front() {
+		if let Some((option,value)) = arg.text().split_once('=') {
+			write_meta(|m| m.set_shopt(option, value))??;
+		} else {
+			return Err(ShError::from_syntax(format!("Expected an assignment in setopt args, found this: {}", arg.text()).as_str(), node.span()))
+		}
+	}
+	Ok(OxWait::Success)
+}
+
+pub fn getopt(node: Node, io: ProcIO) -> OxResult<OxWait> {
+	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
+	let opts = read_meta(|m| m.borrow_shopts().clone())?;
+	argv.pop_front();
+	while let Some(arg) = argv.pop_front() {
+		if let Ok(value) = opts.get(arg.text()) {
+			let echo_arg = vec![value.to_string().trim_matches('"').to_string()];
+			echo_internal(echo_arg, io.clone(), node.span(), node.flags, node.redirs.clone());
+		} else {
+			let echo_arg = vec![
+				format!("Failed to find a value for '{}'", arg.text())
+			];
+			echo_internal(echo_arg, io.clone(), node.span(), node.flags, node.redirs.clone());
+		}
+	}
+	Ok(OxWait::Success)
+}
 
 pub fn alias(node: Node) -> OxResult<OxWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
