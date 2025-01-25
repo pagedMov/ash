@@ -6,6 +6,8 @@ target
 *.log
 default.nix
 *~
+./nix
+./flake.*
 
 # cachix tmp file
 store-path-pre-build
