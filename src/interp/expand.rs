@@ -18,8 +18,10 @@ static GLOB_CHARS: [&str;2] = ["*", "?"];
 pub fn check_globs(tk: Tk) -> bool {
 	let text = tk.text();
 	let flags = tk.flags();
+	let kind = &tk.tk_type;
+	dbg!(&tk);
 
-	if !flags.contains(WdFlags::IS_ARG) || flags.contains(WdFlags::SNG_QUOTED) {
+	if !flags.contains(WdFlags::IS_ARG) || flags.intersects(WdFlags::SNG_QUOTED | WdFlags::DUB_QUOTED) || *kind == TkType::String {
 		return false; // Skip if not an argument
 	}
 
@@ -127,6 +129,116 @@ pub fn expand_time(fmt: &str) -> String {
 	right_here_right_now.format(fmt).to_string()
 }
 
+#[derive(Debug)]
+pub enum PromptTk {
+	PlainText(String),  // Simple chararacter
+	OctalSeq(String),   // Represents an octal sequence (e.g., \033 for ANSI escape codes)
+	AnsiSeq(String),    // Represents an ANSI escape sequence (e.g., \e[31m for red text)
+	NonPrint(String),   // Represents a non-printable sequence
+	WorkingDir,         // Full working directory (e.g., /home/user/projects)
+	WorkingDirAbridged, // Abridged working directory (e.g., ~/projects)
+	Hostname,           // Full hostname of the machine
+	HostnameAbridged,   // Abridged hostname (e.g., "host" from "host.domain.com")
+	ShellName,          // Name of the shell (e.g., "bash", "zsh", "ox")
+	Username,           // Username of the current user
+	PromptSymbol,       // The shell's prompt symbol (e.g., $ for user, # for root)
+	ExitSuccess,
+	ExitFail,
+	GitSigns,           // Git repository status symbols (e.g., dirty tree, ahead/behind)
+	GitBranch,          // Git repository branch
+	Bell,               // '\a': Bell character (ASCII 7)
+	Newline,            // '\n': Newline character
+	CarriageReturn,     // '\r': Carriage return
+	Backslash,          // '\\': Literal backslash
+	SingleQuote,        // '\''': Literal single quote
+	DoubleQuote,        // '\"': Literal double quote
+	HideGroupStart,
+	HideGroupEnd,
+	WeekdayDate,        // '%a %b %d': Abbreviated weekday, month, and day (e.g., "Mon Jan 01")
+	Time24Hr,           // '%H:%M:%S': 24-hour time with seconds (e.g., "14:30:15")
+	Time12Hr,           // '%I:%M:%S': 12-hour time with seconds (e.g., "02:30:15 PM")
+	Time24HrNoSeconds,  // '%H:%M': 24-hour time without seconds (e.g., "14:30")
+	Time12HrShort,      // '%I:%M %p': 12-hour time with AM/PM (e.g., "02:30 PM")
+}
+
+pub fn tokenize_prompt(ps1: &str) -> VecDeque<PromptTk> {
+	let mut tokens = VecDeque::new();
+	let mut chars = ps1.chars().collect::<VecDeque<char>>();
+	let mut buffer = String::new();
+
+	while let Some(c) = chars.pop_front() {
+		match c {
+			'\\' => {
+				// Flush any accumulated plain text as a token
+				if !buffer.is_empty() {
+					tokens.push_back(PromptTk::PlainText(buffer.clone()));
+					buffer.clear();
+				}
+
+				// Process the escape sequence
+				if let Some(esc_c) = chars.pop_front() {
+					match esc_c {
+						'a' => tokens.push_back(PromptTk::Bell),
+						'n' => tokens.push_back(PromptTk::Newline),
+						'r' => tokens.push_back(PromptTk::CarriageReturn),
+						'\\' => tokens.push_back(PromptTk::Backslash),
+						'\'' => tokens.push_back(PromptTk::SingleQuote),
+						'"' => tokens.push_back(PromptTk::DoubleQuote),
+						'd' => tokens.push_back(PromptTk::WeekdayDate),
+						't' => tokens.push_back(PromptTk::Time24Hr),
+						'T' => tokens.push_back(PromptTk::Time12Hr),
+						'A' => tokens.push_back(PromptTk::Time24HrNoSeconds),
+						'@' => tokens.push_back(PromptTk::Time12HrShort),
+						_ if esc_c.is_digit(8) => {
+							let octal_seq = helper::capture_octal_escape(&mut chars, esc_c);
+							tokens.push_back(PromptTk::OctalSeq(octal_seq));
+						}
+						'e' => {
+							let ansi_seq = helper::capture_ansi_escape(&mut chars);
+							tokens.push_back(PromptTk::AnsiSeq(ansi_seq));
+						}
+						'[' => {
+							let non_print = helper::capture_non_print_sequence(&mut chars);
+							tokens.push_back(PromptTk::NonPrint(non_print));
+						}
+						'w' => tokens.push_back(PromptTk::WorkingDir),
+						'W' => tokens.push_back(PromptTk::WorkingDirAbridged),
+						'H' => tokens.push_back(PromptTk::Hostname),
+						'h' => tokens.push_back(PromptTk::HostnameAbridged),
+						's' => tokens.push_back(PromptTk::ShellName),
+						'u' => tokens.push_back(PromptTk::Username),
+						'$' => tokens.push_back(PromptTk::PromptSymbol),
+						'G' => tokens.push_back(PromptTk::GitSigns),
+						'B' => tokens.push_back(PromptTk::GitBranch),
+						'S' => tokens.push_back(PromptTk::ExitSuccess),
+						'F' => tokens.push_back(PromptTk::ExitFail),
+						'(' => tokens.push_back(PromptTk::HideGroupStart),
+						')' => tokens.push_back(PromptTk::HideGroupEnd),
+						_ => {
+							// Unrecognized escape, treat it as raw text
+							tokens.push_back(PromptTk::PlainText(format!("\\{}", esc_c)));
+						}
+					}
+				} else {
+					// Handle dangling backslash as raw text
+					tokens.push_back(PromptTk::PlainText("\\".to_string()));
+				}
+			}
+			_ => {
+				// Accumulate plain text
+				buffer.push(c);
+			}
+		}
+	}
+
+	// Flush remaining plain text
+	if !buffer.is_empty() {
+		tokens.push_back(PromptTk::PlainText(buffer));
+	}
+
+	tokens
+}
+
 pub fn expand_prompt() -> OxResult<String> {
 	// Determine the default color based on the user ID
 	let default_color = if read_vars(|vars| vars.get_evar("UID").is_some_and(|uid| uid == "0"))? {
@@ -154,52 +266,47 @@ pub fn expand_prompt() -> OxResult<String> {
 		ps1.unwrap()
 	};
 
-	// Process the PS1 string to expand escape sequences
-	let mut result = String::new();
-	let mut chars = ps1.chars().collect::<VecDeque<char>>();
+	// Tokenize the PS1 string
+	let mut tokens = tokenize_prompt(&ps1);
 
-	while let Some(c) = chars.pop_front() {
-		match c {
-			'\\' => {
-				if let Some(esc_c) = chars.pop_front() {
-					match esc_c {
-						'a' => result.push('\x07'),
-						'n' => result.push('\n'),
-						'r' => result.push('\r'),
-						'\\' => result.push('\\'),
-						'\'' => result.push('\''),
-						'"' => result.push('"'),
-						'd' => result.push_str(expand_time("%a %b %d").as_str()),
-						't' => result.push_str(expand_time("%H:%M:%S").as_str()),
-						'T' => result.push_str(expand_time("%I:%M:%S").as_str()),
-						'A' => result.push_str(expand_time("%H:%M").as_str()),
-						'@' => result.push_str(expand_time("%I:%M %p").as_str()),
-						_ if esc_c.is_digit(8) => {
-							let octal_char = helper::escseq_octal_escape(&mut chars, esc_c)?;
-							result.push(octal_char);
-						}
-						'e' => helper::escseq_ansi_escape(&mut chars, &mut result),
-						'[' => helper::escseq_non_printing_sequence(&mut chars, &mut result),
-						']' => (), // Do nothing, it's just a marker
-						'w' => result.push_str(&helper::escseq_working_directory()?),
-						'W' => result.push_str(&helper::escseq_basename_working_directory()?),
-						'H' => result.push_str(&helper::escseq_full_hostname()?),
-						'h' => result.push_str(&helper::escseq_short_hostname()?),
-						's' => result.push_str(&helper::escseq_shell_name()?),
-						'u' => result.push_str(&helper::escseq_username()?),
-						'$' => result.push(helper::escseq_prompt_symbol()?),
-						_ => {
-							result.push('\\');
-							result.push(esc_c);
-						}
-					}
-				} else {
-					result.push('\\');
-				}
+	// Expand tokens into the final prompt string
+	let mut result = String::new();
+	while let Some(token) = tokens.pop_front() {
+		match token {
+			PromptTk::PlainText(text) => result.push_str(&text),
+			PromptTk::Bell => result.push('\x07'),
+			PromptTk::Newline => result.push('\n'),
+			PromptTk::CarriageReturn => result.push('\r'),
+			PromptTk::Backslash => result.push('\\'),
+			PromptTk::SingleQuote => result.push('\''),
+			PromptTk::DoubleQuote => result.push('"'),
+			PromptTk::WeekdayDate => result.push_str(expand_time("%a %b %d").as_str()),
+			PromptTk::Time24Hr => result.push_str(expand_time("%H:%M:%S").as_str()),
+			PromptTk::Time12Hr => result.push_str(expand_time("%I:%M:%S").as_str()),
+			PromptTk::Time24HrNoSeconds => result.push_str(expand_time("%H:%M").as_str()),
+			PromptTk::Time12HrShort => result.push_str(expand_time("%I:%M %p").as_str()),
+			PromptTk::OctalSeq(octal) => {
+				let octal_char = helper::escseq_octal_escape(&mut octal.chars().collect(), '0')?;
+				result.push(octal_char);
 			}
-			_ => result.push(c)
+			PromptTk::AnsiSeq(ansi) => result.push_str(&ansi),
+			PromptTk::NonPrint(non_print) => result.push_str(&non_print),
+			PromptTk::HideGroupStart => result.push_str(&helper::handle_prompt_hidegroup(&mut tokens)?),
+			PromptTk::HideGroupEnd => result.push(')'),
+			PromptTk::WorkingDir => result.push_str(&helper::escseq_working_directory()?),
+			PromptTk::WorkingDirAbridged => result.push_str(&helper::escseq_basename_working_directory()?),
+			PromptTk::Hostname => result.push_str(&helper::escseq_full_hostname()?),
+			PromptTk::HostnameAbridged => result.push_str(&helper::escseq_short_hostname()?),
+			PromptTk::ShellName => result.push_str(&helper::escseq_shell_name()?),
+			PromptTk::Username => result.push_str(&helper::escseq_username()?),
+			PromptTk::PromptSymbol => result.push(helper::escseq_prompt_symbol()?),
+			PromptTk::GitSigns => result.push_str(&helper::escseq_gitsigns()?),
+			PromptTk::GitBranch => result.push_str(&helper::escseq_gitsigns()?),
+			PromptTk::ExitSuccess => result.push_str(&helper::escseq_success()?),
+			PromptTk::ExitFail => result.push_str(&helper::escseq_fail()?),
 		}
 	}
+
 	Ok(result)
 }
 
@@ -230,7 +337,8 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> OxResult<VecDeque<Tk>> {
 	working_buffer.push_back(token.clone());
 	while let Some(mut token) = working_buffer.pop_front() {
 		// If expand_glob is true, then check for globs. Otherwise, is_glob is false
-		let is_glob = if expand_glob { check_globs(token.clone()) } else { expand_glob };
+		//let is_glob = if expand_glob { check_globs(token.clone()) } else { expand_glob };
+		let is_glob = false;
 		let is_brace_expansion = helper::is_brace_expansion(token.text());
 		let is_cmd_sub = helper::has_valid_delims(token.text(), "$(", ")") || token.tk_type == TkType::CommandSub;
 
@@ -652,7 +760,6 @@ fn expand_params(token: Tk) -> OxResult<VecDeque<Tk>> {
 mod tests {
 	use crate::shellenv::{self, read_meta, write_logic, write_meta, write_vars, RVal};
 	use nix::unistd::{getuid, User};
-	use pretty_assertions::assert_eq;
 
 	use super::*;
 
@@ -738,7 +845,7 @@ mod tests {
 		};
 		let mut cwd: String = read_vars(|vars| vars.get_evar("PWD").map_or("".into(), |cwd| cwd).to_string()).unwrap();
 		let trunc_backup = read_meta(|m| m.get_shopt("trunc_prompt_path")).unwrap().unwrap();
-		write_meta(|m| m.set_shopt("trunc_prompt_path", 0)).unwrap();
+		write_meta(|m| m.set_shopt("trunc_prompt_path", "0")).unwrap();
 		let default_path = if cwd.as_str() == "/" {
 			"\\e[36m\\w\\e[0m".to_string()
 		} else {
@@ -754,7 +861,7 @@ mod tests {
 		let expected = format!("\n\u{1b}[1;32m{}\u{1b}[1;36m/\u{1b}[0m\n\u{1b}[32mdebug $\u{1b}[36m>\u{1b}[0m ",cwd);
 
 		assert_eq!(prompt, expected);
-		write_meta(|m| m.set_shopt("trunc_prompt_path", trunc_backup)).unwrap();
+		write_meta(|m| m.set_shopt("trunc_prompt_path", &trunc_backup)).unwrap();
 	}
 
 	#[test]

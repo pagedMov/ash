@@ -18,19 +18,22 @@ fn init_prompt() -> OxResult<Editor<OxHelper, DefaultHistory>> {
 fn build_editor_config() -> OxResult<Config> {
 	let mut config = Config::builder();
 
-	let max_size = read_shell_option("max_hist", 1000)?;
-	let hist_dupes = read_shell_option_bool("hist_ignore_dupes")?;
-	let comp_limit = read_shell_option("comp_limit", 5)?;
-	let edit_mode = match read_shell_option("edit_mode", 1)? {
-		0 => EditMode::Emacs,
-		_ => EditMode::Vi,
+	let max_size = read_shell_option("core.max_hist")?.parse::<usize>().unwrap();
+	let hist_dupes = read_shell_option("core.hist_ignore_dupes")?.parse::<bool>().unwrap();
+	let comp_limit = read_shell_option("prompt.comp_limit")?.parse::<usize>().unwrap();
+	let edit_mode = match read_shell_option("prompt.edit_mode")?.trim_matches('"') {
+		"emacs" => EditMode::Emacs,
+		"vi" => EditMode::Vi,
+		_ => {
+			return Err(ShError::from_internal("Invalid shopts.prompt.edit_mode value"))
+		}
 	};
-	let auto_hist = read_shell_option_bool("auto_hist")?;
-	let prompt_highlight = match read_shell_option("prompt_highlight", 1)? {
-		0 => ColorMode::Disabled,
-		_ => ColorMode::Enabled,
+	let auto_hist = read_shell_option("core.auto_hist")?.parse::<bool>().unwrap();
+	let prompt_highlight = match read_shell_option("prompt.prompt_highlight")?.parse::<bool>().unwrap() {
+		true => ColorMode::Enabled,
+		false => ColorMode::Disabled,
 	};
-	let tab_stop = read_shell_option("tab_stop", 1).map(|val| val.max(1))?;
+	let tab_stop = read_shell_option("prompt.tab_stop")?.parse::<usize>().unwrap();
 
 	config = config
 		.max_history_size(max_size)
@@ -49,12 +52,8 @@ fn build_editor_config() -> OxResult<Config> {
 		Ok(config.build())
 }
 
-fn read_shell_option(option: &str, default: usize) -> OxResult<usize> {
-	read_meta(|m| m.get_shopt(option).unwrap_or(default))
-}
-
-fn read_shell_option_bool(option: &str) -> OxResult<bool> {
-	read_meta(|m| m.get_shopt(option).is_some_and(|opt| opt > 0))
+fn read_shell_option(option: &str) -> OxResult<String> {
+	read_meta(|m| m.get_shopt(option).unwrap_or_default())
 }
 
 fn initialize_editor(config: Config) -> OxResult<Editor<OxHelper, DefaultHistory>> {

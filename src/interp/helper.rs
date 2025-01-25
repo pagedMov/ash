@@ -1,8 +1,9 @@
 use crate::{event::ShError, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, RVal, RSH_PGRP }, OxResult};
+use git2::{Repository, StatusOptions};
 use nix::{sys::wait::WaitStatus, unistd::dup2, NixPath};
 use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread};
 
-use super::{parse::{NdType, Node, Span}, token::{Tk, TkType, WdFlags, WordDesc}};
+use super::{expand::{self, PromptTk}, parse::{NdType, Node, Span}, token::{Tk, TkType, WdFlags, WordDesc}};
 
 #[macro_export]
 macro_rules! deconstruct {
@@ -372,7 +373,7 @@ pub fn is_exec(path: &Path) -> bool {
 }
 
 pub fn handle_autocd_check(node: &Node, argv: &[Tk]) -> OxResult<bool> {
-	if read_meta(|m| m.get_shopt("autocd").is_some_and(|opt| opt > 0))? && argv.len() == 1 {
+	if read_meta(|m| m.get_shopt("core.autocd").is_ok_and(|opt| opt.parse::<bool>().unwrap()))? && argv.len() == 1 {
 		let path_cand = argv.first().unwrap();
 		let is_relative = path_cand.text().starts_with('.');
 		let contains_slash = path_cand.text().contains('/');
@@ -468,6 +469,300 @@ pub fn flatten_tree(left: Node, right: Node) -> VecDeque<Node> {
 	flattened
 }
 
+pub fn capture_octal_escape(chars: &mut VecDeque<char>, first_digit: char) -> String {
+	let mut octal = first_digit.to_string();
+
+	for _ in 0..2 {
+		if let Some(c) = chars.front() {
+			if c.is_digit(8) {
+				octal.push(chars.pop_front().unwrap());
+			} else {
+				break;
+			}
+		}
+	}
+
+	octal
+}
+
+pub fn capture_non_print_sequence(chars: &mut VecDeque<char>) -> String {
+	let mut sequence = String::new();
+
+	while let Some(c) = chars.pop_front() {
+		if c == ']' {
+			break; // End of the non-printing sequence
+		}
+		sequence.push(c);
+	}
+
+	sequence
+}
+
+pub fn capture_ansi_escape(chars: &mut VecDeque<char>) -> String {
+	let mut sequence = String::from("\x1b"); // Start with the escape character (ESC)
+
+	while let Some(c) = chars.pop_front() {
+		sequence.push(c);
+
+		// ANSI sequences typically end with a letter (e.g., 'm' or 'K')
+		if c.is_alphabetic() {
+			break;
+		}
+	}
+
+	sequence
+}
+
+pub fn handle_prompt_hidegroup(tokens: &mut VecDeque<PromptTk>) -> OxResult<String> {
+	let mut result = String::new();
+	let mut found = false;
+	while let Some(token) = tokens.pop_front() {
+		match token {
+			PromptTk::PlainText(text) => result.push_str(&text),
+			PromptTk::Bell => result.push('\x07'),
+			PromptTk::Newline => result.push('\n'),
+			PromptTk::CarriageReturn => result.push('\r'),
+			PromptTk::Backslash => result.push('\\'),
+			PromptTk::SingleQuote => result.push('\''),
+			PromptTk::DoubleQuote => result.push('"'),
+			PromptTk::WeekdayDate =>{
+				let output = expand::expand_time("%a %b %d");
+				if !output.is_empty() {
+					found = true;
+					result.push_str(&output);
+				}
+			}
+			PromptTk::Time24Hr =>{
+				let output = expand::expand_time("%H:%M:%S");
+				if !output.is_empty() {
+					found = true;
+					result.push_str(&output);
+				}
+			}
+			PromptTk::Time12Hr =>{
+				let output = expand::expand_time("%I:%M:%S");
+				if !output.is_empty() {
+					found = true;
+					result.push_str(&output);
+				}
+			}
+			PromptTk::Time24HrNoSeconds =>{
+				let output = expand::expand_time("%H:%M");
+				if !output.is_empty() {
+					found = true;
+					result.push_str(&output);
+				}
+			}
+			PromptTk::Time12HrShort =>{
+				let output = expand::expand_time("%I:%M %p");
+				if !output.is_empty() {
+					found = true;
+					result.push_str(&output);
+				}
+			}
+			PromptTk::OctalSeq(octal) => {
+				let octal_char = escseq_octal_escape(&mut octal.chars().collect(), '0')?;
+				result.push(octal_char);
+			}
+			PromptTk::AnsiSeq(ansi) => result.push_str(&ansi),
+			PromptTk::NonPrint(non_print) => result.push_str(&non_print),
+			PromptTk::HideGroupStart => result.push_str(&handle_prompt_hidegroup(tokens)?),
+			PromptTk::HideGroupEnd => break,
+			PromptTk::WorkingDir =>{
+				let output = &escseq_working_directory()?;
+				if !output.is_empty() {
+					found = true;
+					result.push_str(output);
+				}
+			}
+			PromptTk::WorkingDirAbridged =>{
+				let output = &escseq_basename_working_directory()?;
+				if !output.is_empty() {
+					found = true;
+					result.push_str(output);
+				}
+			}
+			PromptTk::Hostname =>{
+				let output = &escseq_full_hostname()?;
+				if !output.is_empty() {
+					found = true;
+					result.push_str(output);
+				}
+			}
+			PromptTk::HostnameAbridged =>{
+				let output = &escseq_short_hostname()?;
+				if !output.is_empty() {
+					found = true;
+					result.push_str(output);
+				}
+			}
+			PromptTk::ShellName =>{
+				let output = &escseq_shell_name()?;
+				if !output.is_empty() {
+					found = true;
+					result.push_str(output);
+				}
+			}
+			PromptTk::Username =>{
+				let output = &escseq_username()?;
+				if !output.is_empty() {
+					found = true;
+					result.push_str(output);
+				}
+			}
+			PromptTk::PromptSymbol =>{
+				let output = escseq_prompt_symbol()?;
+				found = true;
+				result.push(output);
+			}
+			PromptTk::GitSigns =>{
+				let output = &escseq_gitsigns()?;
+				if !output.is_empty() {
+					found = true;
+					result.push_str(output);
+				}
+			}
+			PromptTk::GitBranch =>{
+				let output = &escseq_gitbranch()?;
+				if !output.is_empty() {
+					found = true;
+					result.push_str(output);
+				}
+			}
+			PromptTk::ExitSuccess =>{
+				let output = &escseq_success()?;
+				if !output.is_empty() {
+					found = true;
+					result.push_str(output);
+				}
+			}
+			PromptTk::ExitFail =>{
+				let output = &escseq_fail()?;
+				if !output.is_empty() {
+					found = true;
+					result.push_str(output);
+				}
+			}
+		}
+	}
+	if found {
+		Ok(result)
+	} else {
+		Ok(String::new())
+	}
+}
+
+pub fn escseq_gitbranch() -> OxResult<String> {
+	let current_dir = read_vars(|v| v.get_evar("PWD"))?.unwrap_or_default();
+	let branch_icon = read_meta(|m| m.get_shopt("prompt.git_signs.branch_icon"))?.unwrap().to_string().trim_matches('"').to_string();
+	let git_dir = PathBuf::from(current_dir.clone()).join(".git");
+	if !git_dir.exists() {
+		return Ok(String::new())
+	}
+	let repo = Repository::open(current_dir).unwrap();
+	let head = repo.head().unwrap();
+
+	if head.is_branch() {
+		let branch = head.shorthand().map(String::from).unwrap();
+		Ok(format!("{} {}",branch_icon,branch))
+	} else {
+		Ok(String::new())
+	}
+}
+
+pub fn escseq_gitsigns() -> OxResult<String> {
+	let current_dir = read_vars(|v| v.get_evar("PWD"))?.unwrap_or_default();
+	let shopts = read_meta(|m| m.borrow_shopts().clone())?;
+	let dirty_tree_symbol = shopts.get("prompt.git_signs.dirty_tree")?.to_string().trim_matches('"').to_string();
+	let no_unstaged_symbol = shopts.get("prompt.git_signs.clean_tree")?.to_string().trim_matches('"').to_string();
+	let untracked_symbol = shopts.get("prompt.git_signs.untracked")?.to_string().trim_matches('"').to_string();
+	let ahead_of_remote_symbol = shopts.get("prompt.git_signs.ahead_of_remote")?.to_string().trim_matches('"').to_string();
+	let behind_remote_symbol = shopts.get("prompt.git_signs.behind_remote")?.to_string().trim_matches('"').to_string();
+	let git_dir = PathBuf::from(current_dir.clone()).join(".git");
+
+	if !git_dir.exists() {
+		return Ok(String::new())
+	}
+	let repo = Repository::open(current_dir).unwrap();
+
+	let mut opts = StatusOptions::new();
+	opts.include_untracked(true)
+		.recurse_untracked_dirs(true)
+		.include_ignored(false);
+
+	let statuses = repo.statuses(Some(&mut opts)).unwrap();
+	let mut dirty_tree = false;
+	let mut all_staged = false;
+	let mut untracked_files = 0;
+
+	for entry in statuses.iter() {
+		let status = entry.status();
+
+		if status.is_index_modified() || status.is_index_new() {
+			all_staged = true;
+		}
+
+		if status.is_wt_modified() || status.is_wt_deleted() {
+			dirty_tree = true;
+			all_staged = false;
+		}
+
+		if status.is_wt_new() {
+			untracked_files += 1;
+		}
+	}
+
+	let mut ahead_of_remote = false;
+	let mut behind_remote = false;
+
+	//FIXME: this is disgusting.
+	if let Ok(head) = repo.head() {
+		if let Ok(head_ref) = head.resolve() { // Resolve symbolic refs like HEAD
+			let branch = git2::Branch::wrap(head_ref); // Convert to a Branch
+			if let Ok(upstream) = branch.upstream() { // Access the upstream branch
+				if let (Some(head_target), Some(upstream_target)) = (head.target(), upstream.get().target()) {
+					if let Ok((ahead, behind)) = repo.graph_ahead_behind(head_target, upstream_target) {
+						ahead_of_remote = ahead > 0;
+						behind_remote = behind > 0;
+					}
+				}
+			}
+		}
+	}
+	let dirty_tree_symbol = if dirty_tree { dirty_tree_symbol } else { "".into() };
+	let no_unstaged_symbol = if all_staged { no_unstaged_symbol } else { "".into() };
+	let untracked_symbol = if untracked_files > 0 { untracked_symbol } else { "".into() };
+	let ahead_of_remote_symbol = if ahead_of_remote { ahead_of_remote_symbol } else { "".into() };
+	let behind_remote_symbol = if behind_remote { behind_remote_symbol } else { "".into() };
+	Ok(format!("{}{}{}{}{}",dirty_tree_symbol,no_unstaged_symbol,untracked_symbol,ahead_of_remote_symbol,behind_remote_symbol))
+}
+
+pub fn escseq_success() -> OxResult<String> {
+	let code = read_vars(|v| v.get_param("?"))?;
+	let success = read_meta(|m| m.get_shopt("prompt.exit_status.success"))??.trim_matches('"').to_string();
+	if let Some(code) = code {
+		match code.as_str() {
+			"0" => Ok(success),
+			_ => Ok(String::new()),
+		}
+	} else {
+		Ok(success)
+	}
+}
+
+pub fn escseq_fail() -> OxResult<String> {
+	let code = read_vars(|v| v.get_param("?"))?;
+	let failure = read_meta(|m| m.get_shopt("prompt.exit_status.failure"))??.trim_matches('"').to_string();
+	if let Some(code) = code {
+		match code.as_str() {
+			"0" => Ok(String::new()),
+			_ => Ok(failure),
+		}
+	} else {
+		Ok(String::new())
+	}
+}
+
 /// Handles octal escape sequences.
 pub fn escseq_octal_escape(chars: &mut VecDeque<char>, first_digit: char) -> OxResult<char> {
 	let mut octal_digits = String::new();
@@ -522,7 +817,7 @@ pub fn escseq_working_directory() -> OxResult<String> {
 	if cwd.starts_with(&home) {
 		cwd = cwd.replacen(&home, "~", 1); // Use `replacen` to replace only the first occurrence
 	}
-	let trunc_len = read_meta(|meta| meta.get_shopt("trunc_prompt_path").unwrap_or(0))?;
+	let trunc_len = read_meta(|meta| meta.get_shopt("trunc_prompt_path").unwrap_or("0".into()))?.parse::<usize>().unwrap();
 	if trunc_len > 0 {
 		let mut path = PathBuf::from(cwd);
 		let mut cwd_components: Vec<_> = path.components().collect();

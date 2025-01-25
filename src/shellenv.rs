@@ -1,13 +1,14 @@
-use std::{collections::{BTreeMap, VecDeque}, env, ffi::{CString, OsStr}, fmt, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, sync::{Arc, LazyLock}};
+use std::{collections::{BTreeMap, VecDeque}, env, ffi::{CString, OsStr}, fmt, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, str::FromStr, sync::{Arc, LazyLock}};
 use std::collections::HashMap;
 
 use bitflags::bitflags;
-use nix::{sys::{signal::{kill, killpg, signal, SigHandler, Signal}, wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{gethostname, getpgid, isatty, setpgid, tcgetpgrp, tcsetpgrp, Pid, User}};
+use nix::{sys::{signal::{kill, killpg, signal, SigHandler, Signal}, wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{gethostname, isatty, setpgid, tcgetpgrp, tcsetpgrp, Pid, User}};
 use once_cell::sync::Lazy;
+use serde_json::Value;
 use std::{fs::File, sync::RwLock};
 
 
-use crate::{event::{self, ShError}, execute::{self, OxWait}, interp::{helper, parse::{descend, parse, NdFlags, Node, ParseState, Span}, token::OxTokenizer}, OxResult};
+use crate::{event::{self, ShError}, interp::{helper, parse::{NdFlags, Span}}, shopt::ShOpts, OxResult};
 
 #[derive(Debug)]
 pub struct DisplayWaitStatus(pub WaitStatus);
@@ -959,7 +960,7 @@ impl Default for LogicTable {
 pub struct EnvMeta {
 	last_input: String,
 	dir_stack: Vec<PathBuf>,
-	shopts: HashMap<String,usize>,
+	shopts: ShOpts,
 	flags: EnvFlags,
 	in_prompt: bool
 }
@@ -970,7 +971,7 @@ impl EnvMeta {
 		Self {
 			last_input: String::new(),
 			dir_stack: vec![std::env::current_dir().unwrap()],
-			shopts: init_shopts(),
+			shopts: ShOpts::new(),
 			flags,
 			in_prompt
 		}
@@ -1003,11 +1004,16 @@ impl EnvMeta {
 	pub fn get_last_input(&self) -> String {
 		self.last_input.clone()
 	}
-	pub fn set_shopt(&mut self, key: &str, val: usize) {
-		self.shopts.insert(key.into(),val);
+	pub fn borrow_shopts(&self) -> &ShOpts {
+		&self.shopts
 	}
-	pub fn get_shopt(&self, key: &str) -> Option<usize> {
-		self.shopts.get(key).copied()
+	pub fn set_shopt(&mut self, key: &str, val: &str) -> OxResult<()> {
+		let value = Value::from_str(val).unwrap();
+		let query = key.split('.').map(|str| str.to_string()).collect::<VecDeque<String>>();
+		self.shopts.set(query,value)
+	}
+	pub fn get_shopt(&self, key: &str) -> OxResult<String> {
+		Ok(self.shopts.get(key)?.to_string())
 	}
 	pub fn mod_flags<F>(&mut self, flag_mod: F)
 		where F: FnOnce(&mut EnvFlags) {

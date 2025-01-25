@@ -29,6 +29,7 @@ pub mod interp;
 pub mod builtin;
 pub mod comp;
 pub mod signal;
+pub mod shopt;
 
 use std::{env, fs::OpenOptions, os::fd::AsRawFd, path::PathBuf};
 
