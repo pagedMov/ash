@@ -6,8 +6,10 @@ target
 *.log
 default.nix
 *~
-./nix
-./flake.*
+nix
+flake.*
+TODO.md
+rust-toolchain.toml
 
 # cachix tmp file
 store-path-pre-build
