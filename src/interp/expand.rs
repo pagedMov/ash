@@ -135,6 +135,7 @@ pub enum PromptTk {
 	OctalSeq(String),   // Represents an octal sequence (e.g., \033 for ANSI escape codes)
 	AnsiSeq(String),    // Represents an ANSI escape sequence (e.g., \e[31m for red text)
 	NonPrint(String),   // Represents a non-printable sequence
+	UserSequence(String), // User-defined escape sequence
 	WorkingDir,         // Full working directory (e.g., /home/user/projects)
 	WorkingDirAbridged, // Abridged working directory (e.g., ~/projects)
 	Hostname,           // Full hostname of the machine
@@ -144,6 +145,7 @@ pub enum PromptTk {
 	PromptSymbol,       // The shell's prompt symbol (e.g., $ for user, # for root)
 	ExitSuccess,
 	ExitFail,
+	ExitCode,
 	GitSigns,           // Git repository status symbols (e.g., dirty tree, ahead/behind)
 	GitBranch,          // Git repository branch
 	Bell,               // '\a': Bell character (ASCII 7)
@@ -208,6 +210,7 @@ pub fn tokenize_prompt(ps1: &str) -> VecDeque<PromptTk> {
 						's' => tokens.push_back(PromptTk::ShellName),
 						'u' => tokens.push_back(PromptTk::Username),
 						'$' => tokens.push_back(PromptTk::PromptSymbol),
+						'?' => tokens.push_back(PromptTk::ExitCode),
 						'G' => tokens.push_back(PromptTk::GitSigns),
 						'B' => tokens.push_back(PromptTk::GitBranch),
 						'S' => tokens.push_back(PromptTk::ExitSuccess),
@@ -304,6 +307,8 @@ pub fn expand_prompt() -> OxResult<String> {
 			PromptTk::GitBranch => result.push_str(&helper::escseq_gitsigns()?),
 			PromptTk::ExitSuccess => result.push_str(&helper::escseq_success()?),
 			PromptTk::ExitFail => result.push_str(&helper::escseq_fail()?),
+			PromptTk::ExitCode => result.push_str(&helper::escseq_exitcode()?),
+			PromptTk::UserSequence(seq) => result.push_str(&helper::escseq_custom(&seq)?),
 		}
 	}
 

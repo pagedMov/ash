@@ -1,9 +1,9 @@
-use crate::{event::ShError, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, RVal, RSH_PGRP }, OxResult};
+use crate::{event::ShError, execute::{self, ProcIO, RustFd}, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, RVal, RSH_PGRP }, OxResult};
 use git2::{Repository, StatusOptions};
 use nix::{sys::wait::WaitStatus, unistd::dup2, NixPath};
 use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread};
 
-use super::{expand::{self, PromptTk}, parse::{NdType, Node, Span}, token::{Tk, TkType, WdFlags, WordDesc}};
+use super::{expand::{self, PromptTk}, parse::{NdFlags, NdType, Node, Span}, token::{Tk, TkType, WdFlags, WordDesc}};
 
 #[macro_export]
 macro_rules! deconstruct {
@@ -660,6 +660,20 @@ pub fn handle_prompt_hidegroup(tokens: &mut VecDeque<PromptTk>) -> OxResult<Stri
 					result.push_str(output);
 				}
 			}
+			PromptTk::ExitCode =>{
+				let output = &escseq_exitcode()?;
+				if !output.is_empty() {
+					found = true;
+					result.push_str(output);
+				}
+			}
+			PromptTk::UserSequence(seq) =>{
+				let output = &escseq_custom(&seq)?;
+				if !output.is_empty() {
+					found = true;
+					result.push_str(output);
+				}
+			}
 		}
 	}
 	if found {
@@ -667,6 +681,21 @@ pub fn handle_prompt_hidegroup(tokens: &mut VecDeque<PromptTk>) -> OxResult<Stri
 	} else {
 		Ok(String::new())
 	}
+}
+
+pub fn escseq_custom(query: &str) -> OxResult<String> {
+	let body = read_meta(|m| m.get_shopt(query))??;
+	let subshell = Node {
+		command: None,
+		nd_type: NdType::Subshell { body, argv: VecDeque::new() },
+		span: Span::new(),
+		flags: NdFlags::VALID_OPERAND,
+		redirs: VecDeque::new()
+	};
+	let (r_pipe,w_pipe) = RustFd::pipe()?;
+	let io = ProcIO::from(None,Some(w_pipe.mk_shared()),None);
+	execute::handle_subshell(subshell, io)?;
+	Ok(r_pipe.read()?)
 }
 
 pub fn escseq_gitbranch() -> OxResult<String> {
@@ -754,6 +783,10 @@ pub fn escseq_gitsigns() -> OxResult<String> {
 	let ahead_of_remote_symbol = if ahead_of_remote { ahead_of_remote_symbol } else { "".into() };
 	let behind_remote_symbol = if behind_remote { behind_remote_symbol } else { "".into() };
 	Ok(format!("{}{}{}{}{}",dirty_tree_symbol,no_unstaged_symbol,untracked_symbol,ahead_of_remote_symbol,behind_remote_symbol))
+}
+
+pub fn escseq_exitcode() -> OxResult<String> {
+	Ok(read_vars(|v| v.get_param("?"))?.unwrap_or_default())
 }
 
 pub fn escseq_success() -> OxResult<String> {
