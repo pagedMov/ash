@@ -449,6 +449,23 @@ pub fn handle_fg(job: Job) -> OxResult<()> {
 	enable_reaping()
 }
 
+pub fn check_git(path: PathBuf) -> Option<PathBuf> {
+	let mut current_path = path.as_path();
+
+	if current_path.join(".git").exists() {
+			return Some(current_path.join(".git"));
+	}
+
+	while let Some(parent) = current_path.parent() {
+		if parent.join(".git").exists() {
+			return Some(parent.join(".git"));
+		}
+		current_path = parent;
+	}
+
+	None
+}
+
 pub fn flatten_tree(left: Node, right: Node) -> VecDeque<Node> {
 	let mut flattened = VecDeque::new();
 	let mut stack = vec![(left, right)];
@@ -655,11 +672,12 @@ pub fn handle_prompt_hidegroup(tokens: &mut VecDeque<PromptTk>) -> OxResult<Stri
 pub fn escseq_gitbranch() -> OxResult<String> {
 	let current_dir = read_vars(|v| v.get_evar("PWD"))?.unwrap_or_default();
 	let branch_icon = read_meta(|m| m.get_shopt("prompt.git_signs.branch_icon"))?.unwrap().to_string().trim_matches('"').to_string();
-	let git_dir = PathBuf::from(current_dir.clone()).join(".git");
-	if !git_dir.exists() {
+	let git_path = if let Some(path) = check_git(PathBuf::from(current_dir.clone())) {
+		path
+	} else {
 		return Ok(String::new())
-	}
-	let repo = Repository::open(current_dir).unwrap();
+	};
+	let repo = Repository::open(git_path).unwrap();
 	let head = repo.head().unwrap();
 
 	if head.is_branch() {
@@ -678,12 +696,13 @@ pub fn escseq_gitsigns() -> OxResult<String> {
 	let untracked_symbol = shopts.get("prompt.git_signs.untracked")?.to_string().trim_matches('"').to_string();
 	let ahead_of_remote_symbol = shopts.get("prompt.git_signs.ahead_of_remote")?.to_string().trim_matches('"').to_string();
 	let behind_remote_symbol = shopts.get("prompt.git_signs.behind_remote")?.to_string().trim_matches('"').to_string();
-	let git_dir = PathBuf::from(current_dir.clone()).join(".git");
 
-	if !git_dir.exists() {
+	let git_path = if let Some(path) = check_git(PathBuf::from(current_dir.clone())) {
+		path
+	} else {
 		return Ok(String::new())
-	}
-	let repo = Repository::open(current_dir).unwrap();
+	};
+	let repo = Repository::open(git_path).unwrap();
 
 	let mut opts = StatusOptions::new();
 	opts.include_untracked(true)
