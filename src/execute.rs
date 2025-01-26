@@ -686,7 +686,7 @@ fn handle_assignment(node: Node) -> OxResult<OxWait> {
 
 fn handle_builtin(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 	let argv = node.get_argv()?;
-	match argv.first().unwrap().text() {
+	let result = match argv.first().unwrap().text() {
 		"echo" => builtin::echo(node, io)?,
 		"expr" => builtin::expr(node, io)?,
 		"set" => builtin::set_or_unset(node, true)?,
@@ -732,6 +732,12 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 		}
 		_ => unimplemented!("found this builtin: {}", argv[0].text()),
 	};
+	match result {
+		OxWait::Success => write_vars(|v| v.set_param("?".into(), "0".into()))?,
+		OxWait::Fail { code, cmd: _ } => write_vars(|v| v.set_param("?".into(), code.to_string()))?,
+		OxWait::Signaled { sig } | OxWait::Stopped { sig } => write_vars(|v| v.set_param("?".into(), (sig as i32).to_string()))?,
+		_ => unimplemented!()
+	}
 
 	Ok(OxWait::Success)
 }
@@ -758,16 +764,17 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 	 * )
 	 * This would produce the output `hello`.
 	 */
-	expand::expand_arguments(&mut node)?;
 	let redirs = node.get_redirs()?;
-
-	// Save environment state
-	let env_snapshot = SavedEnv::get_snapshot()?;
-	write_vars(|v| v.reset_params())?;
+	if let NdType::CommandSub { body } = node.nd_type {
+		let var_table = read_vars(|v| v.clone())?;
+		let expanded_body = expand::expand_var(body, &var_table)?;
+		node.nd_type = NdType::Subshell { body: expanded_body, argv: VecDeque::new() }
+	} else {
+		expand::expand_arguments(&mut node)?;
+	}
 
 	// Perform subshell node operation
 	node_operation!(NdType::Subshell { mut body, mut argv }, node, {
-		let vars = shellenv::borrow_var_table()?;
 		if body.is_empty() {
 			return Ok(OxWait::Success);
 		}
@@ -821,7 +828,6 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 						.with_children(children)
 						.build();
 					shellenv::attach_tty(child)?;
-					env_snapshot.restore_snapshot()?;
 					helper::handle_fg(job)?;
 				}
 			}
@@ -851,7 +857,6 @@ fn handle_function(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 		for (index,param) in pos_params.into_iter().enumerate() {
 			write_vars(|v| v.set_param((index + 1).to_string(), param))?;
 		}
-
 		event::execute(&func, node.flags, Some(node.redirs.clone()), Some(io))?;
 
 		Ok(OxWait::Success)

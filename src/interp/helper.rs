@@ -72,45 +72,20 @@ impl StrExtension for str {
 	/// If the string matches this pattern, it will return all three parts as a tuple
 	/// It also respects escaped characters
 	fn split_twice(&self, left: &str, right: &str) -> Option<(String, String, String)> {
-		let mut prefix = String::new();
-		let mut product = String::new();
 
-		// Search for the left delimiter
-		let mut chars = self.chars();
-		let mut buffer = String::new(); // Buffer for matching the left delimiter
+		// Find the position of the left delimiter
+		if let Some(left_pos) = self.find(left) {
+			let prefix = &self[..left_pos]; // Everything before the left delimiter
+			let remainder = &self[left_pos + left.len()..]; // Everything after the left delimiter
 
-		while let Some(ch) = chars.next() {
-			buffer.push(ch);
-			if buffer.ends_with(left) {
-				// Found the left delimiter, move remaining chars to `product`
-				prefix.push_str(&buffer[..buffer.len() - left.len()]);
-				product = chars.collect();
-				break;
-			}
-			if buffer.len() > left.len() {
-				buffer.drain(..buffer.len() - left.len());
-			}
-		}
+			// Find the position of the right delimiter in the remainder
+			if let Some(right_pos) = remainder.find(right) {
+				let product = &remainder[..right_pos]; // Between left and right delimiters
+				let suffix = &remainder[right_pos + right.len()..]; // Everything after the right delimiter
 
-		// If no left delimiter was found, return None
-		if product.is_empty() {
-			return None;
-		}
 
-		// Search for the right delimiter from the right
-		let mut buffer = String::new(); // Buffer for matching the right delimiter
-		let mut product_chars: Vec<char> = product.chars().collect();
-
-		while let Some(ch) = product_chars.pop() {
-			buffer.insert(0, ch); // Insert at the front (reverse order search)
-			if buffer.starts_with(right) {
-				// Found the right delimiter, split the product and suffix
-				let suffix = product_chars.split_off(product_chars.len() - buffer.len() + right.len());
-				product = product_chars.into_iter().collect(); // Remaining chars are the product
-				return Some((prefix, product, suffix.into_iter().collect()));
-			}
-			if buffer.len() > right.len() {
-				buffer.pop(); // Remove excess characters from the end
+				// Return the parts as owned Strings
+				return Some((prefix.to_string(), product.to_string(), suffix.to_string()));
 			}
 		}
 

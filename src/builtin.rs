@@ -585,7 +585,7 @@ pub fn test(mut argv: VecDeque<Tk>) -> OxResult<OxWait> {
 						false => return is_false(),
 					}
 				}
-				"]" => {}
+				"]" => { /* We are finished */ }
 				_ => {
 					return Err(ShError::from_syntax("Unexpected extra argument found in test", arg.span()));
 				}
