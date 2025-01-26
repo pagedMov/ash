@@ -15,20 +15,20 @@ use super::token::REGEX;
 
 static GLOB_CHARS: [&str;2] = ["*", "?"];
 
-pub fn check_globs(tk: Tk) -> bool {
+pub fn check_globs(tk: &Tk) -> bool {
 	let text = tk.text();
 	let flags = tk.flags();
 	let kind = &tk.tk_type;
-	dbg!(&tk);
 
 	if !flags.contains(WdFlags::IS_ARG) || flags.intersects(WdFlags::SNG_QUOTED | WdFlags::DUB_QUOTED) || *kind == TkType::String {
-		return false; // Skip if not an argument
+		return false; // These conditions invalidate globbing
 	}
 
 	// Check for unescaped glob characters
 
 	let has_globs = GLOB_CHARS.iter().any(|&ch| text.has_unescaped(ch));
-	let has_brackets = helper::has_valid_delims(text, "[", "]");
+	// Validate bracket pattern - must be unescaped, open bracket before close bracket, and both brackets must be outside of quotations
+	let has_brackets = helper::has_valid_delims(text, "[", "]") && text.has_unquoted("[") && text.has_unquoted("]");
 	has_globs || has_brackets
 }
 
@@ -342,8 +342,7 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> OxResult<VecDeque<Tk>> {
 	working_buffer.push_back(token.clone());
 	while let Some(mut token) = working_buffer.pop_front() {
 		// If expand_glob is true, then check for globs. Otherwise, is_glob is false
-		//let is_glob = if expand_glob { check_globs(token.clone()) } else { expand_glob };
-		let is_glob = false;
+		let is_glob = if expand_glob { check_globs(&token) } else { false };
 		let is_brace_expansion = helper::is_brace_expansion(token.text());
 		let is_cmd_sub = helper::has_valid_delims(token.text(), "$(", ")") || token.tk_type == TkType::CommandSub;
 
