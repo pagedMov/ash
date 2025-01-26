@@ -1,0 +1,78 @@
+---
+source: src/interp/token.rs
+expression: tokens
+---
+[
+    Tk {
+        tk_type: SOI,
+        wd: WordDesc {
+            text: "",
+            span: Span {
+                start: 0,
+                end: 0,
+            },
+            flags: WdFlags(
+                0x0,
+            ),
+        },
+    },
+    Tk {
+        tk_type: Ident,
+        wd: WordDesc {
+            text: "echo",
+            span: Span {
+                start: 0,
+                end: 4,
+            },
+            flags: WdFlags(
+                BUILTIN,
+            ),
+        },
+    },
+    Tk {
+        tk_type: String,
+        wd: WordDesc {
+            text: "hello",
+            span: Span {
+                start: 5,
+                end: 10,
+            },
+            flags: WdFlags(
+                IS_ARG,
+            ),
+        },
+    },
+    Tk {
+        tk_type: Redirection {
+            redir: Redir {
+                fd_source: 1,
+                op: Output,
+                fd_target: None,
+                file_target: None,
+            },
+        },
+        wd: WordDesc {
+            text: ">",
+            span: Span {
+                start: 11,
+                end: 12,
+            },
+            flags: WdFlags(
+                IS_OP,
+            ),
+        },
+    },
+    Tk {
+        tk_type: String,
+        wd: WordDesc {
+            text: "output.txt",
+            span: Span {
+                start: 13,
+                end: 23,
+            },
+            flags: WdFlags(
+                IS_ARG,
+            ),
+        },
+    },
+]

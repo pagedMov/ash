@@ -1,0 +1,84 @@
+---
+source: src/interp/token.rs
+expression: tokenizer
+---
+[
+    Tk {
+        tk_type: SOI,
+        wd: WordDesc {
+            text: "",
+            span: Span {
+                start: 0,
+                end: 0,
+            },
+            flags: WdFlags(
+                0x0,
+            ),
+        },
+    },
+    Tk {
+        tk_type: Ident,
+        wd: WordDesc {
+            text: "echo",
+            span: Span {
+                start: 0,
+                end: 4,
+            },
+            flags: WdFlags(
+                BUILTIN,
+            ),
+        },
+    },
+    Tk {
+        tk_type: String,
+        wd: WordDesc {
+            text: "one",
+            span: Span {
+                start: 5,
+                end: 8,
+            },
+            flags: WdFlags(
+                IS_ARG,
+            ),
+        },
+    },
+    Tk {
+        tk_type: String,
+        wd: WordDesc {
+            text: "two",
+            span: Span {
+                start: 9,
+                end: 12,
+            },
+            flags: WdFlags(
+                IS_ARG,
+            ),
+        },
+    },
+    Tk {
+        tk_type: String,
+        wd: WordDesc {
+            text: "three",
+            span: Span {
+                start: 13,
+                end: 18,
+            },
+            flags: WdFlags(
+                IS_ARG,
+            ),
+        },
+    },
+    Tk {
+        tk_type: String,
+        wd: WordDesc {
+            text: "four",
+            span: Span {
+                start: 19,
+                end: 23,
+            },
+            flags: WdFlags(
+                IS_ARG,
+            ),
+        },
+    },
+]

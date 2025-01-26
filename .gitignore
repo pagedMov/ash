@@ -5,11 +5,11 @@ target
 /result*
 *.log
 default.nix
+shell.nix
 *~
-nix
-flake.*
 TODO.md
 rust-toolchain.toml
+*snapshot*
 
 # cachix tmp file
 store-path-pre-build
@@ -29,4 +29,3 @@ ideas.md
 roadmap.md
 README.md
 file.*
-*snapshots*

@@ -1,0 +1,45 @@
+---
+source: src/interp/token.rs
+expression: tokens
+---
+[
+    Tk {
+        tk_type: SOI,
+        wd: WordDesc {
+            text: "",
+            span: Span {
+                start: 0,
+                end: 0,
+            },
+            flags: WdFlags(
+                0x0,
+            ),
+        },
+    },
+    Tk {
+        tk_type: FuncDef,
+        wd: WordDesc {
+            text: "func",
+            span: Span {
+                start: 0,
+                end: 6,
+            },
+            flags: WdFlags(
+                0x0,
+            ),
+        },
+    },
+    Tk {
+        tk_type: FuncBody,
+        wd: WordDesc {
+            text: "echo hi\n\t\t\tcat file.txt",
+            span: Span {
+                start: 7,
+                end: 8,
+            },
+            flags: WdFlags(
+                0x0,
+            ),
+        },
+    },
+]
