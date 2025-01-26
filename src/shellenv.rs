@@ -1128,7 +1128,7 @@ pub fn attach_tty(pgid: Pid) -> OxResult<()> {
 }
 
 pub fn term_controller() -> Pid {
-	unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) }.unwrap()
+	unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) }.unwrap_or(getpgrp())
 }
 
 fn init_shopts() -> HashMap<String,usize> {

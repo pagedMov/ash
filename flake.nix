@@ -8,18 +8,18 @@
       };
       oxBuild = pkgs.rustPlatform.buildRustPackage rec {
         pname = "ox";
-        version = "v0.1.1";
+        version = "v0.1.2-alpha";
 
         src = pkgs.fetchFromGitHub {
           owner = "pagedMov";
           repo = "ox";
-          rev = "45ab58de0a116e75debe7430055d02e3a92cca61";
+          rev = version;
           hash = "sha256-5XwZmsJF/imB8ZSBM9LCrQRRrG5sbjKl6N7MVYIUIck=";
         };
 
         doCheck = false; # TODO: Find a way to make tests work
 
-        cargoHash = "sha256-zGNlcCF5G1uPQ8/qU04DrZ+gg+YxqS7oumKRaXXZGeQ=";
+        cargoHash = "sha256-1ntyzdPB+QMea2/gBvDf2xkJyUWOkyM1J3WLyX+SDhM=";
 
         nativeBuildInputs = [
           pkgs.openssl
