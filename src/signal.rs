@@ -1,6 +1,6 @@
-use nix::{sys::{signal::{killpg, signal, SigHandler, Signal} , wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{getpgid, Pid}};
+use nix::{sys::{signal::{killpg, signal, SigHandler, Signal} , wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{getpgid, getpgrp, Pid}};
 
-use crate::{event::ShError, interp::helper, shellenv::{self, read_jobs, write_jobs, JobCmdFlags, JobID, RSH_PGRP}, OxResult};
+use crate::{event::ShError, interp::helper, shellenv::{self, read_jobs, write_jobs, JobCmdFlags, JobID}, OxResult};
 
 
 pub fn sig_handler_setup() {
@@ -88,7 +88,7 @@ pub fn handle_child_signal(pid: Pid, sig: Signal) -> OxResult<()> {
 		}
 	})?;
 	if matches!(sig,Signal::SIGINT) {
-		shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal
+		shellenv::attach_tty(getpgrp())?; // Reclaim terminal
 	}
 	Ok(())
 }
@@ -106,7 +106,7 @@ pub fn handle_child_stop(pid: Pid, signal: Signal) -> OxResult<()> {
 		}
 	})?;
 	let job = read_jobs(|j| j.query(JobID::Pid(pid)).cloned())?;
-	shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal
+	shellenv::attach_tty(getpgrp())?; // Reclaim terminal
 	Ok(())
 }
 
@@ -143,7 +143,7 @@ pub fn handle_child_exit(pid: Pid, status: WaitStatus) -> OxResult<()> {
 
 	if is_finished {
 		if is_fg {
-			shellenv::attach_tty(*RSH_PGRP)?; // Reclaim terminal control
+			shellenv::attach_tty(getpgrp())?; // Reclaim terminal control
 		} else {
 			println!();
 			let job_order = read_jobs(|j| j.job_order().to_vec())?;

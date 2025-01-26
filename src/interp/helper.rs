@@ -1,6 +1,6 @@
-use crate::{event::ShError, execute::{self, ProcIO, RustFd}, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, RVal, RSH_PGRP }, OxResult};
+use crate::{event::ShError, execute::{self, ProcIO, RustFd}, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, RVal}, OxResult};
 use git2::{Repository, StatusOptions};
-use nix::{sys::wait::WaitStatus, unistd::dup2, NixPath};
+use nix::{sys::wait::WaitStatus, unistd::{dup2, getpgrp}, NixPath};
 use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread};
 
 use super::{expand::{self, PromptTk}, parse::{NdFlags, NdType, Node, Span}, token::{Tk, TkType, WdFlags, WordDesc}};
@@ -448,11 +448,11 @@ pub fn handle_fg(job: Job) -> OxResult<()> {
 	for status in statuses {
 		match status {
 			WaitStatus::Stopped(pid, sig) => {
-				attach_tty(*RSH_PGRP)?;
+				attach_tty(getpgrp())?;
 				crate::signal::handle_child_stop(pid, sig)?
 			},
 			WaitStatus::Signaled(pid, sig, _) => {
-				attach_tty(*RSH_PGRP)?;
+				attach_tty(getpgrp())?;
 				crate::signal::handle_child_signal(pid, sig)?
 			},
 			_ => { /* Do nothing */ }

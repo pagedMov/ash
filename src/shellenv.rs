@@ -2,7 +2,7 @@ use std::{collections::{BTreeMap, VecDeque}, env, ffi::{CString, OsStr}, fmt, ha
 use std::collections::HashMap;
 
 use bitflags::bitflags;
-use nix::{sys::{signal::{kill, killpg, signal, SigHandler, Signal}, wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{gethostname, isatty, setpgid, tcgetpgrp, tcsetpgrp, Pid, User}};
+use nix::{sys::{signal::{kill, killpg, signal, SigHandler, Signal}, wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{gethostname, getpgrp, isatty, setpgid, tcgetpgrp, tcsetpgrp, Pid, User}};
 use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::{fs::File, sync::RwLock};
@@ -44,7 +44,6 @@ impl fmt::Display for DisplayWaitStatus {
 	}
 }
 
-pub static RSH_PGRP: Lazy<Pid> = Lazy::new(Pid::this);
 pub static RSH_PATH: Lazy<String> = Lazy::new(|| std::env::current_exe().unwrap().to_str().unwrap().to_string());
 
 pub static JOBS: LazyLock<Arc<RwLock<JobTable>>> = LazyLock::new(|| {
@@ -324,7 +323,7 @@ impl Job {
 					child.set_status(status);
 				}
 				Err(_) => {
-					attach_tty(*RSH_PGRP)?
+					attach_tty(getpgrp())?
 				}
 			}
 		}
@@ -468,12 +467,12 @@ impl JobTable {
 		self.fg = Some(job);
 		attach_tty(pgid)?;
 		let statuses = self.fg.as_mut().unwrap().wait_pgrp()?;
-		attach_tty(*RSH_PGRP)?;
+		attach_tty(getpgrp())?;
 		Ok(statuses)
 	}
 
 	pub fn fg_to_bg(&mut self, status: WaitStatus) -> OxResult<()> {
-		attach_tty(*RSH_PGRP)?;
+		attach_tty(getpgrp())?;
 		if self.fg.is_none() {
 			return Ok(())
 		}
@@ -1102,8 +1101,13 @@ pub fn attach_tty(pgid: Pid) -> OxResult<()> {
 		}
 	}
 
-	if pgid == *RSH_PGRP && read_meta(|m| m.flags().contains(EnvFlags::IN_SUBSH))? {
+	if pgid == getpgrp() && read_meta(|m| m.flags().contains(EnvFlags::IN_SUBSH))? {
+		dbg!("skipping term attachment in subshell");
 		return Ok(())
+	}
+
+	if pgid == getpgrp() && term_controller() != getpgrp() {
+		kill(term_controller(), Signal::SIGTTOU).ok();
 	}
 
 	if unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) == Ok(pgid) } {
@@ -1117,7 +1121,7 @@ pub fn attach_tty(pgid: Pid) -> OxResult<()> {
 		Ok(_) => Ok(()),
 		Err(e) => {
 			eprintln!("Failed to set terminal process group: {}", e);
-			unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), Pid::this()).unwrap(); }
+			unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), getpgrp()).unwrap(); }
 			Ok(())
 		}
 	}

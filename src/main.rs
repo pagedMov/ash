@@ -37,7 +37,7 @@ use event::ShError;
 use execute::{traverse_ast, OxWait, RustFd};
 use interp::{parse::{descend, NdType}, token::OxTokenizer};
 use nix::{fcntl::OFlag, sys::{stat::Mode, termios::{self, LocalFlags}}, unistd::{Pid,isatty}};
-use shellenv::{read_vars, write_meta, write_vars, EnvFlags, RSH_PATH, RSH_PGRP};
+use shellenv::{read_vars, write_meta, write_vars, EnvFlags, RSH_PATH};
 use termios::Termios;
 
 //use crate::event::EventLoop;
@@ -67,7 +67,6 @@ fn initialize_proc_constants() {
 	 * These two variables are set using Lazy,
 	 * in order to kick-start the lazy evaluation, we dereference them very early
 	 */
-	let _ = *RSH_PGRP;
 	let _ = *RSH_PATH;
 }
 
@@ -89,7 +88,7 @@ async fn main() {
 			shellenv::source_file(path).unwrap();
 		}
 	}
-	if !args.contains(&"--no-rc".into()) && !args.contains(&"--subshell".into()) {
+	if !args.contains(&"--no-rc".into()) {
 		let home = read_vars(|vars| vars.get_evar("HOME")).unwrap().unwrap();
 		let path = PathBuf::from(format!("{}/.oxrc",home));
 		if path.exists() {
@@ -97,6 +96,7 @@ async fn main() {
 		}
 	}
 	if args.iter().any(|arg| arg == "--subshell") {
+		dbg!("in subshell");
 		let index = args.iter().position(|arg| arg == "--subshell").unwrap();
 		interactive = false;
 		args.remove(index);

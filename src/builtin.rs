@@ -18,7 +18,7 @@ use crate::interp::helper::{self, StrExtension, VecDequeExtension};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType, WdFlags};
-use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, HashFloat, JobBuilder, JobCmdFlags, JobID, RVal, RSH_PGRP};
+use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, HashFloat, JobBuilder, JobCmdFlags, JobID, RVal};
 use crate::event::ShError;
 use crate::{deconstruct, node_operation, OxResult};
 

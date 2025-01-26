@@ -2,7 +2,7 @@ use std::{collections::VecDeque, ffi::c_int, fmt::Display, io, panic::Location, 
 
 
 use bitflags::Flags;
-use nix::unistd::{isatty, Pid};
+use nix::unistd::{getpgrp, isatty, Pid};
 
 use crate::{execute::{self, OxWait, ProcIO}, interp::{helper, parse::{descend, NdFlags, Node, Span}, token::OxTokenizer}, prompt, shellenv::{self, read_meta, read_vars, write_meta, EnvFlags}, OxResult};
 
@@ -254,6 +254,11 @@ pub fn main_loop() -> OxResult<()> {
 		eprintln!("I shouldnt be here");
 	}
 	loop {
+		if shellenv::term_controller() != getpgrp() {
+			// If we don't control the terminal at this point for some reason, take control of it
+			// Bad things will happen if we reach the prompt without terminal control
+			shellenv::attach_tty(getpgrp())?;
+		}
 		let input = prompt::run()?;
 		write_meta(|m| m.leave_prompt())?;
 		execute(&input, NdFlags::empty(), None, None)?;
