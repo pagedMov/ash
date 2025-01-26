@@ -358,52 +358,66 @@ impl PromptCustom {
 	pub fn set(&mut self, mut query: VecDeque<String>, value: Value) -> OxResult<()> {
 		if query.len() == 1 {
 			let key = query.pop_front().unwrap();
-			self.opts.insert(key,value);
-			return Ok(())
+			self.opts.insert(key, value);
+			return Ok(());
 		}
-		let mut map_stack = vec![self.opts.clone()]; // Start with a clone of self.opts
-		let mut key_stack = vec![]; // Start with a clone of self.opts
+
+		let mut current_map = &mut self.opts;
 
 		while let Some(key) = query.pop_front() {
 			dbg!(&key);
-			key_stack.push(key.clone());
-			let current_map = map_stack.last().unwrap().clone(); // Clone the current map
-			match current_map.get(&key) {
-				Some(Value::Object(map)) => {
-					// Push the existing object onto the stack
-					map_stack.push(map.clone());
+			// Remove the current map to allow mutation
+			let existing_value = current_map.remove(&key);
+
+			match existing_value {
+				Some(Value::Object(mut map)) => {
+					// Navigate into the existing map
+					if query.is_empty() {
+						map.insert(key.clone(), value.clone());
+					}
+					// Re-insert the modified map
+					current_map.insert(key.clone(), Value::Object(map));
+					current_map = match current_map.get_mut(&key).unwrap() {
+						Value::Object(map) => map,
+						_ => break
+					};
 				}
 				Some(_) => {
-					// If the key exists but isn't an object, overwrite it
-					let mut new_map = current_map.clone();
-					new_map.insert(key, value.clone());
-					map_stack.push(new_map);
-					break;
+					// If the key exists but isn't an object, overwrite it with a new map
+					let mut new_map = Map::new();
+					if query.is_empty() {
+						new_map.insert(key.clone(), value.clone());
+					} else {
+						new_map.insert(key.clone(), Value::Object(Map::new()));
+					}
+					current_map.insert(key.clone(), Value::Object(new_map));
+					current_map = match current_map.get_mut(&key).unwrap() {
+						Value::Object(map) => map,
+						_ => break
+					};
 				}
 				None => {
 					// If the key doesn't exist, create a new map for the remaining keys
-					let mut new_map = Map::new();
+					let mut new_map = Value::Object(Map::new());
+					dbg!(&query);
 					if query.is_empty() {
-						new_map.insert(key, value.clone()); // Insert the final value
+						dbg!("storing value");
+						dbg!(&key);
+						dbg!(&value);
+						current_map.insert(key.clone(), value.clone()); // Placeholder object
 					} else {
-						new_map.insert(key.clone(), Value::Object(Map::new())); // Placeholder object
+						dbg!("storing new map");
+						dbg!(&key);
+						current_map.insert(key.clone(), new_map); // Placeholder object
 					}
-					map_stack.push(new_map);
+					current_map = match current_map.get_mut(&key).unwrap() {
+						Value::Object(map) => map,
+						_ => break
+					};
 				}
 			}
 		}
-
-		// Reconstruct maps in reverse order
-		let mut reconstructed = map_stack.pop().unwrap();
-		while let Some(mut parent) = map_stack.pop() {
-			let key = key_stack.pop().unwrap();
-			parent.insert(key, Value::Object(reconstructed));
-			reconstructed = parent;
-		}
-
-		dbg!(&reconstructed);
-		// Replace self.opts with the reconstructed map
-		self.opts = reconstructed;
+		dbg!(&self);
 
 		Ok(())
 	}
