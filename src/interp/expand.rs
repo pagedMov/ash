@@ -457,7 +457,7 @@ pub fn expand_cmd_sub(token: Tk) -> OxResult<Tk> {
 		let body = token.text().to_string();
 		let node = Node {
 			command: None,
-			nd_type: NdType::Subshell { body, argv: VecDeque::new() },
+			nd_type: NdType::CommandSub { body },
 			flags: NdFlags::VALID_OPERAND | NdFlags::IN_CMD_SUB,
 			redirs: VecDeque::new(),
 			span: token.span(),
@@ -466,10 +466,12 @@ pub fn expand_cmd_sub(token: Tk) -> OxResult<Tk> {
 		let io = ProcIO::from(None, Some(w_pipe.mk_shared()), None);
 		execute::handle_subshell(node, io)?;
 		let buffer = r_pipe.read()?;
+		let var_table = read_vars(|v| v.clone())?;
+		let expanded = expand_var(buffer.trim().to_string(), &var_table)?;
 		new_token = Tk {
 			tk_type: TkType::String,
 			wd: WordDesc {
-				text: buffer.trim().to_string(),
+				text: expanded,
 				span: token.span(),
 				flags: token.flags(),
 			},

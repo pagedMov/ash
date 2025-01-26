@@ -727,7 +727,11 @@ impl OxTokenizer {
 							},
 						};
 						let new_tk = expand::expand_cmd_sub(dummy_tk)?;
-						word = format!("{}{}{}", left, new_tk.text(), right);
+						if left.ends_with('=') {
+							word = format!("{}\"{}\"{}", left, new_tk.text(), right);
+						} else {
+							word = format!("{}{}{}", left, new_tk.text(), right);
+						}
 						replaced = true;
 					}
 				}
@@ -776,9 +780,9 @@ impl OxTokenizer {
 	pub fn tokenize_one(&mut self) -> OxResult<Vec<Tk>> {
 		use crate::interp::token::TkState::*;
 		if !self.expanded { // Replacing these first is the simplest way
+			self.cmd_sub_pass()?;
 			self.alias_pass()?;
 			self.var_pass()?;
-			self.cmd_sub_pass()?;
 			self.precompute_spans();
 			write_meta(|m| m.set_last_input(&self.input))?;
 			self.expanded = true;
@@ -1303,7 +1307,7 @@ impl OxTokenizer {
 						wd = wd.add_char(char)
 					}
 				}
-				'[' if paren_stack.is_empty() && !sng_quote && !dub_quote => {
+				'[' if paren_stack.is_empty() && !sng_quote && !dub_quote && (*self.ctx() != TkState::Command || wd.text.ends_with('=')) => {
 					bracket_stack.push(ch);
 					wd = wd.add_char(ch);
 				}

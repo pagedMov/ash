@@ -9,6 +9,7 @@ use crate::interp::token::{RedirType, OxTokenizer, Tk, TkType};
 use crate::shellenv::read_logic;
 use crate::{builtin, OxResult};
 
+use super::expand;
 use super::helper::{self, flatten_tree};
 use super::token::{Redir, WdFlags};
 
@@ -59,9 +60,11 @@ enum Phase {
 	Array,
 }
 
+#[derive(Debug)]
 enum CmdType {
 	Builtin,
 	Subshell,
+	CommandSub,
 	Function,
 	Command
 }
@@ -213,6 +216,7 @@ pub enum NdType {
 	Chain { commands: VecDeque<Node>, op: Box<Node> },
 	BraceGroup { body: Box<Node> },
 	Subshell { body: String, argv: VecDeque<Tk> }, // It's a string because we're going to parse it in a subshell later
+	CommandSub { body: String },
 	FuncDef { name: String, body: String },
 	Assignment {name: String, value: Option<String> },
 	Command { argv: VecDeque<Tk> },
@@ -426,7 +430,7 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> OxResult<DescentCont
 					/* Fall through */
 				}
 			}
-			Subshell => {
+			Subshell | CommandSub => {
 				ctx.tokens.push_front(tk);
 				ctx = build_command(ctx)?;
 			}
@@ -859,8 +863,6 @@ pub fn build_redirection(mut ctx: DescentContext) -> OxResult<DescentContext> {
 				.ok_or_else(|| ShError::from_parse("Did not find an output for this redirection operator", span))?;
 
 				if !matches!(target.class(), TkType::Ident | TkType::String) {
-					dbg!(&redir);
-					dbg!(&target);
 					return Err(ShError::from_parse(format!("Expected identifier after redirection operator, found this: {}",target.text()).as_str(), span))
 				}
 
@@ -1489,16 +1491,20 @@ pub fn build_command(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	let mut background = false;
 
 	let cmd = ctx.front_tk().unwrap().clone();
+	dbg!(&cmd.text());
 	let func_body = read_logic(|l| l.get_func(cmd.text()))?;
 	let cmd_type = if func_body.is_some() {
 		CmdType::Function
 	} else if cmd.tk_type == TkType::Subshell {
 		CmdType::Subshell
-	} else if builtin::BUILTINS.contains(&cmd.text()) {
+	} else if cmd.tk_type == TkType::CommandSub {
+		CmdType::CommandSub
+	} else if builtin::BUILTINS.contains(&cmd.text()) || cmd.text().starts_with("[ ") {
 		CmdType::Builtin
 	} else {
 		CmdType::Command
 	};
+	dbg!(&cmd_type);
 
 	while let Some(mut tk) = ctx.next_tk() {
 
@@ -1561,7 +1567,7 @@ pub fn build_command(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	}
 
 
-	let command = argv.front().cloned();
+	let mut command = argv.front().cloned();
 	let span = compute_span(&argv);
 	let mut node = match cmd_type {
 		CmdType::Command => {
@@ -1586,6 +1592,15 @@ pub fn build_command(mut ctx: DescentContext) -> OxResult<DescentContext> {
 			Node {
 				command,
 				nd_type: NdType::Function { body: func_body.unwrap(), argv },
+				span,
+				flags: NdFlags::VALID_OPERAND,
+				redirs: VecDeque::new()
+			}
+		}
+		CmdType::CommandSub => {
+			Node {
+				command: None,
+				nd_type: NdType::CommandSub { body: cmd.text().into() },
 				span,
 				flags: NdFlags::VALID_OPERAND,
 				redirs: VecDeque::new()
