@@ -59,6 +59,7 @@ pub trait StrExtension {
 	fn trim_command_sub(&self) -> Option<String>;
 	fn split_last(&self, pat: &str) -> Option<(String,String)>;
 	fn has_unescaped(&self, pat: &str) -> bool;
+	fn has_unquoted(&self, pat: &str) -> bool;
 	fn consume_escapes(&self) -> String;
 	fn trim_quotes(&self) -> String;
 	fn split_outside_quotes(&self) -> Vec<String>;
@@ -242,6 +243,46 @@ impl StrExtension for str {
 
 		// Check for unescaped match at the end of the string
 		!escaped && working_pat.contains(pat)
+	}
+	fn has_unquoted(&self, pat: &str) -> bool {
+		let mut chars = self.chars().peekable();
+		let mut in_double_quotes = false;
+		let mut in_single_quotes = false;
+
+		// Sliding window to track the current state of the string
+		let mut window = String::with_capacity(pat.len());
+
+		while let Some(ch) = chars.next() {
+			match ch {
+				'"' if !in_single_quotes => {
+					// Toggle double-quote state
+					in_double_quotes = !in_double_quotes;
+				}
+				'\'' if !in_double_quotes => {
+					// Toggle single-quote state
+					in_single_quotes = !in_single_quotes;
+				}
+				'\\' if in_double_quotes || in_single_quotes => {
+					// Skip the escaped character in quotes
+					chars.next();
+				}
+				_ if !in_double_quotes && !in_single_quotes => {
+					// Append to the sliding window only if not in quotes
+					window.push(ch);
+					if window.len() > pat.len() {
+						window.remove(0); // Maintain window size
+					}
+					if window == pat {
+						return true;
+					}
+				}
+				_ => {
+					// Inside quotes, ignore the content
+				}
+			}
+		}
+
+		false
 	}
 
 }
