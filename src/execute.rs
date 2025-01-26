@@ -686,7 +686,7 @@ fn handle_assignment(node: Node) -> OxResult<OxWait> {
 
 fn handle_builtin(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 	let argv = node.get_argv()?;
-	match argv.first().unwrap().text() {
+	let result = match argv.first().unwrap().text() {
 		"echo" => builtin::echo(node, io)?,
 		"expr" => builtin::expr(node, io)?,
 		"set" => builtin::set_or_unset(node, true)?,
@@ -732,6 +732,12 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 		}
 		_ => unimplemented!("found this builtin: {}", argv[0].text()),
 	};
+	match result {
+		OxWait::Success => write_vars(|v| v.set_param("?".into(), "0".into()))?,
+		OxWait::Fail { code, cmd: _ } => write_vars(|v| v.set_param("?".into(), code.to_string()))?,
+		OxWait::Signaled { sig } | OxWait::Stopped { sig } => write_vars(|v| v.set_param("?".into(), (sig as i32).to_string()))?,
+		_ => unimplemented!()
+	}
 
 	Ok(OxWait::Success)
 }

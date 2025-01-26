@@ -1491,7 +1491,6 @@ pub fn build_command(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	let mut background = false;
 
 	let cmd = ctx.front_tk().unwrap().clone();
-	dbg!(&cmd.text());
 	let func_body = read_logic(|l| l.get_func(cmd.text()))?;
 	let cmd_type = if func_body.is_some() {
 		CmdType::Function
@@ -1504,7 +1503,6 @@ pub fn build_command(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	} else {
 		CmdType::Command
 	};
-	dbg!(&cmd_type);
 
 	while let Some(mut tk) = ctx.next_tk() {
 
