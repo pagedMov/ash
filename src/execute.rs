@@ -102,9 +102,18 @@ impl RustFd {
 			return Err(ShError::from_internal("Attempted to read from an invalid RustFd"));
 		}
 		let mut buffer = [0; 1024];
-		let bytes_read = nix::unistd::read(self.as_raw_fd(), &mut buffer).map_err(|_| ShError::from_io())?;
-		let output = String::from_utf8_lossy(&buffer[..bytes_read]);
-		Ok(output.to_string())
+		let mut output = String::new();
+
+		loop {
+			match nix::unistd::read(self.as_raw_fd(), &mut buffer) {
+				Ok(0) => break, // End of pipe
+				Ok(bytes_read) => {
+					output.push_str(&String::from_utf8_lossy(&buffer[..bytes_read]));
+				}
+				Err(_) => return Err(ShError::from_io()),
+			}
+		}
+		Ok(output)
 	}
 
 	/// Wrapper for nix::unistd::pipe(), simply produces two `RustFds` that point to a read and write pipe respectfully
