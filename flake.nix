@@ -13,7 +13,7 @@
         src = pkgs.fetchFromGitHub {
           owner = "pagedMov";
           repo = "ox";
-          rev = version;
+          rev = "45ab58de0a116e75debe7430055d02e3a92cca61";
           hash = "sha256-5XwZmsJF/imB8ZSBM9LCrQRRrG5sbjKl6N7MVYIUIck=";
         };
 

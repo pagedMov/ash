@@ -2,7 +2,7 @@
 #### 🚧 Currently Under Construction 🚧
 This project is currently in extremely early production. Documentation is currently limited, and it is most likely going to experience many growing pains as it is developed. Expect many breaking changes if you wish to use it.
 
-Ox is a modern, customizable shell that aims to push the capabilities of shell scripting while maintaining familiarity with traditional shells like bash and zsh.
+Ox is a modern, customizable shell program written in Rust that aims to push the capabilities of shell scripting while maintaining familiarity with traditional shells like bash and zsh.
 
 ---
 
