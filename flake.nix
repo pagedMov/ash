@@ -8,7 +8,7 @@
       };
       oxBuild = pkgs.rustPlatform.buildRustPackage rec {
         pname = "ox";
-        version = "v0.1.1-alpha";
+        version = "v0.1.1";
 
         src = pkgs.fetchFromGitHub {
           owner = "pagedMov";
