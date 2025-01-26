@@ -1,0 +1,61 @@
+---
+source: src/interp/parse.rs
+expression: flat_nodes
+---
+[
+    Node {
+        command: Some(
+            Tk {
+                tk_type: Ident,
+                wd: WordDesc {
+                    text: "echo",
+                    span: Span {
+                        start: 0,
+                        end: 4,
+                    },
+                    flags: WdFlags(
+                        BUILTIN,
+                    ),
+                },
+            },
+        ),
+        nd_type: Builtin {
+            argv: [
+                Tk {
+                    tk_type: Ident,
+                    wd: WordDesc {
+                        text: "echo",
+                        span: Span {
+                            start: 0,
+                            end: 4,
+                        },
+                        flags: WdFlags(
+                            BUILTIN,
+                        ),
+                    },
+                },
+                Tk {
+                    tk_type: String,
+                    wd: WordDesc {
+                        text: "hello world",
+                        span: Span {
+                            start: 5,
+                            end: 11,
+                        },
+                        flags: WdFlags(
+                            IS_ARG,
+                        ),
+                    },
+                },
+            ],
+        },
+        span: Span {
+            start: 0,
+            end: 11,
+        },
+        flags: NdFlags(
+            VALID_OPERAND,
+        ),
+        redirs: [],
+    },
+]

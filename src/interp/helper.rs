@@ -1,21 +1,9 @@
-<<<<<<< HEAD
 use crate::{event::ShError, execute::{self, ProcIO, RustFd}, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, RVal, RSH_PGRP }, OxResult};
-||||||| 9f7cda9
-use crate::{event::ShError, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, RVal, RSH_PGRP }, OxResult};
-=======
-use crate::{event::ShError, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, RVal, RSH_PGRP }, OxResult};
->>>>>>> master
 use git2::{Repository, StatusOptions};
 use nix::{sys::wait::WaitStatus, unistd::dup2, NixPath};
 use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread};
 
-<<<<<<< HEAD
 use super::{expand::{self, PromptTk}, parse::{NdFlags, NdType, Node, Span}, token::{Tk, TkType, WdFlags, WordDesc}};
-||||||| 9f7cda9
-use super::{parse::{NdType, Node, Span}, token::{Tk, TkType, WdFlags, WordDesc}};
-=======
-use super::{expand::{self, PromptTk}, parse::{NdType, Node, Span}, token::{Tk, TkType, WdFlags, WordDesc}};
->>>>>>> master
 
 #[macro_export]
 macro_rules! deconstruct {
