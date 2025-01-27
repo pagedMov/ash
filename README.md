@@ -74,7 +74,7 @@ if true;then echo foo;fi;done
 ```
 
 ## 🚧 Feature Roadmap
-This project aims to improve the general experience of using the shell, in the contexts of both scripting and general interactive use. As such, many of the features I hope to implement are going to be quality of life features, or improvements that break the limitations commonly associated with shell scripting.
+This project aims to improve the general experience of using the shell, in the contexts of both scripting and general interactive use. As such, many of the features I hope to implement are going to be quality of life features, or improvements that break limitations commonly associated with shell scripting.
 - **Macros:**
 	- Something similar to Rust's macro system, which would allow for dynamic expansion of syntax at script run-time. Functionally, this would exist as something in-between aliases and functions, and would allow for interesting functionality.
 - **Builtins for Common Tasks:**
