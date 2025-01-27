@@ -8,12 +8,12 @@
       };
       oxBuild = pkgs.rustPlatform.buildRustPackage rec {
         pname = "ox";
-        version = "v0.1.2";
+        version = "v0.2.0-alpha";
 
         src = pkgs.fetchFromGitHub {
           owner = "pagedMov";
           repo = "ox";
-          rev = "2bd2387dfe7a7703e96f4ad0efc0c022963cd5f0";
+          rev = version;
           hash = "sha256-0uEOcCO6XLeSwGIWctlqdyEqStPhDY/4K/7DlAqC+dA=";
         };
 
