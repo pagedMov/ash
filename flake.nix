@@ -19,7 +19,7 @@
 
         doCheck = false; # TODO: Find a way to make tests work
 
-        cargoHash = "sha256-OGloUqg0H4bBxQp4+WLlY49rgbmJFeriNllTwP/04xM=";
+        cargoHash = "sha256-tge4KTZd0q1axHEHqHYcYi8Mg4JMZlGIkjpJ1EgUJR4=";
 
         nativeBuildInputs = [
           pkgs.openssl
