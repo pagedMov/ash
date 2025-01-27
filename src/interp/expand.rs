@@ -20,7 +20,7 @@ pub fn check_globs(tk: &Tk) -> bool {
 	let flags = tk.flags();
 	let kind = &tk.tk_type;
 
-	if !flags.contains(WdFlags::IS_ARG) || flags.intersects(WdFlags::SNG_QUOTED | WdFlags::DUB_QUOTED) || *kind == TkType::String {
+	if !flags.contains(WdFlags::IS_ARG) || flags.intersects(WdFlags::SNG_QUOTED | WdFlags::DUB_QUOTED | WdFlags::FROM_VAR) || *kind == TkType::String {
 		return false; // These conditions invalidate globbing
 	}
 
@@ -340,7 +340,6 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> OxResult<VecDeque<Tk>> {
 	working_buffer.push_back(token.clone());
 	while let Some(mut token) = working_buffer.pop_front() {
 		// If expand_glob is true, then check for globs. Otherwise, is_glob is false
-		let is_glob = if expand_glob { check_globs(&token) } else { false };
 		let is_brace_expansion = helper::is_brace_expansion(token.text());
 		let is_cmd_sub = helper::has_valid_delims(token.text(), "$(", ")") || token.tk_type == TkType::CommandSub;
 
@@ -357,7 +356,7 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> OxResult<VecDeque<Tk>> {
 			token.wd.text = token.wd.text.replace("~",&home);
 		}
 
-		if !matches!(token.tk_type, TkType::Expanded) && !is_glob && !is_brace_expansion {
+		if !matches!(token.tk_type, TkType::Expanded) && !is_brace_expansion {
 			if token.text().has_unescaped("$") && !token.wd.flags.intersects(WdFlags::FROM_VAR | WdFlags::SNG_QUOTED) {
 				if token.text().has_unescaped("$@") {
 					let mut param_tokens = expand_params(token)?;
@@ -367,7 +366,12 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> OxResult<VecDeque<Tk>> {
 					continue
 				}
 				let vars = shellenv::borrow_var_table().unwrap();
-				token.wd.text = expand_var(token.text().into(),&vars)?;
+				let token_text = token.wd.text.clone();
+				let expanded = expand_var(token.text().to_string(),&vars)?;
+				if expanded != token_text {
+					token.wd.flags |= WdFlags::FROM_VAR
+				}
+				token.wd.text = expanded;
 			}
 			if helper::is_brace_expansion(token.text()) || token.text().has_unescaped("$") {
 				working_buffer.push_front(token);
@@ -395,20 +399,6 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> OxResult<VecDeque<Tk>> {
 					}
 				);
 			};
-		} else if is_glob {
-			// Expand glob patterns
-			for path in glob(token.text()).unwrap().flatten() {
-				working_buffer.push_back(
-					Tk {
-						tk_type: TkType::Expanded,
-						wd: WordDesc {
-							text: path.to_str().unwrap().to_string(),
-							span: token.span(),
-							flags: token.flags()
-						}
-					}
-				);
-			}
 		} else if let Some(alias_content) = read_logic(|log| log.get_alias(token.text()))? {
 			let alias_content = alias_content.split(' ');
 			for word in alias_content {
@@ -471,7 +461,7 @@ pub fn expand_cmd_sub(token: Tk) -> OxResult<Tk> {
 			wd: WordDesc {
 				text: expanded,
 				span: token.span(),
-				flags: token.flags(),
+				flags: token.flags() | WdFlags::FROM_VAR,
 			},
 		};
 		r_pipe.close()?;

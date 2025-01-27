@@ -1,7 +1,7 @@
 use crate::{event::ShError, execute::{self, ProcIO, RustFd}, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, OxVal}, OxResult};
 use nix::{sys::wait::WaitStatus, unistd::{dup2, getpgrp}, NixPath};
 use serde_json::Value;
-use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread};
+use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io::{self, Read}, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread};
 
 use super::{expand::{self, PromptTk}, parse::{NdFlags, NdType, Node, Span}, token::{Tk, TkType, WdFlags, WordDesc}};
 
@@ -64,9 +64,29 @@ pub trait StrExtension {
 	fn trim_quotes(&self) -> String;
 	fn split_outside_quotes(&self) -> Vec<String>;
 	fn split_twice(&self,left: &str, right: &str) -> Option<(String,String,String)>;
+	fn expand_globs(&self) -> Vec<String>;
 }
 
 impl StrExtension for str {
+	fn expand_globs(&self) -> Vec<String> {
+		let result = match glob::glob(self) {
+			Ok(paths) => {
+				let mut working_buffer = vec![];
+				for path_result in paths {
+					if let Ok(path) = path_result {
+						working_buffer.push(path.to_str().unwrap().to_string());
+					}
+				}
+				if !working_buffer.is_empty() {
+					working_buffer
+				} else {
+					vec![self.to_string()]
+				}
+			}
+			Err(_) => vec![self.to_string()]
+		};
+		result
+	}
 	/// This function looks for two patterns to split at.
 	/// The left one must come first, and the right one second.
 	/// If the string matches this pattern, it will return all three parts as a tuple
@@ -269,38 +289,50 @@ impl StrExtension for str {
 
 }
 
-pub fn sanitize_json_string(value: &str) -> Value {
-	let sanitized = value
-		.chars()
-		.map(|c| {
-			if c.is_control() {
-				match c {
-					'\n' => "\\n".to_string(),
-					'\r' => "\\r".to_string(),
-					'\t' => "\\t".to_string(),
-					_ => format!("\\u{{{:04X}}}", c as u32), // Encode other control characters as Unicode escape
-				}
-			} else {
-				c.to_string()
+/// I don't feel like learning how to use a debugger
+/// So I made this instead
+pub fn breakpoint<T: std::fmt::Debug>(var: T) {
+	eprintln!("{:?}",var);
+	eprintln!("Press any key to continue...");
+	let _ = std::io::stdin().bytes().next(); // Waits for any keystroke before continuing
+}
+
+pub fn contains_glob(word: &str) -> bool {
+	let mut chars = word.chars();
+	while let Some(c) = chars.next() {
+		match c {
+			'\\' => {
+				chars.next(); // Skip escaped characters
 			}
-		})
-	.collect::<String>().trim().to_string();
-	dbg!(&sanitized);
-	Value::String(sanitized)
-}
-
-pub fn desanitize_json_string(value: &str) -> String {
-	let desanitized = value.replace("\\n","\n").replace("\\t","\t").replace("\\r","\r").to_string();
-	desanitized
-}
-
-pub fn to_valid_json(value: &Value) -> String {
-	match value {
-		Value::String(s) => format!("\"{}\"", s),  // Wrap strings in quotes
-		Value::Bool(b) => format!("\"{}\"", b.to_string()),  // Wrap strings in quotes
-		Value::Number(n) => format!("\"{}\"", n.to_string()),  // Wrap strings in quotes
-		_ => format!("\"{}\"",value.to_string()),                  // Fallback for other types
+			'\'' => {
+				while let Some(c) = chars.next() {
+					if c == '\'' { break }
+				}
+			}
+			'"' => {
+				while let Some(c) = chars.next() {
+					if c == '"' { break }
+				}
+			}
+			'(' => {
+				while let Some(c) = chars.next() {
+					if c == ')' { break }
+				}
+			}
+			'*' | '?' => return true,
+			'[' => {
+				while let Some(next) = chars.next() {
+					match next {
+						'\\' => { chars.next(); continue }
+						']' => return true,
+						_ => continue
+					}
+				}
+			}
+			_ => { /* Do nothing */ }
+		}
 	}
+	false
 }
 
 pub fn parse_vec(input: &str) -> Result<Vec<OxVal>,String> {
