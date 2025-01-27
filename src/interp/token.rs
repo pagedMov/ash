@@ -636,7 +636,6 @@ impl OxTokenizer {
 		words
 	}
 
-	// First pass over input: expand aliases
 	fn alias_pass(&mut self) -> OxResult<()> {
 		let aliases = read_logic(|m| m.borrow_aliases().clone())?;
 		let mut replaced = true;
@@ -674,7 +673,63 @@ impl OxTokenizer {
 
 		Ok(())
 	}
-	// Second pass over input: expand variables
+	fn glob_pass(&mut self) -> OxResult<()> {
+		let words = self.split_input();
+		let mut new_input = String::new();
+		let mut is_command = true;
+		let mut separator = None;
+
+		for mut word in words {
+			if is_command { // Do not expand globs in a command name
+				is_command = false;
+				new_input.push_str(&word);
+				continue
+			}
+			if word.ends_with(['\n',';']) { // Detach the separator and save it
+				if word.len() == 1 { // Unless it's the only character
+					new_input.push_str(&word);
+					continue
+				}
+				// We will re-attach it to the last word in the glob result later
+				separator = Some(word.chars().last().unwrap());
+				word = word[..word.len() - 1].to_string();
+				is_command = true;
+			}
+			if helper::contains_glob(&word) {
+				// Get the glob result
+				let mut glob_vec = word.expand_globs();
+				if glob_vec.is_empty() {
+					if let Some(sep) = separator.take() {
+						new_input.push(sep);
+					}
+					continue
+				};
+				if let Some(sep) = separator.take() {
+					// Re-attach the separator to the last word
+					let mut last_word = glob_vec.pop().unwrap();
+					last_word.push(sep);
+					glob_vec.push(last_word);
+				}
+				for (i,expanded) in glob_vec.iter().enumerate() {
+					if i > 0 { // Add spaces between glob words
+						new_input.push(' ');
+					}
+					new_input.push_str(expanded);
+				}
+			} else {
+				if let Some(sep) = separator.take() {
+					word.push(sep);
+				}
+				new_input.push_str(&word);
+			}
+		}
+
+		self.input = new_input;
+
+		self.char_stream = self.input.chars().collect::<VecDeque<char>>();
+
+		Ok(())
+	}
 	fn var_pass(&mut self) -> OxResult<()> {
 		let vartable = read_vars(|v| v.clone())?;
 		let mut replaced = true;
@@ -702,7 +757,6 @@ impl OxTokenizer {
 
 		Ok(())
 	}
-	// Third pass over input: expand command subs
 	fn cmd_sub_pass(&mut self) -> OxResult<()> {
 		let mut replaced = true;
 
@@ -780,7 +834,8 @@ impl OxTokenizer {
 	pub fn tokenize_one(&mut self) -> OxResult<Vec<Tk>> {
 		use crate::interp::token::TkState::*;
 		if !self.expanded { // Replacing these first is the simplest way
-			self.cmd_sub_pass()?;
+			self.cmd_sub_pass()?; // The order does matter here
+			self.glob_pass()?;
 			self.alias_pass()?;
 			self.var_pass()?;
 			self.precompute_spans();
@@ -1385,5 +1440,3 @@ impl OxTokenizer {
 		Ok(wd)
 	}
 }
-
-// TODO: Case tests, select tests
