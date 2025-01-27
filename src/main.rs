@@ -33,6 +33,7 @@ pub mod shopt;
 
 use std::{env, fs::OpenOptions, os::fd::AsRawFd, path::PathBuf};
 
+use builtin::echo_internal;
 use event::ShError;
 use execute::{traverse_ast, OxWait, RustFd};
 use interp::{parse::{descend, NdType}, token::OxTokenizer};
@@ -43,6 +44,7 @@ use termios::Termios;
 //use crate::event::EventLoop;
 
 pub type OxResult<T> = Result<T, ShError>;
+const RSH_VERSION: &str = "v0.2.0-alpha";
 
 fn set_termios() -> Option<Termios> {
 	if isatty(std::io::stdin().as_raw_fd()).unwrap() {
@@ -87,6 +89,10 @@ async fn main() {
 		if path.exists() {
 			shellenv::source_file(path).unwrap();
 		}
+	}
+	if args.contains(&"--version".into()) {
+		println!("{}",RSH_VERSION);
+		std::process::exit(0);
 	}
 	if !args.contains(&"--no-rc".into()) {
 		let home = read_vars(|vars| vars.get_evar("HOME")).unwrap().unwrap();

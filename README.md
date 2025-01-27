@@ -7,11 +7,22 @@ Ox is a modern, customizable shell program written in Rust that aims to push the
 ---
 
 ## 🚀 Current Features
+
 ### Dynamic Prompts
-- Supports all of the basic escape sequences from bash, plus:
-	- Git Status Signs: Dynamically display repository status info in your prompt with \G for git signs and \B for the branch name.
-	- Exit Status Indicators: Show symbols for success (\S) or failure (\F), or expand the exit code directly (\\?)
-	- Context Groups: The \\( and \\) sequences allow you to dynamically show/hide prompt content based on the current context. If none of the inner escape sequences expand into anything, everything in the group is hidden. This allows for things like `\(on \B\([\G]\)\n\)`, which expands to `on  master[!?]` when inside of a git repo, and is hidden when it is not.
+- Supports all of the basic escape sequences from Bash, plus:
+	- **Custom Prompt Scripting**: Dynamically display context-specific information in your prompt using custom escape sequences. Define sequences with `setopt` and access them in your prompt using `\{` and `\}`. For example:
+		```bash
+		setopt prompt.custom.gitbranch="git branch --show-current 2> /dev/null"
+		export PS1="\(on \{gitbranch\}\n\)"
+		```
+		This would dynamically display the current Git branch in your prompt.
+	- **Exit Status Indicators**: Show symbols for success (`\S`) or failure (`\F`), or expand the exit code directly (`\\?`).
+	- **Context Groups**: The `\(` and `\)` sequences dynamically show or hide prompt content based on the current context. If none of the inner escape sequences expand into anything, everything in the group is hidden. For example:
+		```bash
+		\(on \{gitbranch\} \([\{gitsigns\}]\)\n\)
+		```
+		This expands to `on dev[!?]` when inside a Git repository (with `gitsigns` and `gitbranch` custom sequences defined) and is hidden when outside a Git repo.
+
 
 ### Interpreter-Agnostic Subshells
 - **Shebang support:**
