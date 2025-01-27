@@ -8,13 +8,13 @@
       };
       oxBuild = pkgs.rustPlatform.buildRustPackage rec {
         pname = "ox";
-        version = "v0.2.0-alpha";
+        version = "v0.2.0";
 
         src = pkgs.fetchFromGitHub {
           owner = "pagedMov";
           repo = "ox";
-          rev = version;
-          hash = "sha256-0uEOcCO6XLeSwGIWctlqdyEqStPhDY/4K/7DlAqC+dA=";
+          rev = "65a7a713a954c0f3fba668c6d7e0cdd023f705f7";
+          hash = "sha256-AVBDv0HQn7hAGo0tW1ZFCdfO4+3VJQ0mCDkow8skD7U=";
         };
 
         doCheck = false; # TODO: Find a way to make tests work
