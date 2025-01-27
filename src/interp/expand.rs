@@ -7,7 +7,7 @@ use crate::execute::{self, ProcIO, RustFd};
 use crate::interp::parse::NdFlags;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
 use crate::interp::helper::{self,StrExtension};
-use crate::shellenv::{self, read_logic, read_vars, RVal, VarTable, RSH_PATH};
+use crate::shellenv::{self, read_logic, read_vars, OxVal, VarTable, RSH_PATH};
 use crate::OxResult;
 
 use super::parse::{NdType, Node, Span};
@@ -146,8 +146,6 @@ pub enum PromptTk {
 	ExitSuccess,
 	ExitFail,
 	ExitCode,
-	GitSigns,           // Git repository status symbols (e.g., dirty tree, ahead/behind)
-	GitBranch,          // Git repository branch
 	Bell,               // '\a': Bell character (ASCII 7)
 	Newline,            // '\n': Newline character
 	CarriageReturn,     // '\r': Carriage return
@@ -199,6 +197,10 @@ pub fn tokenize_prompt(ps1: &str) -> VecDeque<PromptTk> {
 							let ansi_seq = helper::capture_ansi_escape(&mut chars);
 							tokens.push_back(PromptTk::AnsiSeq(ansi_seq));
 						}
+						'{' => {
+							let user_seq = helper::capture_user_sequence(&mut chars);
+							tokens.push_back(PromptTk::UserSequence(user_seq))
+						}
 						'[' => {
 							let non_print = helper::capture_non_print_sequence(&mut chars);
 							tokens.push_back(PromptTk::NonPrint(non_print));
@@ -211,8 +213,6 @@ pub fn tokenize_prompt(ps1: &str) -> VecDeque<PromptTk> {
 						'u' => tokens.push_back(PromptTk::Username),
 						'$' => tokens.push_back(PromptTk::PromptSymbol),
 						'?' => tokens.push_back(PromptTk::ExitCode),
-						'G' => tokens.push_back(PromptTk::GitSigns),
-						'B' => tokens.push_back(PromptTk::GitBranch),
 						'S' => tokens.push_back(PromptTk::ExitSuccess),
 						'F' => tokens.push_back(PromptTk::ExitFail),
 						'(' => tokens.push_back(PromptTk::HideGroupStart),
@@ -303,8 +303,6 @@ pub fn expand_prompt() -> OxResult<String> {
 			PromptTk::ShellName => result.push_str(&helper::escseq_shell_name()?),
 			PromptTk::Username => result.push_str(&helper::escseq_username()?),
 			PromptTk::PromptSymbol => result.push(helper::escseq_prompt_symbol()?),
-			PromptTk::GitSigns => result.push_str(&helper::escseq_gitsigns()?),
-			PromptTk::GitBranch => result.push_str(&helper::escseq_gitsigns()?),
 			PromptTk::ExitSuccess => result.push_str(&helper::escseq_success()?),
 			PromptTk::ExitFail => result.push_str(&helper::escseq_fail()?),
 			PromptTk::ExitCode => result.push_str(&helper::escseq_exitcode()?),
@@ -709,7 +707,7 @@ pub fn expand_var(mut string: String, var_table: &VarTable) -> OxResult<String> 
 		}
 		let right = right_chars.iter().collect::<String>();
 
-		let value: RVal = if REGEX["var_index"].is_match(&var_name) {
+		let value: OxVal = if REGEX["var_index"].is_match(&var_name) {
 			if let Some(caps) = REGEX["var_index"].captures(&var_name) {
 				let var_name = caps.get(1).map_or("", |m| m.as_str());
 				let index = caps.get(2).map_or("", |m| m.as_str());

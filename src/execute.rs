@@ -4,7 +4,7 @@ use libc::{memfd_create, MFD_CLOEXEC};
 use nix::{errno::Errno, fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
 use std::sync::Mutex;
 
-use crate::{builtin::{self, CdFlags}, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, OxTokenizer, Tk, TkType, WdFlags}}, shellenv::{self, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, RVal, SavedEnv}, OxResult};
+use crate::{builtin::{self, CdFlags}, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, OxTokenizer, Tk, TkType, WdFlags}}, shellenv::{self, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, OxVal, SavedEnv}, OxResult};
 
 #[macro_export]
 macro_rules! node_operation {
@@ -547,7 +547,7 @@ fn handle_for(node: Node,io: ProcIO) -> OxResult<OxWait> {
 					let current_val = loop_arr.pop_front().unwrap().text().to_string();
 
 					let current_var = loop_vars[var_index].text().to_string();
-					write_vars(|v| v.set_var(&current_var, RVal::parse(&current_val).unwrap_or_default()))?;
+					write_vars(|v| v.set_var(&current_var, OxVal::parse(&current_val).unwrap_or_default()))?;
 
 					iteration_count += 1;
 					// TODO: modulo is expensive; find a better way to do this
@@ -656,7 +656,7 @@ fn handle_chain(node: Node) -> OxResult<OxWait> {
 				}
 			})?;
 
-			let is_success = statuses.iter().all(|stat| matches!(stat, WaitStatus::Exited(_, 0)));
+			let is_success = read_vars(|v| v.get_param("?").is_some_and(|val| val == "0"))?;
 
 			match op.nd_type {
 				NdType::And if !is_success => {
@@ -688,7 +688,7 @@ fn handle_assignment(node: Node) -> OxResult<OxWait> {
 			let expanded = expand::expand_cmd_sub(dummy_tk)?;
 			value = expanded.text().to_string();
 		}
-		write_vars(|v| v.set_var(&name, RVal::parse(&value).unwrap_or_default()))?;
+		write_vars(|v| v.set_var(&name, OxVal::parse(&value).unwrap_or_default()))?;
 	});
 	Ok(OxWait::Success)
 }
@@ -1035,12 +1035,24 @@ fn handle_command(node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
 			handle_redirs(redirs.into())?;
+
+			// First, try execvpe (searches PATH if no absolute/relative path is provided)
 			let Err(e) = execvpe(&command, &argv, &envp);
 			if e == Errno::ENOENT {
-				let err = ShError::from_no_cmd(format!("\x1b[31mCommand not found:\x1b[0m {}", command.to_str().unwrap()).as_str(), node.span());
+				// If command not found in PATH, try execve directly
+				let Err(_) = execve(&command, &argv, &envp);
+				let err = ShError::from_no_cmd(
+					&format!(
+						"\x1b[31mCommand not found (or not executable):\x1b[0m {}",
+						command.to_str().unwrap()
+					),
+					node.span(),
+				);
 				event::throw(err).unwrap();
 				std::process::exit(1);
-			} else { unreachable!() }
+			} else {
+				unreachable!(); // Handle unexpected errors differently if needed
+			}
 		}
 		Ok(ForkResult::Parent { child }) => {
 			handle_parent_process(child, command, &node)?;

@@ -333,19 +333,19 @@ impl Tk {
 	}
 	pub fn bg(wd: &WordDesc, pos: usize) -> Self {
 		Tk {
-			tk_type: TkType::Pipe,
+			tk_type: TkType::Background,
 			wd: WordDesc { text: wd.text.clone(), span: Span::from(pos,pos), flags: WdFlags::IS_OP }
 		}
 	}
 	pub fn and(wd: &WordDesc, pos: usize) -> Self {
 		Tk {
-			tk_type: TkType::Pipe,
+			tk_type: TkType::LogicAnd,
 			wd: WordDesc { text: wd.text.clone(), span: Span::from(pos,pos + 1), flags: WdFlags::IS_OP }
 		}
 	}
 	pub fn or(wd: &WordDesc, pos: usize) -> Self {
 		Tk {
-			tk_type: TkType::Pipe,
+			tk_type: TkType::LogicOr,
 			wd: WordDesc { text: wd.text.clone(), span: Span::from(pos,pos + 1), flags: WdFlags::IS_OP }
 		}
 	}
@@ -962,6 +962,10 @@ impl OxTokenizer {
 				}
 				self.push_ctx(Arg)
 			} else {
+				if wd.text.starts_with('~') {
+					let home = read_vars(|vars| vars.get_evar("HOME").unwrap())?;
+					wd.text = wd.text.replace("~",&home);
+				}
 				self.tokens.push(Tk { tk_type: TkType::Ident, wd: wd.reset_flags().add_flag(flags) });
 				self.push_ctx(Arg)
 			}

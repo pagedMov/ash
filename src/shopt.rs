@@ -1,10 +1,9 @@
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-use std::{borrow::BorrowMut, collections::{HashMap, VecDeque}};
+use std::collections::{BTreeMap, VecDeque};
 
-use crate::{event::ShError, interp::parse::Span, OxResult};
+use crate::{event::ShError, interp::parse::Span, shellenv::OxVal, OxResult};
 
-#[derive(Serialize, Clone, Deserialize, Debug)]
+
+#[derive(Clone, Debug)]
 pub struct ShOpts {
 	pub core: ShOptsCore,
 	pub prompt: ShOptsPrompt,
@@ -28,29 +27,21 @@ impl ShOpts {
 			comp_limit: 100,
 			prompt_highlight: false,
 			tab_stop: 8,
-			git_signs: PromptGitSigns {
-				dirty_tree: "!".into(),
-				clean_tree: "+".into(),
-				untracked: "?".into(),
-				ahead_of_remote: "⇡".into(),
-				behind_remote: "⇣".into(),
-				branch_icon: "".into()
-			},
 			exit_status: PromptStatus {
 				success: " ".into(),
 				failure: "✗".into(),
 			},
 			custom: PromptCustom {
-				opts: Map::new(),
+				opts: OxVal::Dict(BTreeMap::new()),
 			}
 		};
 		let exec = ShOptsExec {
-			exec_opts: HashMap::new(),
+			exec_opts: BTreeMap::new(),
 		};
 		Self { core, prompt, exec }
 	}
 
-	pub fn get(&self, query: &str) -> OxResult<Value> {
+	pub fn get(&self, query: &str) -> OxResult<OxVal> {
 		let mut query = query.split('.').map(|seg| seg.to_string()).collect::<VecDeque<String>>();
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
@@ -60,7 +51,7 @@ impl ShOpts {
 			_ => Err(ShError::from_execf(format!("Invalid shopt key: {}",key).as_str(), 1, Span::new()))
 		}
 	}
-	pub fn set(&mut self, mut query: VecDeque<String>, value: Value) -> OxResult<()> {
+	pub fn set(&mut self, mut query: VecDeque<String>, value: OxVal) -> OxResult<()> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
 			"core" => self.core.set(query, value),
@@ -81,7 +72,7 @@ impl Default for ShOpts {
 	}
 }
 
-#[derive(Serialize, Clone, Deserialize, Debug)]
+#[derive(Clone, Debug)]
 pub struct ShOptsCore {
 	pub dotglob: bool,
 	pub autocd: bool,
@@ -93,84 +84,84 @@ pub struct ShOptsCore {
 }
 
 impl ShOptsCore {
-	pub fn get(&self, mut query: VecDeque<String>) -> OxResult<Value> {
+	pub fn get(&self, mut query: VecDeque<String>) -> OxResult<OxVal> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
-			"dotglob" => Ok(Value::Bool(self.dotglob)),
-			"autocd" => Ok(Value::Bool(self.autocd)),
-			"hist_ignore_dupes" => Ok(Value::Bool(self.hist_ignore_dupes)),
-			"max_hist" => Ok(Value::Number(self.max_hist.into())),
-			"int_comments" => Ok(Value::Bool(self.int_comments)),
-			"auto_hist" => Ok(Value::Bool(self.auto_hist)),
-			"bell_style" => Ok(Value::Number(self.bell_style.into())),
+			"dotglob" => Ok(OxVal::Bool(self.dotglob)),
+			"autocd" => Ok(OxVal::Bool(self.autocd)),
+			"hist_ignore_dupes" => Ok(OxVal::Bool(self.hist_ignore_dupes)),
+			"max_hist" => Ok(OxVal::Int(self.max_hist as i32)),
+			"int_comments" => Ok(OxVal::Bool(self.int_comments)),
+			"auto_hist" => Ok(OxVal::Bool(self.auto_hist)),
+			"bell_style" => Ok(OxVal::Int(self.bell_style as i32)),
 			_ => Err(ShError::from_execf(format!("Invalid core opts key: {}",key).as_str(), 1, Span::new()))
 		}
 	}
-	pub fn set(&mut self, mut query: VecDeque<String>, value: Value) -> OxResult<()> {
+	pub fn set(&mut self, mut query: VecDeque<String>, value: OxVal) -> OxResult<()> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
 			"dotglob" => {
-				self.dotglob = value.as_bool().ok_or_else(|| {
-					ShError::from_execf(
+				self.dotglob = if let OxVal::Bool(val) = value { val } else {
+					return Err(ShError::from_execf(
 						format!("Invalid value for core.dotglob: {:?}", value).as_str(),
 						1,
 						Span::new(),
-					)
-				})?;
+					))
+				};
 			}
 			"autocd" => {
-				self.autocd = value.as_bool().ok_or_else(|| {
-					ShError::from_execf(
+				self.autocd = if let OxVal::Bool(val) = value { val } else {
+					return Err(ShError::from_execf(
 						format!("Invalid value for core.autocd: {:?}", value).as_str(),
 						1,
 						Span::new(),
-					)
-				})?;
+					))
+				};
 			}
 			"hist_ignore_dupes" => {
-				self.hist_ignore_dupes = value.as_bool().ok_or_else(|| {
-					ShError::from_execf(
+				self.hist_ignore_dupes = if let OxVal::Bool(val) = value { val } else {
+					return Err(ShError::from_execf(
 						format!("Invalid value for core.hist_ignore_dupes: {:?}", value).as_str(),
 						1,
 						Span::new(),
-					)
-				})?;
+					))
+				};
 			}
 			"max_hist" => {
-				self.max_hist = value.as_u64().ok_or_else(|| {
-					ShError::from_execf(
+				self.max_hist = if let OxVal::Int(val) = value { val as usize } else {
+					return Err(ShError::from_execf(
 						format!("Invalid value for core.max_hist: {:?}", value).as_str(),
 						1,
 						Span::new(),
-					)
-				})? as usize;
+					))
+				};
 			}
 			"int_comments" => {
-				self.int_comments = value.as_bool().ok_or_else(|| {
-					ShError::from_execf(
+				self.int_comments = if let OxVal::Bool(val) = value { val } else {
+					return Err(ShError::from_execf(
 						format!("Invalid value for core.int_comments: {:?}", value).as_str(),
 						1,
 						Span::new(),
-					)
-				})?;
+					))
+				};
 			}
 			"auto_hist" => {
-				self.auto_hist = value.as_bool().ok_or_else(|| {
-					ShError::from_execf(
+				self.auto_hist = if let OxVal::Bool(val) = value { val } else {
+					return Err(ShError::from_execf(
 						format!("Invalid value for core.auto_hist: {:?}", value).as_str(),
 						1,
 						Span::new(),
-					)
-				})?;
+					))
+				};
 			}
 			"bell_style" => {
-				self.bell_style = value.as_u64().ok_or_else(|| {
-					ShError::from_execf(
+				self.bell_style = if let OxVal::Int(val) = value { val as usize } else {
+					return Err(ShError::from_execf(
 						format!("Invalid value for core.bell_style: {:?}", value).as_str(),
 						1,
 						Span::new(),
-					)
-				})? as usize;
+					))
+				};
 			}
 			_ => {
 				return Err(ShError::from_execf(
@@ -184,84 +175,80 @@ impl ShOptsCore {
 	}
 }
 
-#[derive(Serialize, Clone, Deserialize, Debug)]
+#[derive(Clone, Debug)]
 pub struct ShOptsPrompt {
 	pub trunc_prompt_path: usize,
 	pub edit_mode: String,
 	pub comp_limit: usize,
 	pub prompt_highlight: bool,
 	pub tab_stop: usize,
-	pub git_signs: PromptGitSigns, // Sub-group for Git-specific options
 	pub exit_status: PromptStatus, // Sub-group for exit status symbols
 	pub custom: PromptCustom
 }
 
 impl ShOptsPrompt {
-	pub fn get(&self, mut query: VecDeque<String>) -> OxResult<Value> {
+	pub fn get(&self, mut query: VecDeque<String>) -> OxResult<OxVal> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
-			"trunc_prompt_path" => Ok(Value::Number(self.trunc_prompt_path.into())),
-			"edit_mode" => Ok(Value::String(self.edit_mode.clone())),
-			"comp_limit" => Ok(Value::Number(self.comp_limit.into())),
-			"prompt_highlight" => Ok(Value::Bool(self.prompt_highlight)),
-			"tab_stop" => Ok(Value::Number(self.tab_stop.into())),
-			"git_signs" => Ok(self.git_signs.get(query)?),
+			"trunc_prompt_path" => Ok(OxVal::Int(self.trunc_prompt_path as i32)),
+			"edit_mode" => Ok(OxVal::String(self.edit_mode.clone())),
+			"comp_limit" => Ok(OxVal::Int(self.comp_limit as i32)),
+			"prompt_highlight" => Ok(OxVal::Bool(self.prompt_highlight)),
+			"tab_stop" => Ok(OxVal::Int(self.tab_stop as i32)),
 			"exit_status" => Ok(self.exit_status.get(query)?),
 			"custom" => Ok(self.custom.get(query)?),
 			_ => Err(ShError::from_execf(format!("Invalid key for prompt opts: {}",key).as_str(), 1, Span::new()))
 		}
 	}
 
-	pub fn set(&mut self, mut query: VecDeque<String>, value: Value) -> OxResult<()> {
+	pub fn set(&mut self, mut query: VecDeque<String>, value: OxVal) -> OxResult<()> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
 			"trunc_prompt_path" => {
-				self.trunc_prompt_path = value.as_u64().ok_or_else(|| {
-					ShError::from_execf(
-						format!("Invalid value for prompt.trunc_prompt_path: {:?}", value).as_str(),
+				self.trunc_prompt_path = if let OxVal::Int(val) = value { val as usize } else {
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.trunc_prompt_path: {:?}", value).as_str(),
 						1,
 						Span::new(),
-					)
-				})? as usize;
+					))
+				};
 			}
 			"edit_mode" => {
-				self.edit_mode = value.as_str().ok_or_else(|| {
-					ShError::from_execf(
-						format!("Invalid value for prompt.edit_mode: {:?}", value).as_str(),
+				self.edit_mode = if let OxVal::String(val) = value { val } else {
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.edit_mode: {:?}", value).as_str(),
 						1,
 						Span::new(),
-					)
-				})?
-				.to_string();
-					}
+					))
+				};
+			}
 			"comp_limit" => {
-				self.comp_limit = value.as_u64().ok_or_else(|| {
-					ShError::from_execf(
-						format!("Invalid value for prompt.comp_limit: {:?}", value).as_str(),
+				self.comp_limit = if let OxVal::Int(val) = value { val as usize } else {
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.comp_limit: {:?}", value).as_str(),
 						1,
 						Span::new(),
-					)
-				})? as usize;
+					))
+				};
 			}
 			"prompt_highlight" => {
-				self.prompt_highlight = value.as_bool().ok_or_else(|| {
-					ShError::from_execf(
-						format!("Invalid value for prompt.prompt_highlight: {:?}", value).as_str(),
+				self.prompt_highlight = if let OxVal::Bool(val) = value { val } else {
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.prompt_highlight: {:?}", value).as_str(),
 						1,
 						Span::new(),
-					)
-				})?;
+					))
+				};
 			}
 			"tab_stop" => {
-				self.tab_stop = value.as_u64().ok_or_else(|| {
-					ShError::from_execf(
-						format!("Invalid value for prompt.tab_stop: {:?}", value).as_str(),
+				self.tab_stop = if let OxVal::Int(val) = value { val as usize } else {
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.tab_stop: {:?}", value).as_str(),
 						1,
 						Span::new(),
-					)
-				})? as usize;
+					))
+				};
 			}
-			"git_signs" => self.git_signs.set(query, value)?,
 			"exit_status" => self.exit_status.set(query, value)?,
 			"custom" => self.custom.set(query,value)?,
 			_ => {
@@ -276,60 +263,62 @@ impl ShOptsPrompt {
 	}
 }
 
-#[derive(Serialize, Clone, Deserialize, Debug)]
+#[derive(Clone, Debug)]
 pub struct PromptCustom {
-	opts: Map<String,Value>
+	opts: OxVal
 }
 
 impl PromptCustom {
 	pub fn new() -> Self {
-		Self { opts: Map::new() }
+		Self { opts: OxVal::Dict(BTreeMap::new()) }
 	}
-	pub fn get(&self, mut query: VecDeque<String>) -> OxResult<Value> {
+	pub fn get(&self, mut query: VecDeque<String>) -> OxResult<OxVal> {
 		// Start traversal at the root map
-		let mut current_map = &self.opts;
+		if let OxVal::Dict(map) = &self.opts {
+			let mut current_map = map.clone();
 
-		while let Some(key) = query.pop_front() {
-			match current_map.get(&key) {
-				Some(Value::Object(inner_map)) => {
-					// If it's an object, descend into it
-					current_map = inner_map;
-				}
-				Some(value) => {
-					// If it's a value, ensure it's the final key in the query
-					if query.is_empty() {
-						return Ok(value.clone());
-					} else {
+			while let Some(key) = query.pop_front() {
+				match current_map.get(&key) {
+					Some(OxVal::Dict(inner_map)) => {
+						// If it's an object, descend into it
+						current_map = inner_map.clone();
+					}
+					Some(value) => {
+						// If it's a value, ensure it's the final key in the query
+						if query.is_empty() {
+							return Ok(value.clone());
+						} else {
+							return Err(ShError::from_execf(
+									format!(
+										"Key '{}' does not lead to an object, cannot continue traversal",
+										key
+									)
+									.as_str(),
+									1,
+									Span::new(),
+							));
+						}
+					}
+					None => {
+						// Key not found
 						return Err(ShError::from_execf(
-								format!(
-									"Key '{}' does not lead to an object, cannot continue traversal",
-									key
-								)
-								.as_str(),
+								format!("Failed to find a value for key: {}", key).as_str(),
 								1,
 								Span::new(),
 						));
 					}
 				}
-				None => {
-					// Key not found
-					return Err(ShError::from_execf(
-							format!("Failed to find a value for key: {}", key).as_str(),
-							1,
-							Span::new(),
-					));
-				}
 			}
-		}
 
-		// If we reach here, the final key was an object, not a value
-		Err(ShError::from_execf(
-				"Expected a value but found a nested object",
-				1,
-				Span::new(),
-		))
+			// If we reach here, the final key was an object, not a value
+			Err(ShError::from_execf(
+					"Expected a value but found a nested object",
+					1,
+					Span::new(),
+			))
+		} else { unreachable!() }
 	}
-	pub fn traverse_namespace(&mut self, map: &mut Map<String,Value>, mut query: VecDeque<String>, value: Value) -> OxResult<()> {
+	pub fn traverse_namespace(&mut self, map: &mut BTreeMap<String,OxVal>, mut query: VecDeque<String>, value: OxVal) -> OxResult<()> {
 		if let Some(key) = query.pop_front() {
 			if query.is_empty() {
 				map.insert(key,value);
@@ -337,13 +326,13 @@ impl PromptCustom {
 			}
 			match map.get_mut(&key) {
 				None => {
-					let mut new_map = Map::new();
+					let mut new_map = BTreeMap::new();
 					self.traverse_namespace(&mut new_map, query, value)?;
-					map.insert(key,Value::Object(new_map));
+					map.insert(key,OxVal::Dict(new_map));
 				}
 				Some(ref mut val) => {
 					match val {
-						Value::Object(ref mut inner_map) => {
+						OxVal::Dict(ref mut inner_map) => {
 							self.traverse_namespace(inner_map, query, value)?;
 						}
 						_ => {
@@ -355,63 +344,52 @@ impl PromptCustom {
 		}
 		Ok(())
 	}
-	pub fn set(&mut self, mut query: VecDeque<String>, value: Value) -> OxResult<()> {
+	pub fn insert_top_level(&mut self, key: String, val: OxVal) {
+		if let OxVal::Dict(map) = &mut self.opts {
+			map.insert(key,val);
+		} else { unreachable!() }
+	}
+	pub fn set(&mut self, mut query: VecDeque<String>, value: OxVal) -> OxResult<()> {
 		if query.len() == 1 {
 			let key = query.pop_front().unwrap();
-			self.opts.insert(key, value);
+			self.insert_top_level(key, value);
 			return Ok(());
 		}
 
 		let mut current_map = &mut self.opts;
 
 		while let Some(key) = query.pop_front() {
-			dbg!(&key);
 			// Remove the current map to allow mutation
-			let existing_value = current_map.remove(&key);
+			let existing_value = current_map.try_remove(&key)?;
 
 			match existing_value {
-				Some(Value::Object(mut map)) => {
+				Some(OxVal::Dict(mut map)) => {
 					// Navigate into the existing map
 					if query.is_empty() {
 						map.insert(key.clone(), value.clone());
 					}
 					// Re-insert the modified map
-					current_map.insert(key.clone(), Value::Object(map));
-					current_map = match current_map.get_mut(&key).unwrap() {
-						Value::Object(map) => map,
+					current_map.try_insert(key.clone(), OxVal::Dict(map))?;
+					let new_map = current_map.try_get_mut(&key)?.unwrap();
+					current_map = match new_map {
+						OxVal::Dict(_) => new_map,
 						_ => break
 					};
 				}
 				Some(_) => {
-					// If the key exists but isn't an object, overwrite it with a new map
-					let mut new_map = Map::new();
-					if query.is_empty() {
-						new_map.insert(key.clone(), value.clone());
-					} else {
-						new_map.insert(key.clone(), Value::Object(Map::new()));
-					}
-					current_map.insert(key.clone(), Value::Object(new_map));
-					current_map = match current_map.get_mut(&key).unwrap() {
-						Value::Object(map) => map,
-						_ => break
-					};
+					current_map.try_insert(key.clone(), value.clone())?;
 				}
 				None => {
 					// If the key doesn't exist, create a new map for the remaining keys
-					let mut new_map = Value::Object(Map::new());
-					dbg!(&query);
+					let new_map = OxVal::Dict(BTreeMap::new());
 					if query.is_empty() {
-						dbg!("storing value");
-						dbg!(&key);
-						dbg!(&value);
-						current_map.insert(key.clone(), value.clone()); // Placeholder object
+						current_map.try_insert(key.clone(), value.clone())?; // Placeholder object
 					} else {
-						dbg!("storing new map");
-						dbg!(&key);
-						current_map.insert(key.clone(), new_map); // Placeholder object
+						current_map.try_insert(key.clone(), new_map)?; // Placeholder object
 					}
-					current_map = match current_map.get_mut(&key).unwrap() {
-						Value::Object(map) => map,
+					let new_map = current_map.try_get_mut(&key)?.unwrap();
+					current_map = match new_map {
+						OxVal::Dict(_) => new_map,
 						_ => break
 					};
 				}
@@ -423,45 +401,43 @@ impl PromptCustom {
 	}
 }
 
-#[derive(Serialize, Clone, Deserialize, Debug)]
+#[derive(Clone, Debug)]
 pub struct PromptStatus {
 	pub success: String,
 	pub failure: String,
 }
 
 impl PromptStatus {
-	pub fn get(&self, mut query: VecDeque<String>) -> OxResult<Value> {
+	pub fn get(&self, mut query: VecDeque<String>) -> OxResult<OxVal> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
-			"success" => Ok(Value::String(self.success.clone())),
-			"failure" => Ok(Value::String(self.failure.clone())),
+			"success" => Ok(OxVal::String(self.success.clone())),
+			"failure" => Ok(OxVal::String(self.failure.clone())),
 			_ => Err(ShError::from_execf(format!("Invalid key for prompt exit status opts: {}",key).as_str(), 1, Span::new()))
 		}
 	}
 
-	pub fn set(&mut self, mut query: VecDeque<String>, value: Value) -> OxResult<()> {
+	pub fn set(&mut self, mut query: VecDeque<String>, value: OxVal) -> OxResult<()> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
 			"success" => {
-				self.success = value.as_str().ok_or_else(|| {
-					ShError::from_execf(
-						format!("Invalid value for prompt_status.success: {:?}", value).as_str(),
+				self.success = if let OxVal::String(val) = value { val } else {
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.success: {:?}", value).as_str(),
 						1,
 						Span::new(),
-					)
-				})?
-				.to_string();
-					}
+					))
+				};
+			}
 			"failure" => {
-				self.failure = value.as_str().ok_or_else(|| {
-					ShError::from_execf(
-						format!("Invalid value for prompt_status.failure: {:?}", value).as_str(),
+				self.failure = if let OxVal::String(val) = value { val } else {
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.failure: {:?}", value).as_str(),
 						1,
 						Span::new(),
-					)
-				})?
-				.to_string();
-					}
+					))
+				};
+			}
 			_ => {
 				return Err(ShError::from_execf(
 						format!("Invalid key for prompt_status: {}", key).as_str(),
@@ -474,115 +450,16 @@ impl PromptStatus {
 	}
 }
 
-#[derive(Serialize, Clone, Deserialize, Debug)]
-pub struct PromptGitSigns {
-	pub dirty_tree: String,
-	pub clean_tree: String,
-	pub untracked: String,
-	pub ahead_of_remote: String,
-	pub behind_remote: String,
-	pub branch_icon: String
-}
-
-impl PromptGitSigns {
-	pub fn get(&self, mut query: VecDeque<String>) -> OxResult<Value> {
-		let key = query.pop_front().unwrap();
-		match key.as_str() {
-			"dirty_tree" => Ok(Value::String(self.dirty_tree.clone())),
-			"clean_tree" => Ok(Value::String(self.clean_tree.clone())),
-			"untracked" => Ok(Value::String(self.untracked.clone())),
-			"ahead_of_remote" => Ok(Value::String(self.ahead_of_remote.clone())),
-			"behind_remote" => Ok(Value::String(self.behind_remote.clone())),
-			"branch_icon" => Ok(Value::String(self.branch_icon.clone())),
-			_ => Err(ShError::from_execf(format!("Invalid key for prompt git sign opts: {}",key).as_str(), 1, Span::new()))
-		}
-	}
-
-	pub fn set(&mut self, mut query: VecDeque<String>, value: Value) -> OxResult<()> {
-		let key = query.pop_front().unwrap();
-		match key.as_str() {
-			"dirty_tree" => {
-				self.dirty_tree = value.as_str().ok_or_else(|| {
-					ShError::from_execf(
-						format!("Invalid value for git_signs.dirty_tree: {:?}", value).as_str(),
-						1,
-						Span::new(),
-					)
-				})?
-				.to_string();
-					}
-			"clean_tree" => {
-				self.clean_tree = value.as_str().ok_or_else(|| {
-					ShError::from_execf(
-						format!("Invalid value for git_signs.clean_tree: {:?}", value).as_str(),
-						1,
-						Span::new(),
-					)
-				})?
-				.to_string();
-					}
-			"untracked" => {
-				self.untracked = value.as_str().ok_or_else(|| {
-					ShError::from_execf(
-						format!("Invalid value for git_signs.untracked: {:?}", value).as_str(),
-						1,
-						Span::new(),
-					)
-				})?
-				.to_string();
-					}
-			"ahead_of_remote" => {
-				self.ahead_of_remote = value.as_str().ok_or_else(|| {
-					ShError::from_execf(
-						format!("Invalid value for git_signs.ahead_of_remote: {:?}", value).as_str(),
-						1,
-						Span::new(),
-					)
-				})?
-				.to_string();
-					}
-			"behind_remote" => {
-				self.behind_remote = value.as_str().ok_or_else(|| {
-					ShError::from_execf(
-						format!("Invalid value for git_signs.behind_remote: {:?}", value).as_str(),
-						1,
-						Span::new(),
-					)
-				})?
-				.to_string();
-					}
-			"branch_icon" => {
-				self.branch_icon = value.as_str().ok_or_else(|| {
-					ShError::from_execf(
-						format!("Invalid value for git_signs.behind_remote: {:?}", value).as_str(),
-						1,
-						Span::new(),
-					)
-				})?
-				.to_string();
-					}
-			_ => {
-				return Err(ShError::from_execf(
-						format!("Invalid key for git_signs: {}", key).as_str(),
-						1,
-						Span::new(),
-				))
-			}
-		}
-		Ok(())
-	}
-}
-
-#[derive(Serialize, Clone, Deserialize, Debug)]
+#[derive(Clone, Debug)]
 pub struct ShOptsExec {
-	pub exec_opts: HashMap<String, String>, // Keeping this dynamic for extensibility
+	pub exec_opts: BTreeMap<String, String>, // Keeping this dynamic for extensibility
 }
 
 impl ShOptsExec {
-	pub fn get(&self, query: VecDeque<String>) -> OxResult<Value> {
+	pub fn get(&self, query: VecDeque<String>) -> OxResult<OxVal> {
 		todo!()
 	}
-	pub fn set(&self, mut query: VecDeque<String>, value: Value) -> OxResult<()> {
+	pub fn set(&self, mut query: VecDeque<String>, value: OxVal) -> OxResult<()> {
 		todo!()
 	}
 }
