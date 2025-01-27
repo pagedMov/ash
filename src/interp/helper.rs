@@ -1,6 +1,6 @@
-use crate::{event::ShError, execute::{self, ProcIO, RustFd}, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, RVal}, OxResult};
-use git2::{Repository, StatusOptions};
+use crate::{event::ShError, execute::{self, ProcIO, RustFd}, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, OxVal}, OxResult};
 use nix::{sys::wait::WaitStatus, unistd::{dup2, getpgrp}, NixPath};
+use serde_json::Value;
 use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread};
 
 use super::{expand::{self, PromptTk}, parse::{NdFlags, NdType, Node, Span}, token::{Tk, TkType, WdFlags, WordDesc}};
@@ -96,9 +96,16 @@ impl StrExtension for str {
 		let mut working_str = String::new();
 		let mut dquoted = false;
 		let mut squoted = false;
+		let mut chars = self.chars();
 
-		for ch in self.chars() {
+		while let Some(ch) = chars.next() {
 			match ch {
+				'\\' => {
+					working_str.push(ch);
+					if let Some(next_ch) = chars.next() {
+						working_str.push(next_ch);
+					}
+				}
 				' ' | '\t' if !dquoted && !squoted => {
 					// Push the current token if not in quotes
 					if !working_str.is_empty() {
@@ -262,7 +269,41 @@ impl StrExtension for str {
 
 }
 
-pub fn parse_vec(input: &str) -> Result<Vec<RVal>,String> {
+pub fn sanitize_json_string(value: &str) -> Value {
+	let sanitized = value
+		.chars()
+		.map(|c| {
+			if c.is_control() {
+				match c {
+					'\n' => "\\n".to_string(),
+					'\r' => "\\r".to_string(),
+					'\t' => "\\t".to_string(),
+					_ => format!("\\u{{{:04X}}}", c as u32), // Encode other control characters as Unicode escape
+				}
+			} else {
+				c.to_string()
+			}
+		})
+	.collect::<String>().trim().to_string();
+	dbg!(&sanitized);
+	Value::String(sanitized)
+}
+
+pub fn desanitize_json_string(value: &str) -> String {
+	let desanitized = value.replace("\\n","\n").replace("\\t","\t").replace("\\r","\r").to_string();
+	desanitized
+}
+
+pub fn to_valid_json(value: &Value) -> String {
+	match value {
+		Value::String(s) => format!("\"{}\"", s),  // Wrap strings in quotes
+		Value::Bool(b) => format!("\"{}\"", b.to_string()),  // Wrap strings in quotes
+		Value::Number(n) => format!("\"{}\"", n.to_string()),  // Wrap strings in quotes
+		_ => format!("\"{}\"",value.to_string()),                  // Fallback for other types
+	}
+}
+
+pub fn parse_vec(input: &str) -> Result<Vec<OxVal>,String> {
 	if !input.starts_with('[') {
 		return Err("Did not find an opening bracket for this array definition".into())
 	}
@@ -277,11 +318,11 @@ pub fn parse_vec(input: &str) -> Result<Vec<RVal>,String> {
 	}
 }
 
-pub fn vec_by_type(str: &str) -> Option<Vec<RVal>> {
+pub fn vec_by_type(str: &str) -> Option<Vec<OxVal>> {
 	str.split(',')
 		.map(str::trim)
-		.map(RVal::parse)
-		.collect::<Result<Vec<RVal>, _>>()
+		.map(OxVal::parse)
+		.collect::<Result<Vec<OxVal>, _>>()
 		.ok()
 }
 
@@ -531,6 +572,21 @@ pub fn capture_non_print_sequence(chars: &mut VecDeque<char>) -> String {
 	sequence
 }
 
+pub fn capture_user_sequence(chars: &mut VecDeque<char>) -> String {
+	let mut sequence = String::from("prompt.custom.");
+	while let Some(c) = chars.pop_front() {
+		match c {
+			'\\' if chars.front().is_some_and(|c| *c == '}') => {
+				chars.pop_front();
+				break
+			}
+			_ => sequence.push(c)
+		}
+	}
+
+	sequence
+}
+
 pub fn capture_ansi_escape(chars: &mut VecDeque<char>) -> String {
 	let mut sequence = String::from("\x1b"); // Start with the escape character (ESC)
 
@@ -648,20 +704,6 @@ pub fn handle_prompt_hidegroup(tokens: &mut VecDeque<PromptTk>) -> OxResult<Stri
 				found = true;
 				result.push(output);
 			}
-			PromptTk::GitSigns =>{
-				let output = &escseq_gitsigns()?;
-				if !output.is_empty() {
-					found = true;
-					result.push_str(output);
-				}
-			}
-			PromptTk::GitBranch =>{
-				let output = &escseq_gitbranch()?;
-				if !output.is_empty() {
-					found = true;
-					result.push_str(output);
-				}
-			}
 			PromptTk::ExitSuccess =>{
 				let output = &escseq_success()?;
 				if !output.is_empty() {
@@ -700,7 +742,7 @@ pub fn handle_prompt_hidegroup(tokens: &mut VecDeque<PromptTk>) -> OxResult<Stri
 }
 
 pub fn escseq_custom(query: &str) -> OxResult<String> {
-	let body = read_meta(|m| m.get_shopt(query))??;
+	let body = read_meta(|m| m.get_shopt(query))?.unwrap_or_default().trim_matches(['(',')']).to_string();
 	let subshell = Node {
 		command: None,
 		nd_type: NdType::Subshell { body, argv: VecDeque::new() },
@@ -711,94 +753,7 @@ pub fn escseq_custom(query: &str) -> OxResult<String> {
 	let (r_pipe,w_pipe) = RustFd::pipe()?;
 	let io = ProcIO::from(None,Some(w_pipe.mk_shared()),None);
 	execute::handle_subshell(subshell, io)?;
-	Ok(r_pipe.read()?)
-}
-
-pub fn escseq_gitbranch() -> OxResult<String> {
-	let current_dir = read_vars(|v| v.get_evar("PWD"))?.unwrap_or_default();
-	let branch_icon = read_meta(|m| m.get_shopt("prompt.git_signs.branch_icon"))?.unwrap().to_string().trim_matches('"').to_string();
-	let git_path = if let Some(path) = check_git(PathBuf::from(current_dir.clone())) {
-		path
-	} else {
-		return Ok(String::new())
-	};
-	let repo = Repository::open(git_path).unwrap();
-	let head = repo.head().unwrap();
-
-	if head.is_branch() {
-		let branch = head.shorthand().map(String::from).unwrap();
-		Ok(format!("{} {}",branch_icon,branch))
-	} else {
-		Ok(String::new())
-	}
-}
-
-pub fn escseq_gitsigns() -> OxResult<String> {
-	let current_dir = read_vars(|v| v.get_evar("PWD"))?.unwrap_or_default();
-	let shopts = read_meta(|m| m.borrow_shopts().clone())?;
-	let dirty_tree_symbol = shopts.get("prompt.git_signs.dirty_tree")?.to_string().trim_matches('"').to_string();
-	let no_unstaged_symbol = shopts.get("prompt.git_signs.clean_tree")?.to_string().trim_matches('"').to_string();
-	let untracked_symbol = shopts.get("prompt.git_signs.untracked")?.to_string().trim_matches('"').to_string();
-	let ahead_of_remote_symbol = shopts.get("prompt.git_signs.ahead_of_remote")?.to_string().trim_matches('"').to_string();
-	let behind_remote_symbol = shopts.get("prompt.git_signs.behind_remote")?.to_string().trim_matches('"').to_string();
-
-	let git_path = if let Some(path) = check_git(PathBuf::from(current_dir.clone())) {
-		path
-	} else {
-		return Ok(String::new())
-	};
-	let repo = Repository::open(git_path).unwrap();
-
-	let mut opts = StatusOptions::new();
-	opts.include_untracked(true)
-		.recurse_untracked_dirs(true)
-		.include_ignored(false);
-
-	let statuses = repo.statuses(Some(&mut opts)).unwrap();
-	let mut dirty_tree = false;
-	let mut all_staged = false;
-	let mut untracked_files = 0;
-
-	for entry in statuses.iter() {
-		let status = entry.status();
-
-		if status.is_index_modified() || status.is_index_new() {
-			all_staged = true;
-		}
-
-		if status.is_wt_modified() || status.is_wt_deleted() {
-			dirty_tree = true;
-			all_staged = false;
-		}
-
-		if status.is_wt_new() {
-			untracked_files += 1;
-		}
-	}
-
-	let mut ahead_of_remote = false;
-	let mut behind_remote = false;
-
-	//FIXME: this is disgusting.
-	if let Ok(head) = repo.head() {
-		if let Ok(head_ref) = head.resolve() { // Resolve symbolic refs like HEAD
-			let branch = git2::Branch::wrap(head_ref); // Convert to a Branch
-			if let Ok(upstream) = branch.upstream() { // Access the upstream branch
-				if let (Some(head_target), Some(upstream_target)) = (head.target(), upstream.get().target()) {
-					if let Ok((ahead, behind)) = repo.graph_ahead_behind(head_target, upstream_target) {
-						ahead_of_remote = ahead > 0;
-						behind_remote = behind > 0;
-					}
-				}
-			}
-		}
-	}
-	let dirty_tree_symbol = if dirty_tree { dirty_tree_symbol } else { "".into() };
-	let no_unstaged_symbol = if all_staged { no_unstaged_symbol } else { "".into() };
-	let untracked_symbol = if untracked_files > 0 { untracked_symbol } else { "".into() };
-	let ahead_of_remote_symbol = if ahead_of_remote { ahead_of_remote_symbol } else { "".into() };
-	let behind_remote_symbol = if behind_remote { behind_remote_symbol } else { "".into() };
-	Ok(format!("{}{}{}{}{}",dirty_tree_symbol,no_unstaged_symbol,untracked_symbol,ahead_of_remote_symbol,behind_remote_symbol))
+	Ok(r_pipe.read()?.trim().to_string())
 }
 
 pub fn escseq_exitcode() -> OxResult<String> {
@@ -831,7 +786,6 @@ pub fn escseq_fail() -> OxResult<String> {
 	}
 }
 
-/// Handles octal escape sequences.
 pub fn escseq_octal_escape(chars: &mut VecDeque<char>, first_digit: char) -> OxResult<char> {
 	let mut octal_digits = String::new();
 	octal_digits.push(first_digit); // Add the first digit
@@ -885,7 +839,7 @@ pub fn escseq_working_directory() -> OxResult<String> {
 	if cwd.starts_with(&home) {
 		cwd = cwd.replacen(&home, "~", 1); // Use `replacen` to replace only the first occurrence
 	}
-	let trunc_len = read_meta(|meta| meta.get_shopt("trunc_prompt_path").unwrap_or("0".into()))?.parse::<usize>().unwrap();
+	let trunc_len = read_meta(|meta| meta.get_shopt("prompt.trunc_prompt_path").unwrap_or("0".into()))?.parse::<usize>().unwrap();
 	if trunc_len > 0 {
 		let mut path = PathBuf::from(cwd);
 		let mut cwd_components: Vec<_> = path.components().collect();

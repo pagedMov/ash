@@ -96,7 +96,6 @@ async fn main() {
 		}
 	}
 	if args.iter().any(|arg| arg == "--subshell") {
-		dbg!("in subshell");
 		let index = args.iter().position(|arg| arg == "--subshell").unwrap();
 		interactive = false;
 		args.remove(index);

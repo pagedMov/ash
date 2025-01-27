@@ -18,7 +18,7 @@ use crate::interp::helper::{self, StrExtension, VecDequeExtension};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType, WdFlags};
-use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, HashFloat, JobBuilder, JobCmdFlags, JobID, RVal};
+use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, HashFloat, JobBuilder, JobCmdFlags, JobID, OxVal};
 use crate::event::ShError;
 use crate::{deconstruct, node_operation, OxResult};
 
@@ -115,9 +115,9 @@ pub fn r#type(node: Node) -> OxResult<OxWait> {
 			let var_name = caps.get(1).map_or("", |m| m.as_str());
 			let index = caps.get(2).map_or("", |m| m.as_str()).parse::<usize>().unwrap();
 
-			if let Some(RVal::Array(_)) = read_vars(|v| v.get_var(var_name))? {
+			if let Some(OxVal::Array(_)) = read_vars(|v| v.get_var(var_name))? {
 				if let Ok(arr_element) = read_vars(|v| v.index_arr(var_name, index))? {
-					use crate::shellenv::RVal::*;
+					use crate::shellenv::OxVal::*;
 					match arr_element {
 						String(_) => println!("string"),
 						Int(_) => println!("int"),
@@ -129,7 +129,7 @@ pub fn r#type(node: Node) -> OxResult<OxWait> {
 				}
 			}
 		} else if let Some(var) = read_vars(|v| v.get_var(text))? {
-			use crate::shellenv::RVal::*;
+			use crate::shellenv::OxVal::*;
 			match var {
 				String(_) => println!("string"),
 				Int(_) => println!("int"),
@@ -167,7 +167,7 @@ pub fn int(node: Node) -> OxResult<OxWait> {
 		if let Some((k,v)) = arg.text().split_once('=') {
 			helper::unset_var_conflicts(k)?;
 			if let Ok(int) = v.parse::<i32>() {
-				write_vars(|v| v.set_var(k, RVal::Int(int)))?
+				write_vars(|v| v.set_var(k, OxVal::Int(int)))?
 			} else {
 				return Err(ShError::from_syntax(format!("Expected an integer in int definition, got `{}`",v).as_str(), node.span()))
 			}
@@ -184,7 +184,7 @@ pub fn string(node: Node) -> OxResult<OxWait> {
 	while let Some(arg) = argv.pop_front() {
 		if let Some((k,val)) = arg.text().split_once('=') {
 			helper::unset_var_conflicts(k)?;
-			write_vars(|v| v.set_var(k, RVal::String(val.into())))?
+			write_vars(|v| v.set_var(k, OxVal::String(val.into())))?
 		} else {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
 		}
@@ -199,7 +199,7 @@ pub fn bool(node: Node) -> OxResult<OxWait> {
 		if let Some((k,val)) = arg.text().split_once('=') {
 			helper::unset_var_conflicts(k)?;
 			if let Ok(bool) = val.parse::<bool>() {
-				write_vars(|v| v.set_var(k, RVal::Bool(bool)))?
+				write_vars(|v| v.set_var(k, OxVal::Bool(bool)))?
 			}
 		} else {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
@@ -215,7 +215,7 @@ pub fn float(node: Node) -> OxResult<OxWait> {
 		if let Some((k,val)) = arg.text().split_once('=') {
 			helper::unset_var_conflicts(k)?;
 			if let Ok(float) = val.parse::<f64>() {
-				write_vars(|v| v.set_var(k, RVal::Float(HashFloat(float))))?
+				write_vars(|v| v.set_var(k, OxVal::Float(HashFloat(float))))?
 			}
 		} else {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
@@ -231,7 +231,7 @@ pub fn array(node: Node) -> OxResult<OxWait> {
 		if let Some((k,val)) = arg.text().split_once('=') {
 			helper::unset_var_conflicts(k)?;
 			if let Ok(array) = helper::parse_vec(val) {
-				write_vars(|v| v.set_var(k, RVal::Array(array)))?
+				write_vars(|v| v.set_var(k, OxVal::Array(array)))?
 			}
 		} else {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
@@ -863,17 +863,19 @@ pub fn setopt(node: Node) -> OxResult<OxWait> {
 
 pub fn getopt(node: Node, io: ProcIO) -> OxResult<OxWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
-	let opts = read_meta(|m| m.borrow_shopts().clone())?;
 	argv.pop_front();
 	while let Some(arg) = argv.pop_front() {
-		if let Ok(value) = opts.get(arg.text()) {
-			let echo_arg = vec![value.to_string().trim_matches('"').to_string()];
-			echo_internal(echo_arg, io.clone(), node.span(), node.flags, node.redirs.clone());
-		} else {
-			let echo_arg = vec![
-				format!("Failed to find a value for '{}'", arg.text())
-			];
-			echo_internal(echo_arg, io.clone(), node.span(), node.flags, node.redirs.clone());
+		match read_meta(|m| m.get_shopt(arg.text()))? {
+			Ok(value) => {
+				let echo_arg = vec![value.to_string().trim_matches('"').to_string()];
+				echo_internal(echo_arg, io.clone(), node.span(), node.flags, node.redirs.clone())?;
+			}
+			Err(e) => {
+				let echo_arg = vec![
+					format!("Failed to find a value for '{}': {}", arg.text(),e.to_string())
+				];
+				echo_internal(echo_arg, io.clone(), node.span(), node.flags, node.redirs.clone())?;
+			}
 		}
 	}
 	Ok(OxWait::Success)

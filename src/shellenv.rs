@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::{fs::File, sync::RwLock};
 
 
-use crate::{event::{self, ShError}, interp::{helper, parse::{NdFlags, Span}}, shopt::ShOpts, OxResult};
+use crate::{event::{self, ShError}, interp::{helper, parse::{NdFlags, Span}}, shopt::{PromptCustom, ShOpts}, OxResult};
 
 #[derive(Debug)]
 pub struct DisplayWaitStatus(pub WaitStatus);
@@ -684,38 +684,38 @@ impl Hash for HashFloat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum RVal {
+pub enum OxVal {
 	String(String),
 	Int(i32),
 	Float(HashFloat),
 	Bool(bool),
-	Array(Vec<RVal>),
-	Dict(BTreeMap<RVal, RVal>),
+	Array(Vec<OxVal>),
+	Dict(BTreeMap<String, OxVal>),
 }
 
-impl RVal {
+impl OxVal {
 	pub fn parse(s: &str) -> Result<Self, String> {
 		if let Ok(int) = s.parse::<i32>() {
-			return Ok(RVal::Int(int));
+			return Ok(OxVal::Int(int));
 		}
 		if let Ok(float) = s.parse::<f64>() {
-			return Ok(RVal::Float(HashFloat(float)));
+			return Ok(OxVal::Float(HashFloat(float)));
 		}
 		if let Ok(boolean) = s.parse::<bool>() {
-			return Ok(RVal::Bool(boolean));
+			return Ok(OxVal::Bool(boolean));
 		}
-		Ok(RVal::String(s.to_string()))
+		Ok(OxVal::String(s.to_string()))
 	}
 
 	pub fn as_os_str(&self) -> Option<&OsStr> {
 		match self {
-			RVal::String(s) => Some(OsStr::new(s)),
+			OxVal::String(s) => Some(OsStr::new(s)),
 			_ => None, // Only strings can be converted to OsStr
 		}
 	}
 
 	pub fn as_string(&self) -> Option<&String> {
-		if let RVal::String(s) = self {
+		if let OxVal::String(s) = self {
 			Some(s)
 		} else {
 			None
@@ -723,7 +723,7 @@ impl RVal {
 	}
 
 	pub fn as_int(&self) -> Option<i32> {
-		if let RVal::Int(i) = self {
+		if let OxVal::Int(i) = self {
 			Some(*i)
 		} else {
 			None
@@ -731,7 +731,7 @@ impl RVal {
 	}
 
 	pub fn as_float(&self) -> Option<f64> {
-		if let RVal::Float(f) = self {
+		if let OxVal::Float(f) = self {
 			Some(f.0)
 		} else {
 			None
@@ -739,48 +739,81 @@ impl RVal {
 	}
 
 	pub fn as_bool(&self) -> Option<bool> {
-		if let RVal::Bool(b) = self {
+		if let OxVal::Bool(b) = self {
 			Some(*b)
 		} else {
 			None
 		}
 	}
 
-	pub fn as_array(&self) -> Option<&Vec<RVal>> {
-		if let RVal::Array(arr) = self {
+	pub fn as_array(&self) -> Option<&Vec<OxVal>> {
+		if let OxVal::Array(arr) = self {
 			Some(arr)
 		} else {
 			None
 		}
 	}
 
-	pub fn as_dict(&self) -> Option<&BTreeMap<RVal, RVal>> {
-		if let RVal::Dict(dict) = self {
+	pub fn as_dict(&self) -> Option<&BTreeMap<String, OxVal>> {
+		if let OxVal::Dict(dict) = self {
 			Some(dict)
 		} else {
 			None
 		}
 	}
-}
 
-impl Default for RVal {
-	fn default() -> Self {
-		RVal::String("".into())
+	pub fn try_insert(&mut self, key: String, val: OxVal) -> OxResult<()> {
+		if let OxVal::Dict(map) = self {
+			map.insert(key,val);
+			Ok(())
+		} else {
+			Err(ShError::from_internal("Called try_insert() on a non-dict OxVal"))
+		}
+	}
+
+	pub fn try_get(&mut self, key: &str) -> OxResult<Option<&OxVal>> {
+		if let OxVal::Dict(map) = self {
+			Ok(map.get(key))
+		} else {
+			Err(ShError::from_internal("Called try_get() on a non-dict OxVal"))
+		}
+	}
+
+	pub fn try_get_mut(&mut self, key: &str) -> OxResult<Option<&mut OxVal>> {
+		if let OxVal::Dict(map) = self {
+			Ok(map.get_mut(key))
+		} else {
+			Err(ShError::from_internal("Called try_get() on a non-dict OxVal"))
+		}
+	}
+
+	pub fn try_remove(&mut self, key: &str) -> OxResult<Option<OxVal>> {
+		if let OxVal::Dict(map) = self {
+			Ok(map.remove(key))
+		} else {
+			Err(ShError::from_internal("Called try_get() on a non-dict OxVal"))
+		}
 	}
 }
 
-impl fmt::Display for RVal {
+impl Default for OxVal {
+	fn default() -> Self {
+		OxVal::String("".into())
+	}
+}
+
+impl fmt::Display for OxVal {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			RVal::Int(int) => write!(f, "{}", int),
-			RVal::String(string) => write!(f, "{}", string),
-			RVal::Float(float) => write!(f, "{}", float.0),
-			RVal::Bool(bool) => write!(f, "{}", bool),
-			RVal::Array(array) => {
+			OxVal::Int(int) => write!(f, "{}", int),
+			OxVal::String(string) => write!(f, "{}", string),
+			OxVal::Float(float) => write!(f, "{}", float.0),
+			OxVal::Bool(bool) => write!(f, "{}", bool),
+			OxVal::Array(array) => {
 				let formatted_array: Vec<String> = array.iter().map(|val| format!("{}", val)).collect();
 				write!(f, "{}", formatted_array.join(" "))
 			}
-			RVal::Dict(dict) => {
+			OxVal::Dict(dict) => {
 				let formatted_dict: Vec<String> = dict
 					.iter()
 					.map(|(key, value)| format!("{}: {}", key, value))
@@ -799,7 +832,7 @@ impl fmt::Display for RVal {
 pub struct VarTable {
 	env: HashMap<String,String>,
 	params: HashMap<String,String>,
-	vars: HashMap<String,RVal>
+	vars: HashMap<String,OxVal>
 }
 
 impl VarTable {
@@ -812,7 +845,7 @@ impl VarTable {
 		}
 	}
 
-	pub fn borrow_vars(&self) -> &HashMap<String, RVal> {
+	pub fn borrow_vars(&self) -> &HashMap<String, OxVal> {
 		&self.vars
 	}
 
@@ -870,26 +903,26 @@ impl VarTable {
 		self.params.remove(key);
 	}
 
-	pub fn set_var(&mut self, key: &str, val: RVal) {
+	pub fn set_var(&mut self, key: &str, val: OxVal) {
 		self.vars.insert(key.to_string(),val);
 	}
 	pub fn unset_var(&mut self, key: &str) {
 		self.vars.remove(key);
 	}
-	pub fn get_var(&self, key: &str) -> Option<RVal> {
+	pub fn get_var(&self, key: &str) -> Option<OxVal> {
 		if let Some(var) = self.vars.get(key).cloned() {
 			Some(var)
 		} else if let Some(var) = self.params.get(key).cloned() {
-			Some(RVal::String(var))
+			Some(OxVal::String(var))
 		} else {
-			let var = self.env.get(key).cloned().map(RVal::String);
+			let var = self.env.get(key).cloned().map(OxVal::String);
 			var
 		}
 	}
 
-	pub fn index_arr(&self, key: &str, index: usize) -> OxResult<RVal> {
+	pub fn index_arr(&self, key: &str, index: usize) -> OxResult<OxVal> {
 		if let Some(var) = self.vars.get(key) {
-			if let RVal::Array(arr) = var {
+			if let OxVal::Array(arr) = var {
 				if let Some(value) = arr.get(index) {
 					Ok(value.clone())
 				} else {
@@ -1007,12 +1040,13 @@ impl EnvMeta {
 		&self.shopts
 	}
 	pub fn set_shopt(&mut self, key: &str, val: &str) -> OxResult<()> {
-		let value = Value::from_str(&format!("\"{}\"", val)).unwrap();
+		let val = OxVal::parse(val).map_err(|e| ShError::from_internal(&e))?;
 		let query = key.split('.').map(|str| str.to_string()).collect::<VecDeque<String>>();
-		self.shopts.set(query,value)
+		self.shopts.set(query,val)
 	}
 	pub fn get_shopt(&self, key: &str) -> OxResult<String> {
-		Ok(self.shopts.get(key)?.to_string())
+		let result = &self.shopts.get(key)?;
+		Ok(result.to_string().trim().to_string())
 	}
 	pub fn mod_flags<F>(&mut self, flag_mod: F)
 		where F: FnOnce(&mut EnvFlags) {
@@ -1102,7 +1136,6 @@ pub fn attach_tty(pgid: Pid) -> OxResult<()> {
 	}
 
 	if pgid == getpgrp() && read_meta(|m| m.flags().contains(EnvFlags::IN_SUBSH))? {
-		dbg!("skipping term attachment in subshell");
 		return Ok(())
 	}
 
@@ -1129,23 +1162,6 @@ pub fn attach_tty(pgid: Pid) -> OxResult<()> {
 
 pub fn term_controller() -> Pid {
 	unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) }.unwrap_or(getpgrp())
-}
-
-fn init_shopts() -> HashMap<String,usize> {
-	let mut shopts = HashMap::new();
-	shopts.insert("dotglob".into(),0);
-	shopts.insert("trunc_prompt_path".into(),4);
-	shopts.insert("int_comments".into(),1);
-	shopts.insert("autocd".into(),1);
-	shopts.insert("hist_ignore_dupes".into(),1);
-	shopts.insert("max_hist".into(),1000);
-	shopts.insert("edit_mode".into(),1);
-	shopts.insert("comp_limit".into(),100);
-	shopts.insert("auto_hist".into(),1);
-	shopts.insert("prompt_highlight".into(),1);
-	shopts.insert("tab_stop".into(),8);
-	shopts.insert("bell_style".into(),1);
-	shopts
 }
 
 pub struct SavedEnv {
