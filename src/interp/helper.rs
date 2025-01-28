@@ -60,14 +60,33 @@ pub trait StrExtension {
 	fn split_last(&self, pat: &str) -> Option<(String,String)>;
 	fn has_unescaped(&self, pat: &str) -> bool;
 	fn has_unquoted(&self, pat: &str) -> bool;
-	fn consume_escapes(&self) -> String;
 	fn trim_quotes(&self) -> String;
 	fn split_outside_quotes(&self) -> Vec<String>;
 	fn split_twice(&self,left: &str, right: &str) -> Option<(String,String,String)>;
 	fn expand_globs(&self) -> Vec<String>;
+	fn consume_escapes(&self) -> String;
 }
 
 impl StrExtension for str {
+	fn consume_escapes(&self) -> String {
+		// This function consumes one layer of escape characters
+		// Meaning that double escapes will still be left with one escape, i.e. \\ -> \
+		let mut product = String::new();
+		let mut chars = self.chars();
+		while let Some(ch) = chars.next() {
+			match ch {
+				'\\' => {
+					if let Some(ch) = chars.next() {
+						product.push(ch)
+					}
+				}
+				_ => {
+					product.push(ch)
+				}
+			}
+		}
+		product
+	}
 	fn expand_globs(&self) -> Vec<String> {
 		let result = match glob::glob(self) {
 			Ok(paths) => {
@@ -179,23 +198,6 @@ impl StrExtension for str {
 			}
 		}
 		result.trim().to_string()
-	}
-	fn consume_escapes(&self) -> String {
-		let mut result = String::new();
-		let mut chars = self.chars().peekable();
-
-		while let Some(ch) = chars.next() {
-			if ch == '\\' {
-				if let Some(&next_ch) = chars.peek() {
-					chars.next(); // Consume the escaped character
-					result.push(next_ch); // Add the unescaped pattern character
-				}
-			} else {
-				result.push(ch); // Add non-escaped characters as-is
-			}
-		}
-
-		result
 	}
 
 	fn split_last(&self, pat: &str) -> Option<(String, String)> {
