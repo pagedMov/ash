@@ -867,7 +867,7 @@ impl OxTokenizer {
 					}
 				}
 				'"' => {
-					working_buffer.push(ch);
+;
 					while let Some(ch) = chars.next() {
 						working_buffer.push(ch);
 						match ch {
@@ -968,7 +968,7 @@ impl OxTokenizer {
 				}
 				_ => {
 					if !ch.is_whitespace() {
-						if working_buffer.ends_with(' ') {
+						if working_buffer.chars().last().is_some_and(|c| matches!(c, ';' | '\n' | ' ')) {
 							// We have reached a new word
 							// No need to worry about duplicate contexts anymore, so this is false now
 							pushed = false;
@@ -1057,7 +1057,7 @@ impl OxTokenizer {
 		}
 
 		let sliced_input = self.input[working_buffer.len()..].trim_start().to_string(); // Remainder
-		self.input = working_buffer;
+		self.input = working_buffer.clone();
 		self.cmd_sub_pass()?; // The order does matter here
 		self.glob_pass()?;
 		self.alias_pass()?;
@@ -1175,7 +1175,11 @@ impl OxTokenizer {
 				_ => unreachable!("{:?},{:?}",self.context,self.char_stream.iter().collect::<String>())
 			}
 		}
-		self.input = remainder;
+		// Here we take what's left of the expansion and concatenate it with leftover characters in the char_stream
+		// So for instance, if an alias expands to several commands, there will still be unprocessed commands in the char_stream
+		// We need to include those unprocessed characters, and the unprocessed remainder from expand_one() here
+		let remaining_input: String = self.char_stream.iter().collect();
+		self.input = format!("{}{}",remaining_input,remainder);
 		Ok(take(&mut self.tokens))
 	}
 	fn command_context(&mut self, mut wd: WordDesc) -> OxResult<()> {
