@@ -26,7 +26,7 @@ use super::helper::StrExtension;
 pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
 	let mut regex = HashMap::new();
 	regex.insert("var_index", Regex::new(r"(\w+)\[(\d+)\]").unwrap());
-	regex.insert("redirection",Regex::new(r"^(?P<fd_out>[0-9]+)?(?P<operator>>{1,2}|<{1,3})(?:[&]?(?P<fd_target>[0-9]+))?$").unwrap());
+	regex.insert("redirection",Regex::new(r"^(?P<fd_out>[0-9]+)?(?P<operator>>{1,2}|<{1,3})(?:(?:[&]?(?P<fd_target>[0-9]+))|(?P<file_target>[a-zA-Z0-9-\.]*))?$").unwrap());
 	regex.insert("rsh_shebang",Regex::new(r"^#!((?:/[^\s]+)+)((?:\s+arg:[a-zA-Z][a-zA-Z0-9_\-]*)*)$").unwrap());
 	regex.insert("brace_expansion",Regex::new(r"(\$?)\{(?:[\x20-\x7e,]+|[0-9]+(?:\.\.[0-9+]){1,2}|[a-z]\.\.[a-z]|[A-Z]\.\.[A-Z])\}").unwrap());
 	regex.insert("process_sub",Regex::new(r"^>\(.*\)$").unwrap());
@@ -1069,10 +1069,23 @@ impl OxTokenizer {
 				let mut fd_out;
 				let operator;
 				let fd_target;
+				let file_target;
 				if let Some(caps) = REGEX["redirection"].captures(&wd.text) {
 					fd_out = caps.name("fd_out").and_then(|fd| fd.as_str().parse::<i32>().ok()).unwrap_or(1);
 					operator = caps.name("operator").unwrap().as_str();
-					fd_target = caps.name("fd_target").and_then(|fd| fd.as_str().parse::<i32>().ok())
+					fd_target = caps.name("fd_target").and_then(|fd| fd.as_str().parse::<i32>().ok());
+					file_target = caps.name("file_target").map(|mat| {
+						Box::new(
+							Tk {
+								tk_type: TkType::String,
+								wd: WordDesc {
+									text: mat.as_str().to_string(),
+									span: wd.span,
+									flags: WdFlags::empty()
+								}
+							}
+						)
+					});
 				} else { unreachable!() }
 				let op = match operator {
 					">" => RedirType::Output,
@@ -1088,7 +1101,7 @@ impl OxTokenizer {
 					fd_source: fd_out,
 					op,
 					fd_target,
-					file_target: None
+					file_target
 				};
 				self.tokens.push(Tk { tk_type: TkType::Redirection { redir }, wd })
 			}
@@ -1396,6 +1409,14 @@ impl OxTokenizer {
 					// Double quote handling
 					dub_quote = !dub_quote;
 					wd = wd.add_char(ch);
+				}
+				'>' | '<' if bracket_stack.is_empty() && paren_stack.is_empty() && !dub_quote && !sng_quote => {
+					if wd.text.is_empty() || wd.text.chars().last().is_some_and(|c| c.is_ascii_digit()) {
+						wd = wd.add_char(ch)
+					} else {
+						self.char_stream.push_front(ch);
+						break
+					}
 				}
 				'|' | '&' if bracket_stack.is_empty() && paren_stack.is_empty() && !dub_quote && !sng_quote => {
 					let redir_check = wd.text.chars().next();
