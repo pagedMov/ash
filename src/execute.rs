@@ -608,17 +608,21 @@ fn handle_loop(node: Node, io: ProcIO) -> OxResult<OxWait> {
 			match condition {
 				true => {
 					if !is_success {
+						write_vars(|v| v.set_param("?".into(), "0".into()))?;
+						write_meta(|v| v.set_last_command("while"))?;
 						break
 					}
 				}
 				false => {
 					if is_success {
+						write_vars(|v| v.set_param("?".into(), "0".into()))?;
+						write_meta(|v| v.set_last_command("until"))?;
 						break
 					}
 				}
 			}
 
-			event::execute(&body, NdFlags::empty(), None, Some(body_io.clone()));
+			event::execute(&body, NdFlags::empty(), None, Some(body_io.clone()))?;
 		}
 	});
 
@@ -637,7 +641,9 @@ fn handle_if(node: Node, io: ProcIO) -> OxResult<OxWait> {
 			let body = *block.body;
 
 			traverse(cond, cond_io.clone())?;
-			let is_success = read_vars(|v| v.get_param("?").is_some_and(|val| val == "0"))?;
+			let code = read_vars(|v| v.get_param("?"))?;
+			let cmd = read_meta(|m| m.get_last_command())?;
+			let is_success = code.clone().unwrap_or("0".to_string()) == "0";
 			if is_success {
 				traverse(body, body_io.clone())?;
 				return Ok(last_status)
@@ -721,6 +727,7 @@ fn handle_assignment(node: Node) -> OxResult<OxWait> {
 
 fn handle_builtin(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 	let argv = node.get_argv()?;
+	write_meta(|m| m.set_last_command(argv.first().unwrap().text()))?;
 	let result = match argv.first().unwrap().text() {
 		"echo" => builtin::echo(node, io)?,
 		"expr" => builtin::expr(node, io)?,
@@ -883,6 +890,7 @@ fn handle_function(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 		let mut func = body; // Unbox the root node for the function
 		node.flags |= NdFlags::FUNCTION;
 		let mut pos_params = vec![];
+		write_meta(|m| m.set_last_command(argv.front().unwrap().text()))?;
 
 		argv.pop_front(); // Ignore function name
 		while let Some(tk) = argv.pop_front() {
@@ -1033,6 +1041,7 @@ fn handle_command(node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 	 * If we are in a pipe, the job control logic is skipped and execvpe() is called in this process
 	 * This is because if we are in a pipe, this is already a forked child process, so forking again doesn't make sense.
 	 */
+	write_meta(|m| m.set_last_command(node.get_argv().unwrap().first().unwrap().text()))?;
 	let argv = node.get_argv()?.iter().map(|arg| CString::new(arg.text()).unwrap()).collect::<Vec<CString>>();
 	let redirs = node.get_redirs()?;
 

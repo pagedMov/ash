@@ -6,7 +6,7 @@ use rustyline::{completion::{Candidate, Completer, FilenameCompleter}, error::Re
 use skim::{prelude::{Key, SkimItemReader, SkimOptionsBuilder}, Skim};
 use std::{collections::{HashMap, HashSet}, env, io::stdout, path::PathBuf};
 
-use crate::{event::ShError, interp::{helper, parse::Span}, shellenv::read_vars};
+use crate::{event::ShError, interp::{helper, parse::Span, token::KEYWORDS}, shellenv::read_vars};
 
 static DELIM_PAIRS: Lazy<HashMap<String, Vec<String>>> = Lazy::new(|| {
 	let mut m = HashMap::new();
@@ -38,10 +38,21 @@ static DELIM_PAIRS: Lazy<HashMap<String, Vec<String>>> = Lazy::new(|| {
 pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 	let mut delim_stack = vec![]; // Stack for delimiters like (), {}, []
 	let mut keyword_stack = vec![]; // Stack for keywords like if/then/fi
-	let mut chars = input.chars();
+	let mut chars = input.chars().peekable();
+	let mut checked_chars = String::new();
+	let mut is_command = true;
 
 	while let Some(ch) = chars.next() {
 		match ch {
+			'\n' | ';' => {
+				is_command = true;
+			}
+			' ' => {
+				let last_word = checked_chars.split_whitespace().last();
+				if last_word.is_some_and(|wrd| !KEYWORDS.contains(&wrd.trim())) {
+					is_command = false;
+				}
+			}
 			'\\' => {
 				// Skip the next character after a backslash (escape)
 				chars.next();
@@ -103,34 +114,24 @@ pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 				keyword.push(ch);
 
 				// Accumulate additional characters for the keyword
-				while let Some(next) = chars.clone().next() {
-					if next.is_alphanumeric() || next == '_' {
-						chars.next(); // Consume the character
-						keyword.push(next);
-					} else {
-						break;
-					}
+				while chars.peek().is_some_and(|ch| ch.is_alphanumeric() || *ch == '_' || *ch == '-') {
+					let next = chars.next().unwrap(); // Consume the character
+					checked_chars.push(next);
+					keyword.push(next);
 				}
 
-				if keyword_stack.is_empty() {
-					match keyword.as_str() {
-						"if" | "while" | "for" | "until" | "select" | "case" => {
-							keyword_stack.push(keyword.clone())
-						}
-						_ => { /* Do nothing */ }
-					}
+				if is_command && matches!(keyword.as_str(),"if" | "while" | "for" | "until" | "select" | "case") {
+					keyword_stack.push(keyword.clone())
 				} else {
 					match keyword.as_str() {
 						"fi" | "done" | "esac" => {
 							let expectation = match keyword.as_str() {
-								"fi" => vec!["then", "else"],
-								"done" => vec!["do"],
+								"fi" => vec!["if", "else"],
+								"done" => vec!["do", "while", "until", "for", "select"],
 								"esac" => vec!["in"],
 								_ => unreachable!()
 							};
-							if keyword_stack.last().is_none_or(|kw| !expectation.contains(&kw.as_str())) {
-								return Err(ShError::from_syntax(format!("Unexpected keyword: {}",keyword).as_str(), Span::new()))
-							} else {
+							if keyword_stack.last().is_some_and(|kw| expectation.contains(&kw.as_str())) {
 								keyword_stack.pop();
 							}
 						}
@@ -141,11 +142,11 @@ pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 								"in" => vec!["case","for","select"],
 								_ => unreachable!()
 							};
-							if keyword_stack.last().is_none_or(|kw| !expectation.contains(&kw.as_str())) {
-								return Err(ShError::from_syntax(format!("Unexpected keyword: {}",keyword).as_str(), Span::new()))
-							} else {
-								keyword_stack.pop();
-								keyword_stack.push(keyword.clone());
+							if keyword_stack.last().is_some_and(|kw| expectation.contains(&kw.as_str())) {
+								if keyword != "then" && keyword != "do" {
+									keyword_stack.pop();
+									keyword_stack.push(keyword.clone());
+								}
 							}
 						}
 						_ => { /* Do nothing */ }
@@ -154,6 +155,7 @@ pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 			}
 			_ => { /* Do nothing */ }
 		}
+		checked_chars.push(ch);
 	}
 
 	// Check if any delimiters or keywords remain unclosed

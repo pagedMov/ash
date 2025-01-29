@@ -216,7 +216,8 @@ pub fn throw(err: ShError) -> OxResult<()> {
 	Ok(())
 }
 
-pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: Option<ProcIO>) -> OxResult<()> {
+pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: Option<ProcIO>) -> OxResult<OxWait> {
+	let mut last_status = OxWait::Fail { code: 1, cmd: None };
 	if !input.is_empty() {
 		let mut tokenizer = OxTokenizer::new(input);
 
@@ -233,8 +234,11 @@ pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: 
 					let deck = helper::extract_deck_from_root(&state.ast)?;
 					if !deck.is_empty() {
 						// Send each deck immediately for execution
-						if let Err(e) = execute::traverse_ast(state.ast, io.clone()) {
+						let result = execute::traverse_ast(state.ast, io.clone());
+						if let Err(e) = result {
 							throw(e)?;
+						} else {
+							last_status = result.unwrap();
 						}
 					} else {
 						break;
@@ -246,7 +250,7 @@ pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: 
 			}
 		}
 	}
-	Ok(())
+	Ok(last_status)
 }
 
 pub fn main_loop() -> OxResult<()> {

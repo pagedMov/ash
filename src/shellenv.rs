@@ -1011,6 +1011,7 @@ impl Default for LogicTable {
 #[derive(Debug,Clone)]
 pub struct EnvMeta {
 	last_input: String,
+	last_command: Option<String>,
 	timer_start: Option<Instant>,
 	cmd_duration: Option<Duration>,
 	dir_stack: Vec<PathBuf>,
@@ -1024,6 +1025,7 @@ impl EnvMeta {
 		let in_prompt = flags.contains(EnvFlags::INTERACTIVE);
 		Self {
 			last_input: String::new(),
+			last_command: None,
 			timer_start: None,
 			cmd_duration: None,
 			dir_stack: vec![std::env::current_dir().unwrap()],
@@ -1048,6 +1050,12 @@ impl EnvMeta {
 	}
 	pub fn push_dir(&mut self, path: PathBuf) {
 		self.dir_stack.push(path)
+	}
+	pub fn set_last_command(&mut self, cmd: &str) {
+		self.last_command = Some(cmd.into())
+	}
+	pub fn get_last_command(&self) -> Option<String> {
+		self.last_command.clone()
 	}
 	pub fn pop_dir(&mut self) -> Option<PathBuf> {
 		if self.dir_stack.len() > 1 {
@@ -1293,5 +1301,5 @@ pub fn source_file(path: PathBuf) -> OxResult<()> {
 	file.read_to_string(&mut buffer).map_err(|_| ShError::from_io())?;
 	write_meta(|meta| meta.set_last_input(&buffer.clone()))?;
 
-	event::execute(&buffer, NdFlags::empty(), None, None)
+	event::execute(&buffer, NdFlags::empty(), None, None).map(|_| ())
 }

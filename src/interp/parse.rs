@@ -978,7 +978,7 @@ pub fn build_if(mut ctx: DescentContext) -> OxResult<DescentContext> {
 					let else_node = get_tree(else_ctx)?.boxed();
 					else_block = Some(else_node);
 				}
-				if !body_tokens.is_empty() && !cond_tokens.is_empty() {
+				if !body_tokens.is_empty() {
 					let cond_span = compute_span(&cond_tokens);
 					cond_root = parse_and_attach(take(&mut cond_tokens), cond_root)?;
 

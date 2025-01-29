@@ -766,7 +766,7 @@ impl OxTokenizer {
 					 * If we expand them here, they become static strings in the loop
 					 */
 					while let Some(word) = words.pop_front() {
-						new_input.push(word.clone());
+						new_input.push(word.trim().to_string());
 						if &word == "done" {
 							break
 						}
@@ -778,7 +778,7 @@ impl OxTokenizer {
 				if word.ends_with([';','\n']) {
 					is_command = true;
 				}
-				if !word.trim().is_empty() { new_input.push(word); }
+				if !word.trim().is_empty() { new_input.push(word.trim_matches(' ').to_string()); }
 			}
 
 			self.input = new_input.join(" ");
@@ -1588,10 +1588,14 @@ impl OxTokenizer {
 		let span = self.spans.pop_front().unwrap();
 		let span_start = span.start;
 		let mut span_end = span.end;
+		let mut got_span = false;
 		let mut cond_done = false;
 		let mut body_done = false;
 		let mut target = if !cond_done { Some("do") } else { Some("done") };
 		while let Some(ch) = self.char_stream.pop_front() {
+			if !ch.is_whitespace() && !matches!(ch, ';' | '\n') {
+				got_span = false;
+			}
 			if !cond_done || !body_done {
 				wd = wd.add_char(ch);
 				if wd.text.split_whitespace().last() == target {
@@ -1612,14 +1616,11 @@ impl OxTokenizer {
 							_ => unreachable!(),
 						},
 						wd: WordDesc {
-							text: "do".to_string(),
+							text: target.unwrap().to_string(),
 							span: self.spans.pop_front().unwrap_or_default(),
 							flags: WdFlags::KEYWORD
 						}
 					});
-					while matches!(self.char_stream.front(), Some(';') | Some('\n')) {
-						self.char_stream.pop_front();
-					}
 					if self.char_stream.front().is_some_and(|ch| ch.is_whitespace()) {
 						let input: String = self.char_stream.iter().collect();
 						let input = input.trim_start();
@@ -1632,8 +1633,9 @@ impl OxTokenizer {
 						body_done = true;
 					}
 				}
-				if ch.is_whitespace() || matches!(ch, ';' | '\n') {
+				if ch.is_whitespace() || matches!(ch, ';' | '\n') && !got_span {
 					span_end = self.spans.pop_front().unwrap_or_default().end;
+					got_span = true;
 				}
 			} else {
 				break
