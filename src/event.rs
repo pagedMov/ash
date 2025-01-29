@@ -259,8 +259,10 @@ pub fn main_loop() -> OxResult<()> {
 			// Bad things will happen if we reach the prompt without terminal control
 			shellenv::attach_tty(getpgrp())?;
 		}
+		write_meta(|m| m.stop_timer());
 		let input = prompt::run()?;
 		write_meta(|m| m.leave_prompt())?;
+		write_meta(|m| m.start_timer());
 		execute(&input, NdFlags::empty(), None, None)?;
 	}
 }

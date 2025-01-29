@@ -867,7 +867,7 @@ impl OxTokenizer {
 					}
 				}
 				'"' => {
-;
+					working_buffer.push(ch);
 					while let Some(ch) = chars.next() {
 						working_buffer.push(ch);
 						match ch {

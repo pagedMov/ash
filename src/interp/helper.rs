@@ -1,7 +1,7 @@
 use crate::{event::ShError, execute::{self, ProcIO, RustFd}, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, OxVal}, OxResult};
 use nix::{sys::wait::WaitStatus, unistd::{dup2, getpgrp}, NixPath};
 use serde_json::Value;
-use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io::{self, Read}, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread};
+use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io::{self, Read}, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread, time::Duration};
 
 use super::{expand::{self, PromptTk}, parse::{NdFlags, NdType, Node, Span}, token::{Tk, TkType, WdFlags, WordDesc}};
 
@@ -759,6 +759,13 @@ pub fn handle_prompt_hidegroup(tokens: &mut VecDeque<PromptTk>) -> OxResult<Stri
 					result.push_str(output);
 				}
 			}
+			PromptTk::CmdTime =>{
+				let output = &escseq_cmdtime()?;
+				if !output.is_empty() {
+					found = true;
+					result.push_str(output);
+				}
+			}
 			PromptTk::UserSequence(seq) =>{
 				let output = &escseq_custom(&seq)?;
 				if !output.is_empty() {
@@ -770,6 +777,91 @@ pub fn handle_prompt_hidegroup(tokens: &mut VecDeque<PromptTk>) -> OxResult<Stri
 	}
 	if found {
 		Ok(result)
+	} else {
+		Ok(String::new())
+	}
+}
+
+pub fn expand_duration(dur: Duration) -> String {
+    let mut seconds = dur.as_secs();
+    let mut minutes = 0;
+    let mut hours = 0;
+    let mut days = 0;
+    let mut weeks = 0;
+    let mut years = 0;
+    let mut decades = 0;
+    let mut centuries = 0;
+    let mut millennia = 0;
+
+    if seconds >= 60 {
+        minutes = seconds / 60;
+        seconds %= 60;
+    }
+    if minutes >= 60 {
+        hours = minutes / 60;
+        minutes %= 60;
+    }
+    if hours >= 24 {
+        days = hours / 24;
+        hours %= 24;
+    }
+    if days >= 7 {
+        weeks = days / 7;
+        days %= 7;
+    }
+    if weeks >= 52 {
+        years = weeks / 52;
+        weeks %= 52;
+    }
+    if years >= 10 {
+        decades = years / 10;
+        years %= 10;
+    }
+    if decades >= 10 {
+        centuries = decades / 10;
+        decades %= 10;
+    }
+    if centuries >= 10 {
+        millennia = centuries / 10;
+        centuries %= 10;
+    }
+
+    // Format the result
+    let mut result = Vec::new();
+    if millennia > 0 {
+        result.push(format!("{} millennia", millennia));
+    }
+    if centuries > 0 {
+        result.push(format!("{} centuries", centuries));
+    }
+    if decades > 0 {
+        result.push(format!("{} decades", decades));
+    }
+    if years > 0 {
+        result.push(format!("{} years", years));
+    }
+    if weeks > 0 {
+        result.push(format!("{} weeks", weeks));
+    }
+    if days > 0 {
+        result.push(format!("{} days", days));
+    }
+    if hours > 0 {
+        result.push(format!("{}h", hours));
+    }
+    if minutes > 0 {
+        result.push(format!("{}m", minutes));
+    }
+    if seconds > 0 || result.is_empty() {
+        result.push(format!("{}s", seconds));
+    }
+
+    result.join(" ")
+}
+
+pub fn escseq_cmdtime() -> OxResult<String> {
+	if let Some(duration) = read_meta(|m| m.get_cmd_duration())? {
+		Ok(expand_duration(duration))
 	} else {
 		Ok(String::new())
 	}
