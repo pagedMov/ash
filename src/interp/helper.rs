@@ -1288,6 +1288,12 @@ pub fn has_valid_delims(input: &str, open: &str, close: &str) -> bool {
 }
 
 pub fn is_brace_expansion(text: &str) -> bool {
+	if let Some((_,middle,_)) = text.split_twice("{","}") {
+		// Let's not expand patterns like {word}
+		if !(middle.contains(',') || middle.contains("..")) {
+			return false
+		}
+	}
 	if REGEX["brace_expansion"].is_match(text) &&
 		REGEX["brace_expansion"].captures(text).unwrap()[1].is_empty() {
 			let mut brace_count: i32 = 0;
