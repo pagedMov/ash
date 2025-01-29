@@ -22,8 +22,8 @@ use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_log
 use crate::event::ShError;
 use crate::{deconstruct, node_operation, OxResult};
 
-pub const BUILTINS: [&str; 36] = [
-	"command", "pushd", "popd", "setopt", "getopt", "type", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
+pub const BUILTINS: [&str; 37] = [
+	"command", "pushd", "popd", "setopt", "getopt", "type", "string", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
 ];
 
 bitflags! {
@@ -160,6 +160,20 @@ pub fn read_func(node: Node, io: ProcIO) -> OxResult<OxWait> {
 	Ok(OxWait::new())
 }
 
+pub fn string(node: Node) -> OxResult<OxWait> {
+	let mut argv = VecDeque::from(node.get_argv()?);
+	argv.pop_front(); // Ignore `string`
+	while let Some(arg) = argv.pop_front() {
+		if let Some((key,val)) = arg.text().split_once('=') {
+			helper::unset_var_conflicts(key)?;
+			write_vars(|v| v.set_var(key, OxVal::String(val.to_string())))?
+		} else {
+			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
+		}
+	}
+	Ok(OxWait::Success)
+}
+
 pub fn int(node: Node) -> OxResult<OxWait> {
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `int`
@@ -171,20 +185,6 @@ pub fn int(node: Node) -> OxResult<OxWait> {
 			} else {
 				return Err(ShError::from_syntax(format!("Expected an integer in int definition, got `{}`",v).as_str(), node.span()))
 			}
-		} else {
-			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
-		}
-	}
-	Ok(OxWait::Success)
-}
-
-pub fn string(node: Node) -> OxResult<OxWait> {
-	let mut argv = VecDeque::from(node.get_argv()?);
-	argv.pop_front(); // Ignore `int`
-	while let Some(arg) = argv.pop_front() {
-		if let Some((k,val)) = arg.text().split_once('=') {
-			helper::unset_var_conflicts(k)?;
-			write_vars(|v| v.set_var(k, OxVal::String(val.into())))?
 		} else {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
 		}

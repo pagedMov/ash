@@ -196,6 +196,13 @@ impl Default for WordDesc {
 }
 
 #[derive(Debug,Hash,Clone,PartialEq,Eq)]
+pub enum AssOp {
+	PlusEquals,
+	MinusEquals,
+	Equals
+}
+
+#[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub struct Tk {
 	pub tk_type: TkType,
 	pub wd: WordDesc
@@ -222,12 +229,15 @@ pub enum TkType {
 
 	Redirection { redir: Redir },
 	FuncDef,
-	Assignment { key: String, value: Box<Tk> }, // `=`
+	Assignment { key: String, value: Box<Tk>, op: AssOp },
 	LogicAnd, // `&&`
 	LogicOr, // `||`
 	Pipe, // `|`
 	PipeBoth, // '|&'
 	Background, // `&`
+
+	PlusEquals,
+	MinusEquals,
 
 	// Grouping and Subshells
 	ProcessSub,
@@ -1235,7 +1245,14 @@ impl OxTokenizer {
 				_ => unreachable!()
 			};
 			if wd.text.has_unescaped("=") {
-				let (var,val) = wd.text.split_once("=").unwrap();
+				let (var,val,ass_op) = if let Some((var,val)) = wd.text.split_once("-=") {
+					(var,val,AssOp::MinusEquals)
+				} else if let Some((var,val)) = wd.text.split_once("+=") {
+					(var,val,AssOp::PlusEquals)
+				} else {
+					let (var,val) = wd.text.split_once("=").unwrap();
+					(var,val,AssOp::Equals)
+				};
 				let mut val_wd = wd.clone();
 				val_wd.text = val.to_string();
 				let mut sub_tokenizer = OxTokenizer::new(&val_wd.text);
@@ -1254,7 +1271,7 @@ impl OxTokenizer {
 				let mut expanded = expand::expand_token(val_tk, true)?;
 				if let Some(tk) = expanded.pop_front() {
 					let ass_token = Tk {
-						tk_type: TkType::Assignment { key: var.to_string(), value: Box::new(tk) },
+						tk_type: TkType::Assignment { key: var.to_string(), value: Box::new(tk), op: ass_op },
 						wd
 					};
 					self.tokens.push(ass_token);

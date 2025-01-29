@@ -11,7 +11,7 @@ use crate::{builtin, OxResult};
 
 use super::expand;
 use super::helper::{self, flatten_tree};
-use super::token::{Redir, WdFlags};
+use super::token::{AssOp, Redir, WdFlags};
 
 bitflags! {
 	#[derive(Debug,Copy,Clone,PartialEq)]
@@ -218,7 +218,7 @@ pub enum NdType {
 	Subshell { body: String, argv: VecDeque<Tk> }, // It's a string because we're going to parse it in a subshell later
 	CommandSub { body: String },
 	FuncDef { name: String, body: String },
-	Assignment {name: String, value: Option<String> },
+	Assignment {name: String, value: Option<String>, op: AssOp },
 	Command { argv: VecDeque<Tk> },
 	Builtin { argv: VecDeque<Tk> },
 	Function { body: String, argv: VecDeque<Tk> },
@@ -1458,7 +1458,7 @@ pub fn build_func_def(mut ctx: DescentContext) -> OxResult<DescentContext> {
 
 pub fn build_assignment(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	let ass = ctx.next_tk().unwrap();
-	if let TkType::Assignment { key, value } = &ass.tk_type {
+	if let TkType::Assignment { key, value, op } = &ass.tk_type {
 		let value = if value.text().is_empty() {
 			None
 		} else {
@@ -1469,7 +1469,8 @@ pub fn build_assignment(mut ctx: DescentContext) -> OxResult<DescentContext> {
 			command: None,
 			nd_type: NdType::Assignment {
 				name: key.to_string(),
-				value
+				value,
+				op: op.clone()
 			},
 			span,
 			flags: NdFlags::VALID_OPERAND,

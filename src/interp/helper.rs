@@ -1,4 +1,4 @@
-use crate::{event::ShError, execute::{self, ProcIO, RustFd}, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, OxVal}, OxResult};
+use crate::{event::ShError, execute::{self, ProcIO, RustFd}, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, HashFloat, Job, OxVal}, OxResult};
 use nix::{sys::wait::WaitStatus, unistd::{dup2, getpgrp}, NixPath};
 use serde_json::Value;
 use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, f32::INFINITY, fs, io::{self, Read}, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread, time::Duration};
@@ -1285,6 +1285,94 @@ pub fn has_valid_delims(input: &str, open: &str, close: &str) -> bool {
 		}
 	}
 	false
+}
+
+
+pub fn subtract_vars(left: OxVal, right: OxVal, span: Span) -> OxResult<OxVal> {
+	match left {
+		OxVal::String(left_str) => {
+			let right_str = right.to_string();
+			if let Some(result) = left_str.strip_suffix(&right_str) {
+				Ok(OxVal::String(result.to_string()))
+			} else {
+				Ok(OxVal::String(left_str))
+			}
+		}
+		OxVal::Int(left_num) => {
+			if let OxVal::Int(right_num) = right {
+				let diff = left_num - right_num;
+				Ok(OxVal::Int(diff))
+			} else {
+				Err(ShError::from_parse(format!("Tried to subtract non-integer type '{}' from integer", right.fmt_type()).as_str(), span))
+			}
+		}
+		OxVal::Float(left_num) => {
+			if let OxVal::Float(right_num) = right {
+				let diff = left_num.to_f64() - right_num.to_f64();
+				Ok(OxVal::Float(HashFloat::from_f64(diff)))
+			} else {
+				Err(ShError::from_parse(format!("Tried to subtract non-float type '{}' from float", right.fmt_type()).as_str(), span))
+			}
+		}
+		OxVal::Bool(left_bool) => {
+			if let OxVal::Bool(right_bool) = right {
+				// Treat as "remove" operation (XOR-like behavior)
+				let result = left_bool != right_bool;
+				Ok(OxVal::Bool(result))
+			} else {
+				Err(ShError::from_parse(format!("Tried to subtract non-bool type '{}' from bool", right.fmt_type()).as_str(), span))
+			}
+		}
+		OxVal::Array(mut vec) => {
+			if let Some(pos) = vec.iter().position(|elem| *elem == right) {
+				vec.remove(pos);
+				Ok(OxVal::Array(vec))
+			} else {
+				Ok(OxVal::Array(vec))
+			}
+		}
+		OxVal::Dict(_) => todo!(),
+	}
+}
+
+pub fn add_vars(left: OxVal, right: OxVal, span: Span) -> OxResult<OxVal> {
+	match left {
+		OxVal::String(_) => {
+			let left_string = left.to_string();
+			let right_string = right.to_string();
+			Ok(OxVal::String(format!("{}{}",left_string,right_string)))
+		}
+		OxVal::Int(left_num) => {
+			if let OxVal::Int(right_num) = right {
+				let sum = left_num + right_num;
+				Ok(OxVal::Int(sum))
+			} else {
+				Err(ShError::from_parse(format!("Tried to add non-integer type '{}' to integer",right.fmt_type()).as_str(), span))
+			}
+		}
+		OxVal::Float(left_num) => {
+			if let OxVal::Float(right_num) = right {
+				let sum = left_num.to_f64() + right_num.to_f64();
+				Ok(OxVal::Float(HashFloat::from_f64(sum)))
+			} else {
+				Err(ShError::from_parse(format!("Tried to add non-float type '{}' to float",right.fmt_type()).as_str(), span))
+			}
+		}
+		OxVal::Bool(left_bool) => {
+			if let OxVal::Bool(right_bool) = right {
+				let result = left_bool | right_bool;
+				Ok(OxVal::Bool(result))
+			} else {
+				Err(ShError::from_parse(format!("Tried to add non-bool type '{}' to bool",right.fmt_type()).as_str(), span))
+			}
+		}
+		OxVal::Array(vec) => {
+			let mut new_vec = vec.clone();
+			new_vec.push(right);
+			Ok(OxVal::Array(new_vec))
+		}
+		OxVal::Dict(btree_map) => todo!(),
+	}
 }
 
 pub fn is_brace_expansion(text: &str) -> bool {
