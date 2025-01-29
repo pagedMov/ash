@@ -1091,7 +1091,6 @@ fn handle_redirs(mut redirs: VecDeque<Node>) -> OxResult<VecDeque<RustFd>> {
 	while let Some(redir_tk) = redirs.pop_front() {
 		if let NdType::Redirection { ref redir } = redir_tk.nd_type {
 			let Redir { fd_source, op, fd_target, file_target } = &redir;
-			dbg!(&redir);
 			if fd_target.is_some() {
 				fd_dupes.push_back(redir.clone());
 			} else if let Some(file_path) = file_target {
