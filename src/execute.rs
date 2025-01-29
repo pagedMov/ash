@@ -1023,10 +1023,10 @@ fn handle_command(node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 
 	// Prepare the command and environment
 	let (command, envp) = prepare_execvpe(&argv)?;
+	let redirs_to_close = handle_redirs(redirs.into())?;
 
 	// Handle redirections and execute the command if in a pipe
 	if node.flags.contains(NdFlags::IN_PIPE) {
-		handle_redirs(redirs.into())?;
 		execvpe(&command, &argv, &envp).unwrap();
 		unreachable!();
 	}
@@ -1034,7 +1034,6 @@ fn handle_command(node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 	// Fork the process
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
-			handle_redirs(redirs.into())?;
 
 			// First, try execvpe (searches PATH if no absolute/relative path is provided)
 			let Err(e) = execvpe(&command, &argv, &envp);
@@ -1056,6 +1055,9 @@ fn handle_command(node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 		}
 		Ok(ForkResult::Parent { child }) => {
 			handle_parent_process(child, command, &node)?;
+			for mut redir in redirs_to_close {
+				redir.close()?;
+			}
 		}
 		Err(_) => return Err(ShError::ExecFailed("Fork failed in handle_command".into(), 1, node.span())),
 	}
