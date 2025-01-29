@@ -683,6 +683,15 @@ impl Hash for HashFloat {
 	}
 }
 
+impl HashFloat {
+	pub fn from_f64(float: f64) -> Self {
+		Self(float)
+	}
+	pub fn to_f64(self) -> f64 {
+		self.0
+	}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum OxVal {
 	String(String),
@@ -711,6 +720,17 @@ impl OxVal {
 		match self {
 			OxVal::String(s) => Some(OsStr::new(s)),
 			_ => None, // Only strings can be converted to OsStr
+		}
+	}
+
+	pub fn fmt_type(&self) -> String {
+		match self {
+			OxVal::String(_) => String::from("string"),
+			OxVal::Int(_) => String::from("int"),
+			OxVal::Float(_) => String::from("float"),
+			OxVal::Bool(_) => String::from("bool"),
+			OxVal::Array(_) => String::from("array"),
+			OxVal::Dict(_) => String::from("dict"),
 		}
 	}
 

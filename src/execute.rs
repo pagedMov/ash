@@ -4,7 +4,7 @@ use libc::{memfd_create, MFD_CLOEXEC};
 use nix::{errno::Errno, fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
 use std::sync::Mutex;
 
-use crate::{builtin::{self, CdFlags}, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{Redir, RedirType, OxTokenizer, Tk, TkType, WdFlags}}, shellenv::{self, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, OxVal, SavedEnv}, OxResult};
+use crate::{builtin::{self, CdFlags}, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{AssOp, OxTokenizer, Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, OxVal, SavedEnv}, OxResult};
 
 #[macro_export]
 macro_rules! node_operation {
@@ -674,21 +674,39 @@ fn handle_chain(node: Node) -> OxResult<OxWait> {
 }
 
 fn handle_assignment(node: Node) -> OxResult<OxWait> {
-	node_operation!(NdType::Assignment { name, value }, node, {
-		let mut value = value.unwrap_or_default();
-		if let Some(body) = value.trim_command_sub() {
-			let dummy_tk = Tk {
-				tk_type: TkType::CommandSub,
-				wd: crate::interp::token::WordDesc {
-					text: body,
-					span: node.span(),
-					flags: WdFlags::empty()
+	node_operation!(NdType::Assignment { name, value, op }, node, {
+		match op {
+			AssOp::Equals => {
+				let mut value = value.unwrap_or_default();
+				if let Some(body) = value.trim_command_sub() {
+					let dummy_tk = Tk {
+						tk_type: TkType::CommandSub,
+						wd: crate::interp::token::WordDesc {
+							text: body,
+							span: node.span(),
+							flags: WdFlags::empty()
+						}
+					};
+					let expanded = expand::expand_cmd_sub(dummy_tk)?;
+					value = expanded.text().to_string();
 				}
-			};
-			let expanded = expand::expand_cmd_sub(dummy_tk)?;
-			value = expanded.text().to_string();
+				write_vars(|v| v.set_var(&name, OxVal::parse(&value).unwrap_or_default()))?;
+			}
+			AssOp::PlusEquals => {
+				if let Some(left_val) = read_vars(|v| v.get_var(&name))? {
+					let right_val = OxVal::parse(&value.unwrap_or_default()).map_err(|e| ShError::from_parse(&e, node.span()))?;
+					let result = helper::add_vars(left_val, right_val, node.span())?;
+					write_vars(|v| v.set_var(&name, result))?;
+				}
+			}
+			AssOp::MinusEquals => {
+				if let Some(left_val) = read_vars(|v| v.get_var(&name))? {
+					let right_val = OxVal::parse(&value.unwrap_or_default()).map_err(|e| ShError::from_parse(&e, node.span()))?;
+					let result = helper::subtract_vars(left_val, right_val, node.span())?;
+					write_vars(|v| v.set_var(&name, result))?;
+				}
+			}
 		}
-		write_vars(|v| v.set_var(&name, OxVal::parse(&value).unwrap_or_default()))?;
 	});
 	Ok(OxWait::Success)
 }
@@ -706,6 +724,7 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 		"popd" => builtin::popd(node)?,
 		"setopt" => builtin::setopt(node)?,
 		"getopt" => builtin::getopt(node, io)?,
+		"string" => builtin::string(node)?,
 		"int" => builtin::int(node)?,
 		"read_func" => builtin::read_func(node, io)?,
 		"bool" => builtin::bool(node)?,

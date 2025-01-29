@@ -196,6 +196,13 @@ impl Default for WordDesc {
 }
 
 #[derive(Debug,Hash,Clone,PartialEq,Eq)]
+pub enum AssOp {
+	PlusEquals,
+	MinusEquals,
+	Equals
+}
+
+#[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub struct Tk {
 	pub tk_type: TkType,
 	pub wd: WordDesc
@@ -222,12 +229,15 @@ pub enum TkType {
 
 	Redirection { redir: Redir },
 	FuncDef,
-	Assignment { key: String, value: Box<Tk> }, // `=`
+	Assignment { key: String, value: Box<Tk>, op: AssOp },
 	LogicAnd, // `&&`
 	LogicOr, // `||`
 	Pipe, // `|`
 	PipeBoth, // '|&'
 	Background, // `&`
+
+	PlusEquals,
+	MinusEquals,
 
 	// Grouping and Subshells
 	ProcessSub,
@@ -1175,7 +1185,13 @@ impl OxTokenizer {
 				_ => unreachable!("{:?},{:?}",self.context,self.char_stream.iter().collect::<String>())
 			}
 		}
+<<<<<<< HEAD
 		// Here we take what's left of the expansion and concatenate it with leftover characters in the char_stream
+||||||| 8c4e064
+=======
+
+		// Here we take what's left of the expansion and concatenate it with the unexpanded remainder
+>>>>>>> dev
 		// So for instance, if an alias expands to several commands, there will still be unprocessed commands in the char_stream
 		// We need to include those unprocessed characters, and the unprocessed remainder from expand_one() here
 		let remaining_input: String = self.char_stream.iter().collect();
@@ -1234,7 +1250,14 @@ impl OxTokenizer {
 				_ => unreachable!()
 			};
 			if wd.text.has_unescaped("=") {
-				let (var,val) = wd.text.split_once("=").unwrap();
+				let (var,val,ass_op) = if let Some((var,val)) = wd.text.split_once("-=") {
+					(var,val,AssOp::MinusEquals)
+				} else if let Some((var,val)) = wd.text.split_once("+=") {
+					(var,val,AssOp::PlusEquals)
+				} else {
+					let (var,val) = wd.text.split_once("=").unwrap();
+					(var,val,AssOp::Equals)
+				};
 				let mut val_wd = wd.clone();
 				val_wd.text = val.to_string();
 				let mut sub_tokenizer = OxTokenizer::new(&val_wd.text);
@@ -1253,7 +1276,7 @@ impl OxTokenizer {
 				let mut expanded = expand::expand_token(val_tk, true)?;
 				if let Some(tk) = expanded.pop_front() {
 					let ass_token = Tk {
-						tk_type: TkType::Assignment { key: var.to_string(), value: Box::new(tk) },
+						tk_type: TkType::Assignment { key: var.to_string(), value: Box::new(tk), op: ass_op },
 						wd
 					};
 					self.tokens.push(ass_token);
@@ -1655,7 +1678,11 @@ impl OxTokenizer {
 				}
 				'>' | '<' if bracket_stack.is_empty() && paren_stack.is_empty() && !dub_quote && !sng_quote => {
 					if wd.text.is_empty() || wd.text.chars().last().is_some_and(|c| c.is_ascii_digit()) {
-						wd = wd.add_char(ch)
+						wd = wd.add_char(ch);
+						if self.char_stream.front() != Some(&'&') {
+							// There is no target fd, so we break here
+							break
+						}
 					} else {
 						self.char_stream.push_front(ch);
 						break
