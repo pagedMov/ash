@@ -1175,7 +1175,8 @@ impl OxTokenizer {
 				_ => unreachable!("{:?},{:?}",self.context,self.char_stream.iter().collect::<String>())
 			}
 		}
-		// Here we take what's left of the expansion and concatenate it with leftover characters in the char_stream
+
+		// Here we take what's left of the expansion and concatenate it with the unexpanded remainder
 		// So for instance, if an alias expands to several commands, there will still be unprocessed commands in the char_stream
 		// We need to include those unprocessed characters, and the unprocessed remainder from expand_one() here
 		let remaining_input: String = self.char_stream.iter().collect();
@@ -1655,7 +1656,11 @@ impl OxTokenizer {
 				}
 				'>' | '<' if bracket_stack.is_empty() && paren_stack.is_empty() && !dub_quote && !sng_quote => {
 					if wd.text.is_empty() || wd.text.chars().last().is_some_and(|c| c.is_ascii_digit()) {
-						wd = wd.add_char(ch)
+						wd = wd.add_char(ch);
+						if self.char_stream.front() != Some(&'&') {
+							// There is no target fd, so we break here
+							break
+						}
 					} else {
 						self.char_stream.push_front(ch);
 						break
