@@ -146,6 +146,7 @@ pub enum PromptTk {
 	ExitSuccess,
 	ExitFail,
 	ExitCode,
+	CmdTime,
 	Bell,               // '\a': Bell character (ASCII 7)
 	Newline,            // '\n': Newline character
 	CarriageReturn,     // '\r': Carriage return
@@ -187,6 +188,7 @@ pub fn tokenize_prompt(ps1: &str) -> VecDeque<PromptTk> {
 						'd' => tokens.push_back(PromptTk::WeekdayDate),
 						't' => tokens.push_back(PromptTk::Time24Hr),
 						'T' => tokens.push_back(PromptTk::Time12Hr),
+						'D' => tokens.push_back(PromptTk::CmdTime),
 						'A' => tokens.push_back(PromptTk::Time24HrNoSeconds),
 						'@' => tokens.push_back(PromptTk::Time12HrShort),
 						_ if esc_c.is_digit(8) => {
@@ -306,6 +308,7 @@ pub fn expand_prompt() -> OxResult<String> {
 			PromptTk::ExitSuccess => result.push_str(&helper::escseq_success()?),
 			PromptTk::ExitFail => result.push_str(&helper::escseq_fail()?),
 			PromptTk::ExitCode => result.push_str(&helper::escseq_exitcode()?),
+			PromptTk::CmdTime => result.push_str(&helper::escseq_cmdtime()?),
 			PromptTk::UserSequence(seq) => result.push_str(&helper::escseq_custom(&seq)?),
 		}
 	}
