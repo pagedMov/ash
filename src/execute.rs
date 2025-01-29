@@ -776,7 +776,7 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 	let redirs = node.get_redirs()?;
 	if let NdType::CommandSub { body } = node.nd_type {
 		let var_table = read_vars(|v| v.clone())?;
-		let expanded_body = expand::expand_var(body, &var_table)?;
+		let expanded_body = expand::expand_var(body, &var_table)?.consume_escapes();
 		node.nd_type = NdType::Subshell { body: expanded_body, argv: VecDeque::new() }
 	} else {
 		expand::expand_arguments(&mut node)?;

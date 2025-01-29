@@ -261,6 +261,7 @@ pub fn main_loop() -> OxResult<()> {
 		}
 		let input = prompt::run()?;
 		write_meta(|m| m.leave_prompt())?;
+		write_meta(|m| m.start_timer())?;
 		execute(&input, NdFlags::empty(), None, None)?;
 	}
 }

@@ -26,7 +26,7 @@ use super::helper::StrExtension;
 pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
 	let mut regex = HashMap::new();
 	regex.insert("var_index", Regex::new(r"(\w+)\[(\d+)\]").unwrap());
-	regex.insert("redirection",Regex::new(r"^(?P<fd_out>[0-9]+)?(?P<operator>>{1,2}|<{1,3})(?:[&]?(?P<fd_target>[0-9]+))?$").unwrap());
+	regex.insert("redirection",Regex::new(r"^(?P<fd_out>[0-9]+)?(?P<operator>>{1,2}|<{1,3})(?:(?:[&]?(?P<fd_target>[0-9]+))|(?P<file_target>[a-zA-Z0-9-\.]*))?$").unwrap());
 	regex.insert("rsh_shebang",Regex::new(r"^#!((?:/[^\s]+)+)((?:\s+arg:[a-zA-Z][a-zA-Z0-9_\-]*)*)$").unwrap());
 	regex.insert("brace_expansion",Regex::new(r"(\$?)\{(?:[\x20-\x7e,]+|[0-9]+(?:\.\.[0-9+]){1,2}|[a-z]\.\.[a-z]|[A-Z]\.\.[A-Z])\}").unwrap());
 	regex.insert("process_sub",Regex::new(r"^>\(.*\)$").unwrap());
@@ -510,7 +510,7 @@ pub struct OxTokenizer {
 	input: String,
 	char_stream: VecDeque<char>,
 	context: Vec<TkState>,
-	expanded: bool,
+	initialized: bool,
 	pub tokens: Vec<Tk>,
 	pub spans: VecDeque<Span>
 }
@@ -525,7 +525,7 @@ impl OxTokenizer {
 			lines.next();
 			input = lines.collect::<Vec<&str>>().join("\n");
 		}
-		Self { input, char_stream, context: vec![TkState::Command], expanded: false, tokens, spans: VecDeque::new() }
+		Self { input, char_stream, context: vec![TkState::Command], initialized: false, tokens, spans: VecDeque::new() }
 	}
 	pub fn input(&self) -> String {
 		self.input.clone()
@@ -758,6 +758,7 @@ impl OxTokenizer {
 		Ok(())
 	}
 	fn cmd_sub_pass(&mut self) -> OxResult<()> {
+		let var_table = read_vars(|v| v.clone())?;
 		let mut replaced = true;
 
 		while replaced {
@@ -772,6 +773,10 @@ impl OxTokenizer {
 				// Ensure expansion only runs when the word is not enclosed in single quotes or braces
 				if helper::has_valid_delims(&word, "$(", ")") && not_sng_quote && not_brace_grp {
 					if let Some((left, middle, right)) = word.split_twice("$(", ")") {
+						let saved_input = self.input.clone();
+						self.input = middle; // We are going to cheat here and expand variables for just the cmd sub body
+						self.var_pass()?;
+						let middle = self.input.clone();
 						let dummy_tk = Tk {
 							tk_type: TkType::CommandSub,
 							wd: WordDesc {
@@ -780,6 +785,7 @@ impl OxTokenizer {
 								flags: WdFlags::empty(),
 							},
 						};
+						self.input = saved_input;
 						let new_tk = expand::expand_cmd_sub(dummy_tk)?;
 						if left.ends_with('=') {
 							word = format!("{}\"{}\"{}", left, new_tk.text(), right);
@@ -831,17 +837,249 @@ impl OxTokenizer {
 
 		self.spans = VecDeque::from(spans);
 	}
-	pub fn tokenize_one(&mut self) -> OxResult<Vec<Tk>> {
+	pub fn expand_one(&mut self) -> OxResult<String> {
+		/*
+		 * Here we use basically the same logic as tokenize_one for maintaining context
+		 * The idea is to localize expansion to just the section of the input being worked on
+		 * So that variables are not expanded prematurely, like in the case of
+		 *
+		 * i=10
+		 *
+		 * i=$(expr "$i + 1")
+		 *
+		 * `i` should not expand in the command sub until it is time to execute it
+		 */
 		use crate::interp::token::TkState::*;
-		if !self.expanded { // Replacing these first is the simplest way
-			self.cmd_sub_pass()?; // The order does matter here
-			self.glob_pass()?;
-			self.alias_pass()?;
-			self.var_pass()?;
+		let mut pushed = false; // Guard condition to prevent the same word from pushing a ctx twice or more
+		let mut chars = self.input.chars().peekable();
+		let mut working_buffer = String::new();
+		let mut local_ctx = vec![Command];
+		let mut paren_stack = vec![];
+		let mut brace_stack = vec![];
+		let mut bracket_stack = vec![];
+
+		while let Some(ch) = chars.next() {
+			match ch {
+				'\\' => {
+					working_buffer.push(ch);
+					if let Some(ch) = chars.next() {
+						working_buffer.push(ch);
+					}
+				}
+				'"' => {
+					working_buffer.push(ch);
+					while let Some(ch) = chars.next() {
+						working_buffer.push(ch);
+						match ch {
+							'\\' => {
+								if let Some(ch) = chars.next() {
+									working_buffer.push(ch);
+								}
+							}
+							'"' => {
+								break
+							}
+							_ => { /* Continue */ }
+						}
+					}
+				}
+				'\'' => {
+					working_buffer.push(ch);
+					while let Some(ch) = chars.next() {
+						working_buffer.push(ch);
+						match ch {
+							'\\' => {
+								if let Some(ch) = chars.next() {
+									working_buffer.push(ch);
+								}
+							}
+							'\'' => {
+								break
+							}
+							_ => { /* Continue */ }
+						}
+					}
+				}
+				'{' => {
+					working_buffer.push(ch);
+					brace_stack.push(ch);
+					while let Some(ch) = chars.next() {
+						working_buffer.push(ch);
+						match ch {
+							'\\' => {
+								if let Some(ch) = chars.next() {
+									working_buffer.push(ch);
+								}
+							}
+							'{' => brace_stack.push(ch),
+							'}' => {
+								brace_stack.pop();
+								if brace_stack.is_empty() {
+									break
+								}
+							}
+							_ => { /* Continue */ }
+						}
+					}
+				}
+				'(' => {
+					working_buffer.push(ch);
+					paren_stack.push(ch);
+					while let Some(ch) = chars.next() {
+						working_buffer.push(ch);
+						match ch {
+							'\\' => {
+								if let Some(ch) = chars.next() {
+									working_buffer.push(ch);
+								}
+							}
+							'(' => paren_stack.push(ch),
+							')' => {
+								paren_stack.pop();
+								if paren_stack.is_empty() {
+									break
+								}
+							}
+							_ => { /* Continue */ }
+						}
+					}
+				}
+				'[' => {
+					working_buffer.push(ch);
+					brace_stack.push(ch);
+					while let Some(ch) = chars.next() {
+						working_buffer.push(ch);
+						match ch {
+							'\\' => {
+								if let Some(ch) = chars.next() {
+									working_buffer.push(ch);
+								}
+							}
+							'[' => bracket_stack.push(ch),
+							']' => {
+								bracket_stack.pop();
+								if bracket_stack.is_empty() {
+									break
+								}
+							}
+							_ => { /* Continue */ }
+						}
+					}
+				}
+				_ => {
+					if !ch.is_whitespace() {
+						if working_buffer.chars().last().is_some_and(|c| matches!(c, ';' | '\n' | ' ')) {
+							// We have reached a new word
+							// No need to worry about duplicate contexts anymore, so this is false now
+							pushed = false;
+						}
+					}
+					working_buffer.push(ch);
+				}
+			}
+			if working_buffer.split_whitespace().last() == Some("for") {
+				if !pushed {
+					local_ctx.push(For);
+					pushed = true;
+				}
+			}
+			if working_buffer.split_whitespace().last() == Some("if") {
+				if !pushed {
+					local_ctx.push(If);
+					pushed = true;
+				}
+			}
+			if working_buffer.split_whitespace().last() == Some("while") {
+				if !pushed {
+					local_ctx.push(Loop);
+					pushed = true;
+				}
+			}
+			if working_buffer.split_whitespace().last() == Some("until") {
+				if !pushed {
+					local_ctx.push(Loop);
+					pushed = true;
+				}
+			}
+			if working_buffer.split_whitespace().last() == Some("select") {
+				if !pushed {
+					local_ctx.push(Select);
+					pushed = true;
+				}
+			}
+			if working_buffer.split_whitespace().last() == Some("case") {
+				if !pushed {
+					local_ctx.push(Case);
+					pushed = true;
+				}
+			}
+			match local_ctx.last().unwrap() {
+				Command => {
+					if working_buffer.ends_with(';') || working_buffer.ends_with('\n') {
+						break
+					}
+				}
+				For | Select | Loop => {
+					if working_buffer.split_whitespace().last() == Some("done") {
+						if matches!(chars.peek(), Some(';') | Some('\n')) {
+							working_buffer.push(chars.next().unwrap())
+						}
+						local_ctx.pop();
+						if local_ctx.last() == Some(&Command) {
+							break
+						}
+					}
+				}
+				Case => {
+					if working_buffer.split_whitespace().last() == Some("esac") {
+						if matches!(chars.peek(), Some(';') | Some('\n')) {
+							working_buffer.push(chars.next().unwrap())
+						}
+						local_ctx.pop();
+						if local_ctx.last() == Some(&Command) {
+							break
+						}
+					}
+				}
+				If => {
+					if working_buffer.split_whitespace().last() == Some("fi") {
+						if matches!(chars.peek(), Some(';') | Some('\n')) {
+							working_buffer.push(chars.next().unwrap())
+						}
+						local_ctx.pop();
+						if local_ctx.last() == Some(&Command) {
+							break
+						}
+					}
+				}
+				_ => unreachable!()
+			}
+		}
+
+		let sliced_input = self.input[working_buffer.len()..].trim_start().to_string(); // Remainder
+		self.input = working_buffer.clone();
+		self.cmd_sub_pass()?; // The order does matter here
+		self.glob_pass()?;
+		self.alias_pass()?;
+		self.var_pass()?;
+		self.input = format!("{}{}",self.input,sliced_input); // Re-attach (might not even be necessary)
+
+		// We return the remaining unexpanded input here
+		Ok(sliced_input)
+	}
+	pub fn tokenize_one(&mut self) -> OxResult<Vec<Tk>> {
+		/*
+		 * It's called `tokenize_one` because we are only tokenizing a single executable block of logic
+		 * Traditionally, shells parse line by line, but that doesn't really make sense when logic can span several lines
+		 * Instead, we are going to track context and parse the input one logical unit at a time
+		 */
+		use crate::interp::token::TkState::*;
+		if !self.initialized {
 			self.precompute_spans();
 			write_meta(|m| m.set_last_input(&self.input))?;
-			self.expanded = true;
+			self.initialized = true;
 		}
+		let remainder = self.expand_one()?;
 		let mut wd = WordDesc::empty();
 		while !self.char_stream.is_empty() {
 			if *self.ctx() == DeadEnd && self.char_stream.front().is_some_and(|ch| !matches!(ch, ';' | '\n')) {
@@ -937,6 +1175,11 @@ impl OxTokenizer {
 				_ => unreachable!("{:?},{:?}",self.context,self.char_stream.iter().collect::<String>())
 			}
 		}
+		// Here we take what's left of the expansion and concatenate it with leftover characters in the char_stream
+		// So for instance, if an alias expands to several commands, there will still be unprocessed commands in the char_stream
+		// We need to include those unprocessed characters, and the unprocessed remainder from expand_one() here
+		let remaining_input: String = self.char_stream.iter().collect();
+		self.input = format!("{}{}",remaining_input,remainder);
 		Ok(take(&mut self.tokens))
 	}
 	fn command_context(&mut self, mut wd: WordDesc) -> OxResult<()> {
@@ -1069,10 +1312,23 @@ impl OxTokenizer {
 				let mut fd_out;
 				let operator;
 				let fd_target;
+				let file_target;
 				if let Some(caps) = REGEX["redirection"].captures(&wd.text) {
 					fd_out = caps.name("fd_out").and_then(|fd| fd.as_str().parse::<i32>().ok()).unwrap_or(1);
 					operator = caps.name("operator").unwrap().as_str();
-					fd_target = caps.name("fd_target").and_then(|fd| fd.as_str().parse::<i32>().ok())
+					fd_target = caps.name("fd_target").and_then(|fd| fd.as_str().parse::<i32>().ok());
+					file_target = caps.name("file_target").map(|mat| {
+						Box::new(
+							Tk {
+								tk_type: TkType::String,
+								wd: WordDesc {
+									text: mat.as_str().to_string(),
+									span: wd.span,
+									flags: WdFlags::empty()
+								}
+							}
+						)
+					});
 				} else { unreachable!() }
 				let op = match operator {
 					">" => RedirType::Output,
@@ -1088,7 +1344,7 @@ impl OxTokenizer {
 					fd_source: fd_out,
 					op,
 					fd_target,
-					file_target: None
+					file_target
 				};
 				self.tokens.push(Tk { tk_type: TkType::Redirection { redir }, wd })
 			}
@@ -1396,6 +1652,14 @@ impl OxTokenizer {
 					// Double quote handling
 					dub_quote = !dub_quote;
 					wd = wd.add_char(ch);
+				}
+				'>' | '<' if bracket_stack.is_empty() && paren_stack.is_empty() && !dub_quote && !sng_quote => {
+					if wd.text.is_empty() || wd.text.chars().last().is_some_and(|c| c.is_ascii_digit()) {
+						wd = wd.add_char(ch)
+					} else {
+						self.char_stream.push_front(ch);
+						break
+					}
 				}
 				'|' | '&' if bracket_stack.is_empty() && paren_stack.is_empty() && !dub_quote && !sng_quote => {
 					let redir_check = wd.text.chars().next();

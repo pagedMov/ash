@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, VecDeque}, env, ffi::{CString, OsStr}, fmt, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, str::FromStr, sync::{Arc, LazyLock}};
+use std::{collections::{BTreeMap, VecDeque}, env, ffi::{CString, OsStr}, fmt, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, str::FromStr, sync::{Arc, LazyLock}, time::{Duration, Instant}};
 use std::collections::HashMap;
 
 use bitflags::bitflags;
@@ -991,6 +991,8 @@ impl Default for LogicTable {
 #[derive(Debug,Clone)]
 pub struct EnvMeta {
 	last_input: String,
+	timer_start: Option<Instant>,
+	cmd_duration: Option<Duration>,
 	dir_stack: Vec<PathBuf>,
 	shopts: ShOpts,
 	flags: EnvFlags,
@@ -1002,11 +1004,24 @@ impl EnvMeta {
 		let in_prompt = flags.contains(EnvFlags::INTERACTIVE);
 		Self {
 			last_input: String::new(),
+			timer_start: None,
+			cmd_duration: None,
 			dir_stack: vec![std::env::current_dir().unwrap()],
 			shopts: ShOpts::new(),
 			flags,
-			in_prompt
+			in_prompt,
 		}
+	}
+	pub fn stop_timer(&mut self) {
+		if let Some(start_time) = self.timer_start {
+			self.cmd_duration = Some(start_time.elapsed())
+		}
+	}
+	pub fn start_timer(&mut self) {
+		self.timer_start = Some(Instant::now())
+	}
+	pub fn get_cmd_duration(&self) -> Option<Duration> {
+		self.cmd_duration
 	}
 	pub fn reset_dir_stack(&mut self, path: PathBuf) {
 		self.dir_stack = vec![path]
