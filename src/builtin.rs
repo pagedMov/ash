@@ -160,6 +160,56 @@ pub fn read_func(node: Node, io: ProcIO) -> OxResult<OxWait> {
 	Ok(OxWait::new())
 }
 
+pub fn shift(node: Node) -> OxResult<OxWait> {
+	let span = node.span();
+	let mut var_table = read_vars(|v| v.clone())?; // Clone the var table here, so that we can avoid repetitive lock acquisition
+	let mut argv = VecDeque::from(node.get_argv()?);
+	let mut shift_count = 1;
+
+	// Skip the command name and parse the optional shift count
+	argv.pop_front(); // Remove the command name
+	if let Some(arg) = argv.pop_front() {
+		shift_count = arg.text().parse::<usize>().map_err(|_| {
+			ShError::from_syntax(
+				format!("Expected a numeric argument for `shift`, found: {}", arg.text()).as_str(),
+				span,
+			)
+		})?;
+	}
+
+	// Read all positional parameters into a VecDeque
+	let mut pos_params = VecDeque::new();
+	let mut param_index = 1;
+	while let Some(param) = var_table.get_param(&param_index.to_string()) {
+		pos_params.push_back(param);
+		param_index += 1;
+	}
+
+	// Clamp the shift count to the number of positional parameters
+	if shift_count > pos_params.len() {
+		shift_count = pos_params.len()
+	}
+
+	// Perform the shift
+	for _ in 0..shift_count {
+		pos_params.pop_front();
+	}
+
+	// Update the positional parameters
+	for (i, param) in pos_params.iter().enumerate() {
+		var_table.set_param((i + 1).to_string(), param.to_string());
+	}
+
+	// Unset any remaining parameters
+	for i in (pos_params.len() + 1)..param_index {
+	  var_table.unset_param(&i.to_string());
+	}
+
+	write_vars(|v| *v = var_table)?; // Overwrite the variable table
+
+	Ok(OxWait::Success)
+}
+
 pub fn string(node: Node) -> OxResult<OxWait> {
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `string`

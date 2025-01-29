@@ -530,6 +530,9 @@ fn handle_for(node: Node,io: ProcIO) -> OxResult<OxWait> {
 
 			node_operation!(NdType::For { loop_vars, mut loop_arr, mut loop_body}, node, {
 				loop_body.flags |= NdFlags::FOR_BODY;
+				let loop_body = node_operation!(NdType::LoopBody { body }, loop_body, {
+					body
+				});
 				let var_count = loop_vars.len();
 				let mut var_index = 0;
 				let mut iteration_count = 0;
@@ -553,7 +556,7 @@ fn handle_for(node: Node,io: ProcIO) -> OxResult<OxWait> {
 					// TODO: modulo is expensive; find a better way to do this
 					var_index = iteration_count % var_count;
 
-					last_status = traverse_root(*loop_body.clone(), None, body_io.clone())?;
+					event::execute(&loop_body, NdFlags::empty(), None, Some(body_io.clone()));
 				}
 			});
 			std::process::exit(0);
@@ -591,10 +594,15 @@ fn handle_loop(node: Node, io: ProcIO) -> OxResult<OxWait> {
 	node_operation!(NdType::Loop { condition, logic }, node, {
 		// Idea: try turning cond and body into Mutexes or RwLocks to avoid excessive cloning in the loop
 		// ProcIO already uses Arc<Mutex> so cloning should be pretty cheap
-		let cond = *logic.condition;
-		let body = *logic.body;
+		let cond = node_operation!(NdType::LoopCond { cond }, *logic.condition, {
+			cond
+		});
+
+		let body = node_operation!(NdType::LoopBody { body }, *logic.body, {
+			body
+		});
 		loop {
-			traverse_root(cond.clone(), Some(condition),cond_io.clone())?;
+			event::execute(&cond, NdFlags::empty(), None, Some(cond_io.clone()))?;
 			let is_success = read_vars(|v| v.get_param("?").is_some_and(|val| val == "0"))?;
 
 			match condition {
@@ -610,7 +618,7 @@ fn handle_loop(node: Node, io: ProcIO) -> OxResult<OxWait> {
 				}
 			}
 
-			last_status = traverse_root(body.clone(), None, body_io.clone())?;
+			event::execute(&body, NdFlags::empty(), None, Some(body_io.clone()));
 		}
 	});
 
@@ -739,6 +747,7 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 		"alias" => builtin::alias(node)?,
 		"unalias" => builtin::unalias(node)?,
 		"export" => builtin::export(node)?,
+		"shift" => builtin::shift(node)?,
 		"[" | "test" => builtin::test(node.get_argv()?.into())?,
 		"builtin" => {
 			if let NdType::Builtin { mut argv } = node.nd_type {

@@ -226,6 +226,8 @@ pub enum TkType {
 	Select,
 	In,
 	FuncBody,
+	LoopCond,
+	LoopBody,
 
 	Redirection { redir: Redir },
 	FuncDef,
@@ -742,14 +744,15 @@ impl OxTokenizer {
 	}
 	fn var_pass(&mut self) -> OxResult<()> {
 		let vartable = read_vars(|v| v.clone())?;
+		let mut is_command = true;
 		let mut replaced = true;
 
 		while replaced {
 			replaced = false;
-			let words = self.split_input();
-			let mut new_input = String::new();
+			let mut words = self.split_input().into_iter().collect::<VecDeque<String>>();
+			let mut new_input = vec![];
 
-			for mut word in words {
+			while let Some(mut word) = words.pop_front() {
 				if word.starts_with('$') {
 					let var_candidate = word.strip_prefix('$').unwrap();
 					if let Some(var) = vartable.get_var(var_candidate) {
@@ -757,10 +760,28 @@ impl OxTokenizer {
 						replaced = true;
 					}
 				}
-				if !word.trim().is_empty() { new_input.push_str(&word); }
+				if &word == "while" || &word == "until" || &word == "for" {
+					/*
+					 * Here we are going to defer the expansion of variables until later.
+					 * If we expand them here, they become static strings in the loop
+					 */
+					while let Some(word) = words.pop_front() {
+						new_input.push(word.clone());
+						if &word == "done" {
+							break
+						}
+					}
+				}
+				if is_command {
+					is_command = false;
+				}
+				if word.ends_with([';','\n']) {
+					is_command = true;
+				}
+				if !word.trim().is_empty() { new_input.push(word); }
 			}
 
-			self.input = new_input;
+			self.input = new_input.join(" ");
 		}
 
 		self.char_stream = self.input.chars().collect::<VecDeque<char>>();
@@ -1175,6 +1196,8 @@ impl OxTokenizer {
 				Subshell | CommandSub => self.subshell_context(take(&mut wd))?,
 				FuncBody => self.func_context(take(&mut wd))?,
 				Case => self.case_context(take(&mut wd))?,
+				Loop => self.loop_context(take(&mut wd)),
+				For => self.loop_context(take(&mut wd)),
 				Comment => {
 					while self.char_stream.front().is_some_and(|ch| *ch != '\n') {
 						self.advance();
@@ -1219,8 +1242,14 @@ impl OxTokenizer {
 				"for" => self.tokens.push(Tk { tk_type: TkType::For, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				"do" => self.tokens.push(Tk { tk_type: TkType::Do, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				"done" => self.tokens.push(Tk { tk_type: TkType::Done, wd: wd.add_flag(WdFlags::KEYWORD) }),
-				"while" => self.tokens.push(Tk { tk_type: TkType::While, wd: wd.add_flag(WdFlags::KEYWORD) }),
-				"until" => self.tokens.push(Tk { tk_type: TkType::Until, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"while" => {
+					self.push_ctx(Loop);
+					self.tokens.push(Tk { tk_type: TkType::While, wd: wd.add_flag(WdFlags::KEYWORD) })
+				},
+				"until" => {
+					self.push_ctx(Loop);
+					self.tokens.push(Tk { tk_type: TkType::Until, wd: wd.add_flag(WdFlags::KEYWORD) })
+				},
 				"case" => {
 					self.push_ctx(TkState::Case);
 					self.tokens.push(Tk { tk_type: TkType::Case, wd: wd.add_flag(WdFlags::KEYWORD) })
@@ -1472,7 +1501,6 @@ impl OxTokenizer {
 			self.tokens.push(Tk::cmdsep(&wd,wd.span.end));
 		}
 		self.pop_ctx();
-		self.push_ctx(Command);
 		Ok(())
 	}
 	fn subshell_context(&mut self, mut wd: WordDesc) -> OxResult<()> {
@@ -1555,6 +1583,63 @@ impl OxTokenizer {
 		self.tokens.push(Tk { tk_type: TkType::FuncBody, wd });
 		self.push_ctx(DeadEnd);
 		Ok(())
+	}
+	fn loop_context(&mut self, mut wd: WordDesc) {
+		let span = self.spans.pop_front().unwrap();
+		let span_start = span.start;
+		let mut span_end = span.end;
+		let mut cond_done = false;
+		let mut body_done = false;
+		let mut target = if !cond_done { Some("do") } else { Some("done") };
+		while let Some(ch) = self.char_stream.pop_front() {
+			if !cond_done || !body_done {
+				wd = wd.add_char(ch);
+				if wd.text.split_whitespace().last() == target {
+					wd.text = wd.text.strip_suffix(target.unwrap()).unwrap().trim().to_string();
+					wd = wd.set_span(Span::from(span_start,span_end));
+					self.tokens.push(Tk {
+						tk_type: match target {
+							Some("do") => TkType::LoopCond,
+							Some("done") => TkType::LoopBody,
+							_ => unreachable!(),
+						},
+						wd: take(&mut wd)
+					});
+					self.tokens.push(Tk {
+						tk_type: match target {
+							Some("do") => TkType::Do,
+							Some("done") => TkType::Done,
+							_ => unreachable!(),
+						},
+						wd: WordDesc {
+							text: "do".to_string(),
+							span: self.spans.pop_front().unwrap_or_default(),
+							flags: WdFlags::KEYWORD
+						}
+					});
+					while matches!(self.char_stream.front(), Some(';') | Some('\n')) {
+						self.char_stream.pop_front();
+					}
+					if self.char_stream.front().is_some_and(|ch| ch.is_whitespace()) {
+						let input: String = self.char_stream.iter().collect();
+						let input = input.trim_start();
+						self.char_stream = input.chars().collect();
+					}
+					if target == Some("do") {
+						cond_done = true;
+						target = Some("done")
+					} else {
+						body_done = true;
+					}
+				}
+				if ch.is_whitespace() || matches!(ch, ';' | '\n') {
+					span_end = self.spans.pop_front().unwrap_or_default().end;
+				}
+			} else {
+				break
+			}
+		}
+		self.pop_ctx();
 	}
 	fn case_context(&mut self, mut wd: WordDesc) -> OxResult<()> {
 		use crate::interp::token::TkState::*;

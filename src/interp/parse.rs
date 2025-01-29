@@ -208,6 +208,8 @@ pub enum NdType {
 	If { cond_blocks: VecDeque<Conditional>, else_block: Option<Box<Node>> },
 	For { loop_vars: VecDeque<Tk>, loop_arr: VecDeque<Tk>, loop_body: Box<Node> },
 	Loop { condition: bool, logic: Conditional },
+	LoopCond { cond: String },
+	LoopBody { body: String },
 	Case { input_var: Tk, cases: HashMap<String,Node> },
 	Select { select_var: Tk, opts: VecDeque<Tk>, body: Box<Node> },
 	PipelineBranch { left: Box<Node>, right: Box<Node>, both: bool }, // Intermediate value
@@ -1022,8 +1024,7 @@ pub fn build_for(mut ctx: DescentContext) -> OxResult<DescentContext> {
 
 	let mut loop_vars: VecDeque<Tk> = VecDeque::new();
 	let mut loop_arr: VecDeque<Tk> = VecDeque::new();
-	let mut body_tokens: VecDeque<Tk> = VecDeque::new();
-	let mut body_root: VecDeque<Node> = VecDeque::new();
+	let mut body_root = Node::new();
 	let span_start = ctx.mark_start();
 	let mut body_start = 0;
 	let mut closed = false;
@@ -1073,21 +1074,25 @@ pub fn build_for(mut ctx: DescentContext) -> OxResult<DescentContext> {
 					loop_vars.push_back(tk);
 				}
 				Phase::Array => {
-					loop_arr.push_back(tk);
+					if tk.class() == TkType::LoopBody {
+						ctx.tokens.push_front(tk);
+						phase = Phase::Body;
+					} else {
+						loop_arr.push_back(tk);
+					}
 				}
 				Phase::Body => {
 					match tk.class() {
-						_ if OPENERS.contains(&tk.class()) => {
-							ctx.tokens.push_front(tk);
-							if !body_tokens.is_empty() {
-								body_root = parse_and_attach(take(&mut body_tokens), body_root)?;
+						TkType::LoopBody => {
+							body_root = Node {
+								command: None,
+								nd_type: NdType::LoopBody { body: tk.text().into() },
+								span: tk.span(),
+								flags: NdFlags::empty(),
+								redirs: VecDeque::new()
 							}
-							ctx = parse_linear(ctx, true)?;
-							if let Some(node) = ctx.root.pop_back() {
-								body_root.push_back(node);
-							}
-						},
-						_ => body_tokens.push_back(tk),
+						}
+						_ => return Err(ShError::from_parse(format!("Expected a loop body token, found this: {}",tk.text()).as_str(), tk.span()))
 					}
 				}
 				_ => unreachable!()
@@ -1105,15 +1110,9 @@ pub fn build_for(mut ctx: DescentContext) -> OxResult<DescentContext> {
 		)
 	}
 
-	if !body_tokens.is_empty() {
-		body_root = parse_and_attach(take(&mut body_tokens), body_root)?;
-	}
-	let body_end = ctx.mark_end();
-	let body_span = Span::from(body_start,body_end);
-	let loop_body = Node::from(body_root,body_span).boxed();
 	let node = Node {
 		command: None,
-		nd_type: NdType::For { loop_vars, loop_arr, loop_body },
+		nd_type: NdType::For { loop_vars, loop_arr, loop_body: body_root.boxed() },
 		span,
 		flags: NdFlags::VALID_OPERAND | NdFlags::FOR_BODY,
 		redirs: VecDeque::new()
@@ -1125,60 +1124,47 @@ pub fn build_for(mut ctx: DescentContext) -> OxResult<DescentContext> {
 pub fn build_loop(condition: bool, mut ctx: DescentContext) -> OxResult<DescentContext> {
 	let loop_condition = condition;
 
-	let mut phase = Phase::Condition;
-	let mut cond_tokens = VecDeque::new();
-	let mut cond_root = VecDeque::new();
-	let mut body_tokens = VecDeque::new();
-	let mut body_root = VecDeque::new();
+	let mut cond_root = Node::new();
+	let mut body_root = Node::new();
 	let mut closed = false;
 	let span_start = ctx.mark_start();
 
 	while let Some(tk) = ctx.next_tk() {
 		match tk.class() {
+			TkType::LoopCond => {
+				cond_root = Node {
+					command: None,
+					nd_type: NdType::LoopCond { cond: tk.text().into() },
+					span: tk.span(),
+					flags: NdFlags::empty(),
+					redirs: VecDeque::new()
+				}
+			}
+			TkType::LoopBody => {
+				body_root = Node {
+					command: None,
+					nd_type: NdType::LoopBody { body: tk.text().into() },
+					span: tk.span(),
+					flags: NdFlags::empty(),
+					redirs: VecDeque::new()
+				}
+			}
 			TkType::Do => {
-				if cond_tokens.is_empty() {
+				if cond_root == Node::new() {
 					return Err(ShError::from_parse("Did not find a condition for this loop", tk.span()))
 				}
-				phase = Phase::Body
 			}
 			TkType::Done => {
-				if body_tokens.is_empty() {
+				if body_root == Node::new() {
 					return Err(ShError::from_parse("Did not find a body for this loop", tk.span()))
 				}
 				closed = true;
 				break
 			}
-			_ if OPENERS.contains(&tk.class()) => {
-				ctx.tokens.push_front(tk);
-				match phase {
-					Phase::Condition => {
-						if !cond_tokens.is_empty() {
-							cond_root = parse_and_attach(take(&mut cond_tokens), cond_root)?;
-						}
-						ctx = parse_linear(ctx, true)?;
-						if let Some(node) = ctx.root.pop_back() {
-							cond_root.push_back(node);
-						}
-					},
-					Phase::Body => {
-						if !body_tokens.is_empty() {
-							body_root = parse_and_attach(take(&mut body_tokens), body_root)?;
-						}
-						ctx = parse_linear(ctx, true)?;
-						if let Some(node) = ctx.root.pop_back() {
-							body_root.push_back(node);
-						}
-					},
-					_ => unreachable!()
-				}
+			_ => {
+				unreachable!();
+				// (hopefully)
 			}
-			_ if phase == Phase::Condition => {
-				cond_tokens.push_back(tk);
-			}
-			_ if phase == Phase::Body => {
-				body_tokens.push_back(tk);
-			}
-			_ => unreachable!()
 		}
 	}
 
@@ -1193,15 +1179,10 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> OxResult<DescentC
 		)
 	}
 
-	let mut cond_span = Span::from(0,0);
-	let mut body_span = Span::from(0,0);
-	if !cond_tokens.is_empty() && !body_tokens.is_empty() {
-		cond_span = compute_span(&cond_tokens);
-		body_span = compute_span(&body_tokens);
-		cond_root = parse_and_attach(cond_tokens,cond_root)?;
-		body_root = parse_and_attach(body_tokens,body_root)?;
-	}
-	let logic = get_conditional(cond_root, cond_span, body_root, body_span);
+	let logic = Conditional {
+		condition: cond_root.boxed(),
+		body: body_root.boxed()
+	};
 
 	let node = Node {
 		command: None,
