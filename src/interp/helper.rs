@@ -1,7 +1,7 @@
 use crate::{event::ShError, execute::{self, ProcIO, RustFd}, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, Job, OxVal}, OxResult};
 use nix::{sys::wait::WaitStatus, unistd::{dup2, getpgrp}, NixPath};
 use serde_json::Value;
-use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, fs, io::{self, Read}, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread, time::Duration};
+use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, f32::INFINITY, fs, io::{self, Read}, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread, time::Duration};
 
 use super::{expand::{self, PromptTk}, parse::{NdFlags, NdType, Node, Span}, token::{Tk, TkType, WdFlags, WordDesc}};
 
@@ -782,86 +782,172 @@ pub fn handle_prompt_hidegroup(tokens: &mut VecDeque<PromptTk>) -> OxResult<Stri
 	}
 }
 
-pub fn expand_duration(dur: Duration) -> String {
-    let mut seconds = dur.as_secs();
-    let mut minutes = 0;
-    let mut hours = 0;
-    let mut days = 0;
-    let mut weeks = 0;
-    let mut years = 0;
-    let mut decades = 0;
-    let mut centuries = 0;
-    let mut millennia = 0;
+pub fn format_cmd_runtime(dur: Duration) -> String {
+	const ETERNITY: u64 = INFINITY as u64;
+	let mut seconds    = dur.as_secs();
+	let mut minutes    = 0;
+	let mut hours      = 0;
+	let mut days       = 0;
+	let mut weeks      = 0;
+	let mut months     = 0;
+	let mut years      = 0;
+	let mut decades    = 0;
+	let mut centuries  = 0;
+	let mut millennia  = 0;
+	let mut epochs     = 0;
+	let mut aeons      = 0;
+	let mut eternities = 0;
 
-    if seconds >= 60 {
-        minutes = seconds / 60;
-        seconds %= 60;
-    }
-    if minutes >= 60 {
-        hours = minutes / 60;
-        minutes %= 60;
-    }
-    if hours >= 24 {
-        days = hours / 24;
-        hours %= 24;
-    }
-    if days >= 7 {
-        weeks = days / 7;
-        days %= 7;
-    }
-    if weeks >= 52 {
-        years = weeks / 52;
-        weeks %= 52;
-    }
-    if years >= 10 {
-        decades = years / 10;
-        years %= 10;
-    }
-    if decades >= 10 {
-        centuries = decades / 10;
-        decades %= 10;
-    }
-    if centuries >= 10 {
-        millennia = centuries / 10;
-        centuries %= 10;
-    }
+	if seconds == 0 {
+		let millis = dur.as_millis();
+		return format!("{}ms",millis);
+	}
+	if seconds >= 60 {
+		minutes = seconds / 60;
+		seconds %= 60;
+	}
+	if minutes >= 60 {
+		hours = minutes / 60;
+		minutes %= 60;
+	}
+	if hours >= 24 {
+		days = hours / 24;
+		hours %= 24;
+	}
+	if days >= 7 {
+		weeks = days / 7;
+		days %= 7;
+	}
+	if weeks >= 4 {
+		months = weeks / 4;
+		weeks %= 4;
+	}
+	if months >= 12 {
+		years = months / 12;
+		weeks %= 12;
+	}
+	if years >= 10 {
+		decades = years / 10;
+		years %= 10;
+	}
+	if decades >= 10 {
+		centuries = decades / 10;
+		decades %= 10;
+	}
+	if centuries >= 10 {
+		millennia = centuries / 10;
+		centuries %= 10;
+	}
+	if millennia >= 1000 {
+		epochs = millennia / 1000;
+		millennia %= 1000;
+	}
+	if epochs >= 1000 {
+		aeons = epochs / 1000;
+		epochs %= aeons;
+	}
+	if aeons >= ETERNITY {
+		eternities = aeons / ETERNITY;
+		aeons %= ETERNITY;
+	}
 
-    // Format the result
-    let mut result = Vec::new();
-    if millennia > 0 {
-        result.push(format!("{} millennia", millennia));
-    }
-    if centuries > 0 {
-        result.push(format!("{} centuries", centuries));
-    }
-    if decades > 0 {
-        result.push(format!("{} decades", decades));
-    }
-    if years > 0 {
-        result.push(format!("{} years", years));
-    }
-    if weeks > 0 {
-        result.push(format!("{} weeks", weeks));
-    }
-    if days > 0 {
-        result.push(format!("{} days", days));
-    }
-    if hours > 0 {
-        result.push(format!("{}h", hours));
-    }
-    if minutes > 0 {
-        result.push(format!("{}m", minutes));
-    }
-    if seconds > 0 || result.is_empty() {
-        result.push(format!("{}s", seconds));
-    }
+	// Format the result
+	let mut result = Vec::new();
+	if eternities > 0 {
+		let mut string = format!("{} eternit", eternities);
+		if eternities > 1 {
+			string.push_str("ies");
+		} else {
+			string.push('y');
+		}
+		result.push(string)
+	}
+	if aeons > 0 {
+		let mut string = format!("{} aeon", aeons);
+		if aeons > 1 {
+			string.push('s')
+		}
+		result.push(string)
+	}
+	if epochs > 0 {
+		let mut string = format!("{} epoch", epochs);
+		if epochs > 1 {
+			string.push('s')
+		}
+		result.push(string)
+	}
+	if millennia > 0 {
+		let mut string = format!("{} millenni", millennia);
+		if millennia > 1 {
+			string.push_str("um")
+		} else {
+			string.push('a')
+		}
+		result.push(string)
+	}
+	if centuries > 0 {
+		let mut string = format!("{} centur", centuries);
+		if centuries > 1 {
+			string.push_str("ies")
+		} else {
+			string.push('y')
+		}
+		result.push(string)
+	}
+	if decades > 0 {
+		let mut string = format!("{} decade", decades);
+		if decades > 1 {
+			string.push('s')
+		}
+		result.push(string)
+	}
+	if years > 0 {
+		let mut string = format!("{} year", years);
+		if years > 1 {
+			string.push('s')
+		}
+		result.push(string)
+	}
+	if months > 0 {
+		let mut string = format!("{} month", months);
+		if months > 1 {
+			string.push('s')
+		}
+		result.push(string)
+	}
+	if weeks > 0 {
+		let mut string = format!("{} week", weeks);
+		if weeks > 1 {
+			string.push('s')
+		}
+		result.push(string)
+	}
+	if days > 0 {
+		let mut string = format!("{} day", days);
+		if days > 1 {
+			string.push('s')
+		}
+		result.push(string)
+	}
+	if hours > 0 {
+		let string = format!("{}h", hours);
+		result.push(string);
+	}
+	if minutes > 0 {
+		let string = format!("{}m", minutes);
+		result.push(string);
+	}
+	if seconds > 0 || result.is_empty() {
+		let string = format!("{}s", seconds);
+		result.push(string);
+	}
 
-    result.join(" ")
+	result.join(" ")
 }
 
 pub fn escseq_cmdtime() -> OxResult<String> {
 	if let Some(duration) = read_meta(|m| m.get_cmd_duration())? {
-		Ok(expand_duration(duration))
+		Ok(format_cmd_runtime(duration))
 	} else {
 		Ok(String::new())
 	}
