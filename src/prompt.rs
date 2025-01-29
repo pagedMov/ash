@@ -86,8 +86,8 @@ pub fn run() -> OxResult<String> {
 		let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
 		format!("{}/.ox_hist",home)
 	});
-	let prompt = expand::expand_prompt()?;
 	write_meta(|m| m.stop_timer())?; // We stop the runtime duration timer here to include time spent expanding the prompt
+	let prompt = expand::expand_prompt()?;
 
 	match rl.readline(&prompt) {
 		Ok(line) => {
