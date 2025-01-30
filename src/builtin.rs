@@ -941,35 +941,31 @@ pub fn unalias(node: Node) -> OxResult<OxWait> {
 }
 
 pub fn cd(node: Node, flags: CdFlags) -> OxResult<OxWait> {
-	let mut argv = node
-		.get_argv()?
-		.iter()
-		.map(|arg| CString::new(arg.text()).unwrap())
-		.collect::<VecDeque<CString>>();
+	let mut argv = VecDeque::from(node.get_argv()?);
 		argv.pop_front();
 		let new_pwd;
 		if flags.contains(CdFlags::POP) {
 			let stack_path = read_meta(|m| m.top_dir().cloned())?;
 			if let Some(path) = stack_path {
-				new_pwd = CString::new(path.to_str().unwrap_or_default().to_string()).unwrap();
+				new_pwd = path.to_str().unwrap_or_default().to_string();
 			} else {
 				return Err(ShError::ExecFailed("Directory stack is empty".into(), 1, node.span()))
 			}
 		} else if let Some(arg) = argv.pop_front() {
-			if arg.to_str().is_ok_and(|arg| arg == "-") {
-				new_pwd = CString::new(read_vars(|vars| vars.get_evar("OLDPWD").unwrap_or_default())?).unwrap()
+			if arg.text() == "-" {
+				new_pwd = read_vars(|vars| vars.get_evar("OLDPWD").unwrap_or_default())?;
 			} else {
-				new_pwd = arg
+				new_pwd = arg.text().into();
 			}
 		} else if let Some(home_path) = read_vars(|vars| vars.get_evar("HOME"))? {
-			new_pwd = CString::new(home_path).unwrap();
+			new_pwd = home_path;
 		} else {
-			new_pwd = CString::new("/").unwrap();
+			new_pwd = "/".into();
 		}
 		if !flags.intersects(CdFlags::PUSH | CdFlags::POP) {
-			write_meta(|m| m.reset_dir_stack(PathBuf::from(new_pwd.to_str().unwrap_or_default())))?;
+			write_meta(|m| m.reset_dir_stack(PathBuf::from(&new_pwd)))?;
 		}
-		let path = Path::new(new_pwd.to_str().unwrap());
+		let path = Path::new(&new_pwd);
 		std::env::set_current_dir(path).map_err(|_| ShError::from_io())?;
 		write_vars(|v| v.export_var("PWD", std::env::current_dir().unwrap().to_str().unwrap()))?;
 		Ok(OxWait::Success)
@@ -1007,35 +1003,6 @@ pub fn cd_internal(path: String, span: Span, flags: CdFlags) -> OxResult<OxWait>
 	cd(cd_call, flags)
 }
 
-/// Brings a background or stopped job to the foreground and manages its execution.
-///
-/// Logic:
-/// 1. Parse the command arguments:
-///    - Retrieve the job ID from the arguments (default to `0` if none is provided).
-///    - Job ID `0` indicates the "current job" (the most recently backgrounded or stopped job).
-///
-/// 2. Resolve the job to foreground:
-///    - If job ID is `0`, fetch the most recent job from the job table (`job_order.last()`).
-///    - Otherwise, retrieve the job corresponding to the provided job ID.
-///    - If no job is found, return an error or indicate failure.
-///
-/// 3. Bring the job to the foreground:
-///    - Update the job state in the job table (e.g., mark it as foregrounded and continue it).
-///    - If the job is stopped, send it a `SIGCONT` signal to resume execution.
-///
-/// 4. Reattach the terminal to the job's process group:
-///    - Use `attach_tty` to give the job control of the terminal.
-///    - Handle any errors that may occur during this step.
-///
-/// 5. Return the result:
-///    - If the job was successfully foregrounded, return `OxWait::Success`.
-///    - If the job does not exist or cannot be foregrounded, return `OxWait::Fail` with appropriate details.
-///
-/// Key Considerations:
-/// - Ensure the `job_order` in the job table reflects the correct order of jobs for determining the "current job."
-/// - Handle cases where no jobs exist gracefully.
-/// - Carefully manage the interaction between the job table and the process group state.
-/// - Ensure terminal attachment and signal handling are robust to avoid leaving the shell in an inconsistent state.
 pub fn fg(node: Node) -> OxResult<OxWait> {
 	let argv = node.get_argv()?;
 	let mut argv = VecDeque::from(argv);

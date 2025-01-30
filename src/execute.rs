@@ -1091,7 +1091,9 @@ fn handle_command(node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 				event::throw(err).unwrap();
 				std::process::exit(1);
 			} else {
-				unreachable!(); // Handle unexpected errors differently if needed
+				let err = ShError::from_execf(format!("Execution failed - {}", e).as_str(), e as i32, node.span());
+				event::throw(err).unwrap();
+				std::process::exit(e as i32);
 			}
 		}
 		Ok(ForkResult::Parent { child }) => {

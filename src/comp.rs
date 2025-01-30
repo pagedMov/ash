@@ -253,7 +253,7 @@ impl Completer for OxHelper {
 		let num_words = line.split_whitespace().count();
 
 		// Determine if this is a file path or a command completion
-		if !line.is_empty() && num_words > 1 {
+		if !line.is_empty() && (num_words > 1 || line.split(" ").into_iter().next().is_some_and(|wrd| wrd.starts_with(['.','/']))) {
 			//TODO: Handle these unwraps
 			let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE")).unwrap().unwrap_or_else(|| -> String {
 				let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
