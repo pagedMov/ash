@@ -199,6 +199,8 @@ pub fn shift(node: Node) -> OxResult<OxWait> {
 	for (i, param) in pos_params.iter().enumerate() {
 		var_table.set_param((i + 1).to_string(), param.to_string());
 	}
+	var_table.set_param("#".into(), pos_params.len().to_string());
+	var_table.set_param("@".into(), pos_params.clone().to_vec().join(" "));
 
 	// Unset any remaining parameters
 	for i in (pos_params.len() + 1)..param_index {
@@ -1374,7 +1376,7 @@ pub fn echo(node: Node, mut io: ProcIO,) -> OxResult<OxWait> {
 	let mut flags = EchoFlags::empty();
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
 	argv.pop_front(); // Remove 'echo' from argv
-										// Get flags
+
 	if argv.front().is_some_and(|arg| arg.text().starts_with('-')) {
 		let next_arg = argv.pop_front().unwrap();
 		let mut options = next_arg.text().strip_prefix('-').unwrap().chars();

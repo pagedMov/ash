@@ -892,27 +892,6 @@ impl VarTable {
 		self.params.get(key).cloned().map(|param| param.to_string())
 	}
 	pub fn set_param(&mut self, key: String, value: String) {
-		if let Ok(index) = key.parse::<usize>() {
-			// Extract current positional parameters
-			let mut pos_params: Vec<String> = self.params
-				.get("@")
-				.unwrap_or(&String::new())
-				.split_whitespace()
-				.map(|s| s.to_string())
-				.collect();
-
-				// Ensure pos_params is large enough to accommodate the index
-				if index >= pos_params.len() {
-					pos_params.resize(index + 1, String::new());
-				}
-
-				// Update or set the value at the specified index
-				pos_params[index] = value.clone();
-
-				// Update "$@" with the joined positional parameters
-				self.params.insert("@".into(), pos_params.join(" "));
-		}
-
 		// Set the individual parameter as well
 		self.params.insert(key, value);
 	}
@@ -933,7 +912,8 @@ impl VarTable {
 		if let Some(var) = self.vars.get(key).cloned() {
 			Some(var)
 		} else if let Some(var) = self.params.get(key).cloned() {
-			Some(OxVal::String(var))
+			let val = OxVal::String(var);
+			Some(val)
 		} else {
 			let var = self.env.get(key).cloned().map(OxVal::String);
 			var

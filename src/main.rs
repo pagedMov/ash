@@ -31,7 +31,7 @@ pub mod comp;
 pub mod signal;
 pub mod shopt;
 
-use std::{env, fs::OpenOptions, os::fd::AsRawFd, path::PathBuf};
+use std::{collections::VecDeque, env, fs::OpenOptions, os::fd::AsRawFd, path::PathBuf};
 
 use builtin::echo_internal;
 use event::ShError;
@@ -81,6 +81,33 @@ async fn main() {
 
 	// Ignore SIGTTOU
 	signal::sig_handler_setup();
+
+	let mut pos_params = vec![];
+	let mut args_deque = VecDeque::from(args.clone());
+	args_deque.pop_front(); // Ignore command name
+	while let Some(arg) = args_deque.pop_front() {
+		match arg.as_str() {
+			"-c" | "--subshell" => {
+				args_deque.pop_front();
+			}
+			_ if !arg.starts_with('-') => {
+				pos_params.push(arg);
+			}
+			_ => { /* Do nothing */ }
+		}
+	}
+	let mut var_table = read_vars(|v| v.clone()).unwrap();
+	for (i,pos_param) in pos_params.iter().enumerate() {
+		let count = var_table.get_param("#").unwrap_or("0".into()).parse::<usize>().unwrap();
+		let all_params = var_table.get_param("@").unwrap_or_default();
+		let mut all_params_vec = all_params.split(' ').collect::<Vec<&str>>();
+		all_params_vec.push(pos_param);
+		all_params_vec.retain(|param| !param.is_empty());
+		var_table.set_param((i + 1).to_string(), pos_param.to_string());
+		var_table.set_param("#".into(), (count + 1).to_string());
+		var_table.set_param("@".into(), all_params_vec.join(" "));
+	}
+	write_vars(|v| *v = var_table).unwrap();
 
 	let script_path = if let Some(path) = args.iter().find(|arg| {
 		let path = PathBuf::from(arg.as_str());

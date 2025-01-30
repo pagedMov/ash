@@ -361,13 +361,6 @@ pub fn expand_token(token: Tk, expand_glob: bool) -> OxResult<VecDeque<Tk>> {
 
 		if !matches!(token.tk_type, TkType::Expanded) && !is_brace_expansion {
 			if token.text().has_unescaped("$") && !token.wd.flags.intersects(WdFlags::FROM_VAR | WdFlags::SNG_QUOTED) {
-				if token.text().has_unescaped("$@") {
-					let mut param_tokens = expand_params(token)?;
-					while let Some(param) = param_tokens.pop_back() {
-						working_buffer.push_front(param);
-					}
-					continue
-				}
 				let vars = shellenv::borrow_var_table().unwrap();
 				let token_text = token.wd.text.clone();
 				let expanded = expand_var(token.text().to_string(),&vars)?;
