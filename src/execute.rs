@@ -889,6 +889,8 @@ fn handle_function(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 	if let NdType::Function { body, mut argv } = node.nd_type {
 		let mut func = body; // Unbox the root node for the function
 		node.flags |= NdFlags::FUNCTION;
+		let snapshot = shellenv::SavedEnv::get_snapshot()?;
+		let mut var_table = read_vars(|v| v.clone())?;
 		let mut pos_params = vec![];
 		write_meta(|m| m.set_last_command(argv.front().unwrap().text()))?;
 
@@ -897,13 +899,15 @@ fn handle_function(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 			pos_params.push(tk.text().to_string());
 		}
 
-		write_vars(|v| v.reset_params())?;
+		var_table.reset_params();
 		write_meta(|m| m.mod_flags(|f| *f &= !EnvFlags::INTERACTIVE))?;
-		for (index,param) in pos_params.into_iter().enumerate() {
-			write_vars(|v| v.set_param((index + 1).to_string(), param))?;
+		for param in pos_params {
+			var_table.pos_param_pushback(&param);
 		}
+		write_vars(|v| *v = var_table)?;
 		event::execute(&func, node.flags, Some(node.redirs.clone()), Some(io))?;
 
+		snapshot.restore_snapshot()?;
 		Ok(OxWait::Success)
 	} else { unreachable!() }
 }

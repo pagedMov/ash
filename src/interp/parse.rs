@@ -180,6 +180,7 @@ impl Node {
 				for arg in argv {
 					arg_vec.push(arg.clone());
 				}
+				arg_vec.retain(|arg| !arg.text().is_empty());
 				Ok(arg_vec)
 			}
 			_ => Err(ShError::from_internal("Attempt to call `get_argv()` on a non-command node")),

@@ -97,15 +97,8 @@ async fn main() {
 		}
 	}
 	let mut var_table = read_vars(|v| v.clone()).unwrap();
-	for (i,pos_param) in pos_params.iter().enumerate() {
-		let count = var_table.get_param("#").unwrap_or("0".into()).parse::<usize>().unwrap();
-		let all_params = var_table.get_param("@").unwrap_or_default();
-		let mut all_params_vec = all_params.split(' ').collect::<Vec<&str>>();
-		all_params_vec.push(pos_param);
-		all_params_vec.retain(|param| !param.is_empty());
-		var_table.set_param((i + 1).to_string(), pos_param.to_string());
-		var_table.set_param("#".into(), (count + 1).to_string());
-		var_table.set_param("@".into(), all_params_vec.join(" "));
+	for pos_param in pos_params {
+		var_table.pos_param_pushback(&pos_param);
 	}
 	write_vars(|v| *v = var_table).unwrap();
 

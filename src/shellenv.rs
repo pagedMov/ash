@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::{fs::File, sync::RwLock};
 
 
-use crate::{event::{self, ShError}, interp::{helper, parse::{NdFlags, Span}}, shopt::{PromptCustom, ShOpts}, OxResult};
+use crate::{event::{self, ShError}, interp::{helper::{self, VecDequeExtension}, parse::{NdFlags, Span}}, shopt::{PromptCustom, ShOpts}, OxResult};
 
 #[derive(Debug)]
 pub struct DisplayWaitStatus(pub WaitStatus);
@@ -852,6 +852,7 @@ impl fmt::Display for OxVal {
 pub struct VarTable {
 	env: HashMap<String,String>,
 	params: HashMap<String,String>,
+	pos_params: VecDeque<String>,
 	vars: HashMap<String,OxVal>
 }
 
@@ -861,6 +862,7 @@ impl VarTable {
 		Self {
 			env,
 			params: HashMap::new(),
+			pos_params: VecDeque::new(),
 			vars: HashMap::new()
 		}
 	}
@@ -890,6 +892,23 @@ impl VarTable {
 	// Getters, setters, and unsetters for `params`
 	pub fn get_param(&self, key: &str) -> Option<String> {
 		self.params.get(key).cloned().map(|param| param.to_string())
+	}
+	pub fn borrow_pos_params(&self) -> &VecDeque<String> {
+		&self.pos_params
+	}
+	pub fn pos_param_index(&self, key: usize) -> Option<String> {
+		self.get_param(key.to_string().as_str())
+	}
+	pub fn pos_param_popfront(&mut self) -> Option<String> {
+		let popped_param = self.pos_params.pop_front();
+		self.set_param("@".into(), self.pos_params.clone().to_vec().join(" "));
+		self.set_param("#".into(), self.pos_params.len().to_string());
+		popped_param
+	}
+	pub fn pos_param_pushback(&mut self, param: &str) {
+		self.pos_params.push_back(param.to_string());
+		self.set_param("@".into(), self.pos_params.clone().to_vec().join(" "));
+		self.set_param("#".into(), self.pos_params.len().to_string());
 	}
 	pub fn set_param(&mut self, key: String, value: String) {
 		// Set the individual parameter as well
