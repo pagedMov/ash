@@ -59,6 +59,12 @@ pub const CMDSEP: [char;2] = [
 pub const WHITESPACE: [char;2] = [
 	' ', '\t'
 ];
+pub const META_TOKENS: [TkType;4] = [
+	TkType::DQuote,
+	TkType::SQuote,
+	TkType::Space,
+	TkType::Tab
+];
 
 bitflags! {
 	#[derive(Debug,Clone,Copy,PartialEq,Eq)]
@@ -256,6 +262,8 @@ pub enum TkType {
 	BraceExpansion,
 	VariableSub, // `$var`, `${var}`
 	CommandSub, // `$(command)`
+	SQuote,
+	DQuote,
 
 	// Comments
 	Comment, // `#`
@@ -263,7 +271,8 @@ pub enum TkType {
 	// Special Characters
 	Cmdsep, // ';' or '\n'
 	CasePat,
-	Whitespace, // Space or tab
+	Space,
+	Tab,
 	SOI,
 	EOI,
 	Null, // Default
@@ -329,6 +338,30 @@ impl Tk {
 		Tk {
 			tk_type: TkType::EOI,
 			wd: WordDesc { text: "".into(), span: Span::from(end,end), flags: WdFlags::empty() }
+		}
+	}
+	pub fn space(wd: &WordDesc) -> Self {
+		Tk {
+			tk_type: TkType::Space,
+			wd: wd.clone()
+		}
+	}
+	pub fn tab(wd: &WordDesc) -> Self {
+		Tk {
+			tk_type: TkType::Tab,
+			wd: wd.clone()
+		}
+	}
+	pub fn d_quote(wd: &WordDesc) -> Self {
+		Tk {
+			tk_type: TkType::DQuote,
+			wd: wd.clone()
+		}
+	}
+	pub fn s_quote(wd: &WordDesc) -> Self {
+		Tk {
+			tk_type: TkType::SQuote,
+			wd: wd.clone()
 		}
 	}
 	pub fn cmdsep(wd: &WordDesc, pos: usize) -> Self {
@@ -409,6 +442,7 @@ pub enum TkState {
 	ArrDec, // Used in arrays like for i in ArrDec1 ArrDec2
 	VarDec, // Used in for loop vars like for VarDec1 VarDec2 in array
 	SingleVarDec, // Used in case and select
+	VarSub,
 	Ident, // Generic words used for var and arr declarations
 	Arg, // Command arguments; only appear after commands
 	Command, // Starting point for the tokenizer
@@ -529,7 +563,7 @@ pub struct OxTokenizer {
 
 impl OxTokenizer {
 	pub fn new(input: &str) -> Self {
-		let mut input = input.trim().to_string();
+		let mut input = input.to_string();
 		let char_stream = input.chars().collect::<VecDeque<char>>();
 		let tokens = vec![Tk { tk_type: TkType::SOI, wd: WordDesc::empty() }];
 		if input.starts_with("#!") { // Ignore shebangs
@@ -1098,7 +1132,7 @@ impl OxTokenizer {
 		// We return the remaining unexpanded input here
 		Ok(sliced_input)
 	}
-	pub fn tokenize_one(&mut self) -> OxResult<Vec<Tk>> {
+	pub fn tokenize_one(&mut self, expand: bool) -> OxResult<Vec<Tk>> {
 		/*
 		 * It's called `tokenize_one` because we are only tokenizing a single executable block of logic
 		 * Traditionally, shells parse line by line, but that doesn't really make sense when logic can span several lines
@@ -1110,11 +1144,14 @@ impl OxTokenizer {
 			write_meta(|m| m.set_last_input(&self.input))?;
 			self.initialized = true;
 		}
-		let remainder = self.expand_one()?;
+		let remainder = if expand { self.expand_one()? } else { String::new() };
 		let mut wd = WordDesc::empty();
 		while !self.char_stream.is_empty() {
 			if *self.ctx() == DeadEnd && self.char_stream.front().is_some_and(|ch| !matches!(ch, ';' | '\n')) {
 				return Err(ShError::from_parse("Expected a semicolon or newline here", wd.span))
+			}
+			if *self.ctx() == Arg {
+				wd = wd.add_flag(WdFlags::IS_ARG)
 			}
 			match self.char_stream.front().unwrap() {
 				'\\' => {
@@ -1126,7 +1163,8 @@ impl OxTokenizer {
 					}
 				}
 				';' | '\n' => {
-					self.advance();
+					let sep = self.advance().unwrap();
+					wd = wd.add_char(sep);
 					self.tokens.push(Tk::cmdsep(&wd, wd.span.end));
 					if *self.ctx() == DeadEnd {
 						while self.context.len() != 1 {
@@ -1145,6 +1183,23 @@ impl OxTokenizer {
 						break
 					}
 				}
+				'"' | '\'' => {
+					let quote = self.advance().unwrap();
+					wd = wd.add_char(quote);
+					let tk = match quote {
+						'"' => {
+							self.push_ctx(DQuote);
+							Tk::d_quote(&wd)
+						}
+						'\'' => {
+							self.push_ctx(SQuote);
+							Tk::s_quote(&wd)
+						}
+						_ => unreachable!()
+					};
+					self.tokens.push(tk);
+					wd = WordDesc::empty();
+				}
 				'#' => self.push_ctx(Comment),
 				'(' if *self.ctx() == Command => self.push_ctx(Subshell),
 				'{' if *self.ctx() == FuncDef => self.push_ctx(FuncBody),
@@ -1152,6 +1207,8 @@ impl OxTokenizer {
 					let dollar = self.advance().unwrap();
 					if self.char_stream.front().is_some_and(|ch| *ch == '(') {
 						self.push_ctx(CommandSub)
+					} else {
+						self.push_ctx(VarSub)
 					}
 					self.char_stream.push_front(dollar);
 				}
@@ -1182,22 +1239,31 @@ impl OxTokenizer {
 					continue
 				}
 				' ' | '\t' => {
-					self.advance();
+					let space_ch = self.advance().unwrap();
+					wd = wd.add_char(space_ch);
+					let tk = match space_ch {
+						' ' => Tk::space(&wd),
+						'\t' => Tk::tab(&wd),
+						_ => unreachable!()
+					};
+					self.tokens.push(tk);
+					wd = WordDesc::empty();
 					continue
 				}
 				_ => { /* Do nothing */ }
 			}
 			match *self.ctx() {
-				Command => self.command_context(take(&mut wd))?,
-				Arg => self.arg_context(take(&mut wd))?,
-				DQuote | SQuote => self.string_context(take(&mut wd))?,
+				Command => self.command_context(take(&mut wd), expand)?,
+				Arg => self.arg_context(take(&mut wd), expand)?,
+				DQuote | SQuote => self.string_context(take(&mut wd), expand)?,
 				VarDec | SingleVarDec => self.vardec_context(take(&mut wd))?,
 				ArrDec => self.arrdec_context(take(&mut wd))?,
 				Subshell | CommandSub => self.subshell_context(take(&mut wd))?,
 				FuncBody => self.func_context(take(&mut wd))?,
-				Case => self.case_context(take(&mut wd))?,
+				Case => self.case_context(take(&mut wd), expand)?,
 				Loop => self.loop_context(take(&mut wd)),
 				For => self.loop_context(take(&mut wd)),
+				VarSub => self.varsub_context(take(&mut wd)),
 				Comment => {
 					while self.char_stream.front().is_some_and(|ch| *ch != '\n') {
 						self.advance();
@@ -1216,7 +1282,7 @@ impl OxTokenizer {
 		self.input = format!("{}{}",remaining_input,remainder);
 		Ok(take(&mut self.tokens))
 	}
-	fn command_context(&mut self, mut wd: WordDesc) -> OxResult<()> {
+	fn command_context(&mut self, mut wd: WordDesc, expand: bool) -> OxResult<()> {
 		use crate::interp::token::TkState::*;
 		wd = self.complete_word(wd,None)?;
 		if wd.text.ends_with("()") {
@@ -1285,7 +1351,7 @@ impl OxTokenizer {
 				let mut val_wd = wd.clone();
 				val_wd.text = val.to_string();
 				let mut sub_tokenizer = OxTokenizer::new(&val_wd.text);
-				let mut val_tk = VecDeque::from(sub_tokenizer.tokenize_one()?);
+				let mut val_tk = VecDeque::from(sub_tokenizer.tokenize_one(expand)?);
 				val_tk.pop_front();
 				if val_tk.is_empty() {
 					return Err(ShError::from_syntax("No value found for this assignment", wd.span))
@@ -1297,7 +1363,7 @@ impl OxTokenizer {
 					val_tk.wd.text = val.trim_matches('"').to_string();
 				}
 
-				let mut expanded = expand::expand_token(val_tk, true)?;
+				let mut expanded = if expand { expand::expand_token(val_tk, true)? } else { VecDeque::from([val_tk]) };
 				if let Some(tk) = expanded.pop_front() {
 					let ass_token = Tk {
 						tk_type: TkType::Assignment { key: var.to_string(), value: Box::new(tk), op: ass_op },
@@ -1307,7 +1373,7 @@ impl OxTokenizer {
 				}
 				self.push_ctx(Arg)
 			} else {
-				if wd.text.starts_with('~') {
+				if expand && wd.text.starts_with('~') {
 					let home = read_vars(|vars| vars.get_evar("HOME").unwrap())?;
 					wd.text = wd.text.replace("~",&home);
 				}
@@ -1317,7 +1383,7 @@ impl OxTokenizer {
 		}
 		Ok(())
 	}
-	fn arg_context(&mut self, mut wd: WordDesc) -> OxResult<()> {
+	fn arg_context(&mut self, mut wd: WordDesc, expand: bool) -> OxResult<()> {
 		use crate::interp::token::TkState::*;
 		wd = self.complete_word(wd,None)?;
 		match wd.text.as_str() {
@@ -1367,7 +1433,7 @@ impl OxTokenizer {
 					file_target = caps.name("file_target").map(|mat| {
 						Box::new(
 							Tk {
-								tk_type: TkType::String,
+								tk_type: TkType::Ident,
 								wd: WordDesc {
 									text: mat.as_str().to_string(),
 									span: wd.span,
@@ -1405,7 +1471,7 @@ impl OxTokenizer {
 				}
 				// We will expand variables later for these contexts
 				if !self.context.contains(&For) && !self.context.contains(&Case) && !self.context.contains(&Select) {
-					let mut expanded = expand::expand_token(token.clone(), true)?;
+					let mut expanded = if expand { expand::expand_token(token.clone(), true)? } else { VecDeque::from([token.clone()]) };
 					if !expanded.is_empty() {
 						self.tokens.extend(expanded.drain(..));
 					} else if !token.text().starts_with('$') {
@@ -1418,10 +1484,8 @@ impl OxTokenizer {
 		}
 		Ok(())
 	}
-	fn string_context(&mut self, mut wd: WordDesc) -> OxResult<()> {
+	fn string_context(&mut self, mut wd: WordDesc, expand: bool) -> OxResult<()> {
 		use crate::interp::token::TkState::*;
-		// Pop the opening quote
-		self.advance();
 		while let Some(ch) = self.advance() {
 			match ch {
 				'\\' => {
@@ -1432,11 +1496,25 @@ impl OxTokenizer {
 					}
 				}
 				'"' if *self.ctx() == TkState::DQuote => {
-					self.push_ctx(Arg);
+					let d_quote_wd = WordDesc {
+						text: '"'.to_string(),
+						span: Span::new(),
+						flags: WdFlags::empty()
+					};
+					let token = Tk { tk_type: TkType::String, wd: take(&mut wd) };
+					let mut expanded = if expand { expand::expand_token(token.clone(), true)? } else { VecDeque::from([token.clone()]) };
+					self.tokens.extend(expanded.drain(..));
+					self.tokens.push(Tk::d_quote(&d_quote_wd));
 					break
 				}
 				'\'' if *self.ctx() == TkState::SQuote => {
-					self.push_ctx(Arg);
+					let s_quote_wd = WordDesc {
+						text: '\''.to_string(),
+						span: Span::new(),
+						flags: WdFlags::empty()
+					};
+					self.tokens.push(Tk { tk_type: TkType::String, wd: take(&mut wd) });
+					self.tokens.push(Tk::d_quote(&s_quote_wd));
 					break
 				}
 				_ => {
@@ -1444,12 +1522,14 @@ impl OxTokenizer {
 				}
 			}
 		}
-		if *self.ctx() == DQuote {
-			let token = Tk { tk_type: TkType::String, wd };
-			let mut expanded = expand::expand_token(token, true)?;
-			self.tokens.extend(expanded.drain(..));
-		} else {
-			self.tokens.push(Tk { tk_type: TkType::String, wd });
+		if !wd.text.is_empty() {
+			if *self.ctx() == DQuote {
+				let token = Tk { tk_type: TkType::String, wd };
+				let mut expanded = if expand { expand::expand_token(token.clone(), true)? } else { VecDeque::from([token.clone()]) };
+				self.tokens.extend(expanded.drain(..));
+			} else {
+				self.tokens.push(Tk { tk_type: TkType::String, wd });
+			}
 		}
 		self.pop_ctx();
 		Ok(())
@@ -1486,7 +1566,6 @@ impl OxTokenizer {
 		Ok(())
 	}
 	fn arrdec_context(&mut self, mut wd: WordDesc) -> OxResult<()> {
-		use crate::interp::token::TkState::*;
 		let mut found = false;
 		while self.char_stream.front().is_some_and(|ch| !matches!(ch, ';' | '\n')) {
 			found = true;
@@ -1497,7 +1576,8 @@ impl OxTokenizer {
 			if !found {
 				return Err(ShError::from_parse("Did not find any array elements for this statement", wd.span))
 			}
-			self.advance();
+			let sep = self.advance().unwrap();
+			wd = wd.add_char(sep);
 			self.tokens.push(Tk::cmdsep(&wd,wd.span.end));
 		}
 		self.pop_ctx();
@@ -1549,6 +1629,7 @@ impl OxTokenizer {
 			return Err(ShError::from_syntax("This subshell is missing a closing parenthesis", tk.span()))
 		}
 		self.pop_ctx();
+		self.push_ctx(Arg);
 		self.tokens.push(tk);
 		Ok(())
 	}
@@ -1621,7 +1702,8 @@ impl OxTokenizer {
 							flags: WdFlags::KEYWORD
 						}
 					});
-					if self.char_stream.front().is_some_and(|ch| ch.is_whitespace()) {
+					if self.char_stream.front().is_some() {
+
 						let input: String = self.char_stream.iter().collect();
 						let input = input.trim_start();
 						self.char_stream = input.chars().collect();
@@ -1643,7 +1725,7 @@ impl OxTokenizer {
 		}
 		self.pop_ctx();
 	}
-	fn case_context(&mut self, mut wd: WordDesc) -> OxResult<()> {
+	fn case_context(&mut self, mut wd: WordDesc, expand: bool) -> OxResult<()> {
 		use crate::interp::token::TkState::*;
 		let span = wd.span;
 		let mut closed = false;
@@ -1688,7 +1770,7 @@ impl OxTokenizer {
 				};
 				let mut body_tokens = vec![];
 				let mut body_tokenizer = OxTokenizer::new(body);
-				while let Ok(mut block) = body_tokenizer.tokenize_one() {
+				while let Ok(mut block) = body_tokenizer.tokenize_one(expand) {
 					if !block.is_empty() {
 						if block.first().is_some_and(|tk| tk.tk_type == TkType::SOI) {
 							block = block[1..].to_vec();
@@ -1707,6 +1789,21 @@ impl OxTokenizer {
 		self.tokens.push(Tk { tk_type: TkType::Esac, wd });
 		self.push_ctx(DeadEnd);
 		Ok(())
+	}
+	fn varsub_context(&mut self, mut wd: WordDesc) {
+		let dollar = self.advance().unwrap();
+		wd = wd.add_char(dollar);
+		let brk_pat = if self.char_stream.front() == Some(&'{') { vec!['}'] } else { vec![';','\n',' ', '\t'] };
+		while let Some(ch) = self.char_stream.front() {
+			if brk_pat.contains(ch) { break }
+			wd = wd.add_char(self.advance().unwrap())
+		}
+		let var_tk = Tk {
+			tk_type: TkType::VariableSub,
+			wd
+		};
+		self.pop_ctx();
+		self.tokens.push(var_tk)
 	}
 	fn complete_word(&mut self, mut wd: WordDesc, brk_pattern: Option<char>) -> OxResult<WordDesc> {
 		let mut dub_quote = false;
@@ -1790,16 +1887,9 @@ impl OxTokenizer {
 				'\n' | ';' | ' ' | '\t' if !bracket_stack.is_empty() || !paren_stack.is_empty() || dub_quote || sng_quote => {
 					wd = wd.add_char(ch)
 				}
-				'\n' | ';' => {
+				'\n' | ';' | ' ' | '\t' => {
 					// Preserve cmdsep or operator for tokenizing
 					self.char_stream.push_front(ch);
-					break;
-				}
-				' ' | '\t' => {
-					// Whitespace handling
-					while self.char_stream.front().is_some_and(|c| matches!(c, ' ' | '\t')) {
-						self.advance();
-					}
 					break;
 				}
 				_ => {

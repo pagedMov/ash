@@ -7,7 +7,7 @@ use rustyline::{completion::{Candidate, Completer, FilenameCompleter}, error::Re
 use skim::{prelude::{Key, SkimItemReader, SkimOptionsBuilder}, Skim};
 use std::{borrow::Cow, collections::{HashMap, HashSet, VecDeque}, env, io::stdout, mem, path::{Path, PathBuf}};
 
-use crate::{builtin::BUILTINS, event::ShError, interp::{helper::{self, StrExtension}, parse::Span, token::KEYWORDS}, shellenv::{read_logic, read_vars}};
+use crate::{builtin::BUILTINS, event::ShError, interp::{helper::{self, StrExtension}, parse::Span, token::{AssOp, OxTokenizer, Tk, WdFlags, KEYWORDS}}, shellenv::{read_logic, read_vars}};
 
 pub const RESET: &str = "\x1b[0m";
 pub const BLACK: &str = "\x1b[30m";
@@ -453,6 +453,132 @@ pub fn analyze_token(word: &str, ctx: SyntaxCtx, path: &str) -> SyntaxTk {
 	}
 }
 
+pub fn style_text(code: &str, text: &str) -> String {
+	format!("{}{}{}",code,text,RESET)
+}
+
+pub fn highlight_token(tk: Tk, path: &str) -> String {
+	use crate::interp::token::TkType as TkT;
+	match tk.class() {
+    TkT::If |
+    TkT::Then |
+    TkT::Else |
+    TkT::Elif |
+    TkT::Fi |
+    TkT::For |
+    TkT::While |
+    TkT::Until |
+    TkT::Do |
+    TkT::Done |
+    TkT::Case |
+    TkT::Esac |
+    TkT::Select |
+    TkT::In => {
+			return style_text(KEYWORD,tk.text());
+		}
+    TkT::FuncBody => {
+			let body = tk.text().trim_matches(['{','}']);
+			let hl_body = style_text(STRING,body);
+			return format!("{}{}{}",'{',hl_body,'}');
+		}
+    TkT::LoopCond | TkT::LoopBody => {
+			let mut sub_tokenizer = OxTokenizer::new(tk.text());
+			let mut hl_cond = String::new();
+			loop {
+				let result = sub_tokenizer.tokenize_one(false);
+				if result.is_err() {
+					return tk.text().to_string()
+				} else {
+					let block = result.unwrap();
+					if block.is_empty() {
+						break
+					}
+					for tk in block {
+						let styled_text = highlight_token(tk, path);
+						hl_cond.push_str(&styled_text);
+					}
+				}
+			}
+			return hl_cond;
+		}
+    TkT::LogicAnd |
+    TkT::LogicOr |
+    TkT::Pipe |
+    TkT::PipeBoth |
+    TkT::Background |
+    TkT::Redirection { redir: _ } => {
+			return style_text(OPERATOR,tk.text());
+		}
+    TkT::FuncDef => {
+			let func_name = tk.text().strip_suffix("()").unwrap();
+			let hl_name = style_text(STRING, func_name);
+			return format!("{}{}",hl_name,"()");
+		}
+    TkT::Assignment { key, value, op } => {
+			let hl_key = style_text(STRING,&key);
+			let hl_val = style_text(VARSUB,value.text());
+			let op = match op {
+				AssOp::PlusEquals => style_text(RESET,"+="),
+				AssOp::MinusEquals => style_text(RESET,"-="),
+				AssOp::Equals => style_text(RESET,"="),
+			};
+			return format!("{}{}{}",hl_key,op,hl_val);
+		}
+
+    TkT::ProcessSub |
+		TkT::CommandSub |
+    TkT::Subshell => {
+			let hl_body = style_text(KEYWORD,tk.text());
+			return format!("{}{}{}{}",'(',hl_body,RESET,')');
+		}
+    TkT::Array { elements } => {
+			let arr = elements.iter().map(|elem| elem.text()).collect::<Vec<&str>>().join(" ");
+			return style_text(VARSUB,&arr);
+		}
+    TkT::Vars { vars } => {
+			let vars = vars.iter().map(|var| var.text()).collect::<Vec<&str>>().join(" ");
+			return style_text(VARSUB,&vars);
+		}
+		TkT::DQuote | TkT::SQuote => {
+			return style_text(RESET,tk.text())
+		}
+    TkT::String => {
+			return style_text(STRING,tk.text())
+		}
+    TkT::Ident => {
+			if tk.flags().contains(WdFlags::IS_ARG) {
+				return style_text(RESET, tk.text());
+			} else {
+				let is_valid = validate_cmd(tk.text(), path);
+				if is_valid {
+					return style_text(COMMAND,tk.text());
+				} else {
+					return style_text(ERROR,tk.text());
+				}
+			}
+		}
+    TkT::BraceExpansion => todo!(),
+    TkT::VariableSub => {
+			return style_text(VARSUB,tk.text())
+		}
+    TkT::Comment => {
+			return style_text(COMMENT,tk.text())
+		}
+    TkT::Cmdsep => {
+			return style_text(RESET,tk.text())
+		}
+    TkT::CasePat => todo!(),
+    TkT::Space |
+    TkT::Tab => {
+			return style_text(RESET,tk.text())
+		}
+    TkT::SOI => String::new(),
+    TkT::EOI => String::new(),
+    TkT::Null => String::new(),
+		_ => unreachable!() // (hopefully)
+	}
+}
+
 
 #[derive(Helper)]
 pub struct OxHelper {
@@ -461,15 +587,30 @@ pub struct OxHelper {
 }
 
 impl Highlighter for OxHelper {
+	fn highlight_char(&self, line: &str, pos: usize, kind: rustyline::highlight::CmdKind) -> bool {
+	    return true
+	}
 	fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
 		use crate::comp::SyntaxCtx::*;
 		use crate::comp::SyntaxTk as STk;
 
-		let mut chars = line.chars().collect::<VecDeque<char>>();
+		let mut line_tokenizer = OxTokenizer::new(line);
 		let mut hl_buffer = String::new();
-		while !chars.is_empty() {
-			let block = self.highlight_one(&mut chars);
-			hl_buffer.push_str(&block);
+		let path = read_vars(|v| v.get_evar("PATH")).unwrap().unwrap_or_default();
+		loop {
+			let result = line_tokenizer.tokenize_one(false);
+			if result.is_err() {
+				return Cow::Owned(line.to_string());
+			}
+			let block = result.unwrap();
+			if block.is_empty() {
+				break
+			}
+			for tk in block {
+				let hl_tk = highlight_token(tk, &path);
+				hl_buffer.push_str(&hl_tk);
+			}
+			hl_buffer.push_str(RESET);
 		}
 
 		Cow::Owned(hl_buffer)

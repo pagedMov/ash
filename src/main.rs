@@ -91,7 +91,7 @@ fn initialize_proc_constants() {
 
 #[tokio::main]
 async fn main() {
-	init_logger();
+	env_logger::init();
 	initialize_proc_constants();
 	let mut interactive = true;
 	let mut args = env::args().collect::<Vec<String>>();

@@ -11,7 +11,7 @@ use crate::{builtin, OxResult};
 
 use super::expand;
 use super::helper::{self, flatten_tree};
-use super::token::{AssOp, Redir, WdFlags};
+use super::token::{AssOp, Redir, WdFlags, META_TOKENS};
 
 bitflags! {
 	#[derive(Debug,Copy,Clone,PartialEq)]
@@ -331,7 +331,8 @@ pub fn descend(tokenizer: &mut OxTokenizer) -> OxResult<ParseState> {
 		}
 	};
 
-	let deck = tokenizer.tokenize_one()?;
+	let mut deck = tokenizer.tokenize_one(true)?;
+	deck.retain(|tk| !META_TOKENS.contains(&tk.class()));
 	state.tokens = deck.into();
 
 	state = parse(state)?;

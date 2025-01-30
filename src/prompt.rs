@@ -37,12 +37,12 @@ fn build_editor_config() -> OxResult<Config> {
 
 	config = config
 		.max_history_size(max_size)
-		.unwrap_or_else(|e| {
-			eprintln!("Invalid max history size: {}", e);
-			std::process::exit(1);
-		})
-	.history_ignore_dups(hist_dupes)
-		.unwrap()
+			.unwrap_or_else(|e| {
+				eprintln!("Invalid max history size: {}", e);
+				std::process::exit(1);
+			})
+		.history_ignore_dups(hist_dupes).unwrap()
+		.behavior(rustyline::Behavior::PreferTerm)
 		.completion_prompt_limit(comp_limit)
 		.edit_mode(edit_mode)
 		.auto_add_history(auto_hist)
