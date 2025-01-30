@@ -42,6 +42,8 @@ pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
 	regex.insert("operator",Regex::new(r"(?:&&|\|\||[><]=?|[|&])").unwrap());
 	regex.insert("cmdsep",Regex::new(r"^(?:\n|;)$").unwrap());
 	regex.insert("ident",Regex::new(r"^[\x20-\x7E]*$").unwrap());
+	regex.insert("find_do",Regex::new(r"(?P<loop_cond>.*?)(?P<kw>[\n;]*\s*do\s+)$").unwrap());
+	regex.insert("find_done",Regex::new(r"(?P<loop_body>.*?)(?P<kw>[\n;]*\s*done(?:[\s;]*|\z))$").unwrap());
 	regex
 });
 
@@ -1176,11 +1178,14 @@ impl OxTokenizer {
 							}
 						}
 					}
+					wd = WordDesc::empty();
 					if *self.ctx() != Command {
 						self.pop_ctx();
 					}
 					if self.context.len() == 1 {
 						break
+					} else {
+						continue
 					}
 				}
 				'"' | '\'' => {
@@ -1551,6 +1556,13 @@ impl OxTokenizer {
 					self.tokens.push(Tk { tk_type: TkType::In, wd: wd.add_flag(WdFlags::KEYWORD) });
 					break
 				}
+				_ if wd.text.chars().all(|ch| matches!(ch, ';' | '\n' | ' ' | '\t')) => {
+					if wd.text.chars().find(|ch| matches!(ch, ';' | '\n')).is_some() {
+						return Err(ShError::from_parse("Did not expect a semicolon or newline here", wd.span))
+					} else {
+						self.tokens.push(Tk::space(&take(&mut wd)))
+					}
+				}
 				_ => {
 					if *self.ctx() == SingleVarDec && found {
 						return Err(ShError::from_parse(format!("Only expected one variable in this statement, found: {}",wd.text).as_str(), wd.span))
@@ -1672,45 +1684,48 @@ impl OxTokenizer {
 		let mut got_span = false;
 		let mut cond_done = false;
 		let mut body_done = false;
-		let mut target = if !cond_done { Some("do") } else { Some("done") };
-		while let Some(ch) = self.char_stream.pop_front() {
+		let mut target = if !cond_done { &REGEX["find_do"] } else { &REGEX["find_done"] };
+		while let Some(ch) = self.advance() {
+			if cond_done && body_done {
+				self.char_stream.push_front(ch);
+				break
+			}
 			if !ch.is_whitespace() && !matches!(ch, ';' | '\n') {
 				got_span = false;
 			}
 			if !cond_done || !body_done {
 				wd = wd.add_char(ch);
-				if wd.text.split_whitespace().last() == target {
-					wd.text = wd.text.strip_suffix(target.unwrap()).unwrap().trim().to_string();
+				if let Some(caps) = target.captures(&wd.text.clone()) {
+					wd.text = if !cond_done {
+						caps.name("loop_cond").map(|c| c.as_str().to_string()).unwrap_or_default()
+					} else {
+						caps.name("loop_body").map(|c| c.as_str().to_string()).unwrap_or_default()
+					};
+					let mut keyword = caps.name("kw").map(|c| c.as_str().to_string()).unwrap_or_default();
 					wd = wd.set_span(Span::from(span_start,span_end));
-					self.tokens.push(Tk {
-						tk_type: match target {
-							Some("do") => TkType::LoopCond,
-							Some("done") => TkType::LoopBody,
-							_ => unreachable!(),
-						},
-						wd: take(&mut wd)
-					});
-					self.tokens.push(Tk {
-						tk_type: match target {
-							Some("do") => TkType::Do,
-							Some("done") => TkType::Done,
-							_ => unreachable!(),
+					let kw_tk = Tk {
+						tk_type: match cond_done {
+							false => TkType::Do,
+							true => TkType::Done,
 						},
 						wd: WordDesc {
-							text: target.unwrap().to_string(),
+							text: keyword,
 							span: self.spans.pop_front().unwrap_or_default(),
 							flags: WdFlags::KEYWORD
 						}
-					});
-					if self.char_stream.front().is_some() {
-
-						let input: String = self.char_stream.iter().collect();
-						let input = input.trim_start();
-						self.char_stream = input.chars().collect();
-					}
-					if target == Some("do") {
+					};
+					let logic_tk = Tk {
+						tk_type: match cond_done {
+							false => TkType::LoopCond,
+							true => TkType::LoopBody,
+						},
+						wd: take(&mut wd)
+					};
+					self.tokens.push(logic_tk);
+					self.tokens.push(kw_tk);
+					if !cond_done {
 						cond_done = true;
-						target = Some("done")
+						target = &REGEX["find_done"];
 					} else {
 						body_done = true;
 					}
@@ -1720,7 +1735,23 @@ impl OxTokenizer {
 					got_span = true;
 				}
 			} else {
+				wd = WordDesc::empty();
 				break
+			}
+		}
+		if !wd.text.is_empty() {
+			if !cond_done {
+				let logic_tk = Tk {
+					tk_type: TkType::LoopCond,
+					wd: take(&mut wd)
+				};
+				self.tokens.push(logic_tk);
+			} else if !body_done {
+				let logic_tk = Tk {
+					tk_type: TkType::LoopBody,
+					wd: take(&mut wd)
+				};
+				self.tokens.push(logic_tk);
 			}
 		}
 		self.pop_ctx();
@@ -1810,9 +1841,6 @@ impl OxTokenizer {
 		let mut sng_quote = false;
 		let mut paren_stack = vec![];
 		let mut bracket_stack = vec![];
-		while self.char_stream.front().is_some_and(|ch| ch.is_whitespace()) {
-			self.advance();
-		}
 		while let Some(ch) = self.advance() {
 			match ch {
 				_ if brk_pattern.is_some_and(|pat| pat == ch) => {
@@ -1888,8 +1916,16 @@ impl OxTokenizer {
 					wd = wd.add_char(ch)
 				}
 				'\n' | ';' | ' ' | '\t' => {
-					// Preserve cmdsep or operator for tokenizing
-					self.char_stream.push_front(ch);
+					// If we start out with a space, grab it and all of the following meta characters and put it in one word
+					if wd.text.is_empty() {
+						wd = wd.add_char(ch);
+						while self.char_stream.front().is_some_and(|ch| matches!(ch, '\n' | ';' | ' ' | '\t')) {
+							wd = wd.add_char(ch)
+						}
+						return Ok(wd)
+					} else {
+						self.char_stream.push_front(ch);
+					}
 					break;
 				}
 				_ => {

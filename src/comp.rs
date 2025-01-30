@@ -328,7 +328,7 @@ pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 						"fi" | "done" | "esac" => {
 							let expectation = match keyword.as_str() {
 								"fi" => vec!["if", "else"],
-								"done" => vec!["do", "while", "until", "for", "select"],
+								"done" => vec!["do", "while", "until", "for", "in", "select"],
 								"esac" => vec!["in"],
 								_ => unreachable!()
 							};
@@ -361,11 +361,11 @@ pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 
 	// Check if any delimiters or keywords remain unclosed
 	if !delim_stack.is_empty() {
-		eprintln!("delim_stack: {}", delim_stack.last().unwrap());
+		helper::breakpoint(format!("delim_stack: {}", delim_stack.last().unwrap()));
 		return Ok(false);
 	}
 	if !keyword_stack.is_empty() {
-		eprintln!("keyword_stack: {}", keyword_stack.last().unwrap());
+		helper::breakpoint(format!("kw_stack: {}", keyword_stack.last().unwrap()));
 		return Ok(false);
 	}
 

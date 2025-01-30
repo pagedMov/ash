@@ -42,7 +42,6 @@ fn build_editor_config() -> OxResult<Config> {
 				std::process::exit(1);
 			})
 		.history_ignore_dups(hist_dupes).unwrap()
-		.behavior(rustyline::Behavior::PreferTerm)
 		.completion_prompt_limit(comp_limit)
 		.edit_mode(edit_mode)
 		.auto_add_history(auto_hist)
