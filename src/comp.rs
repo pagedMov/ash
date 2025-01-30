@@ -1,10 +1,10 @@
 use crossterm::{
-	cursor::{self, MoveTo, RestorePosition, Show}, execute, style::Print, terminal::{disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen}
+	cursor::{self, MoveTo, RestorePosition, Show}, execute, style::{style, Color, Print, Stylize}, terminal::{disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen}
 };
 use once_cell::sync::Lazy;
-use rustyline::{completion::{Candidate, Completer, FilenameCompleter}, error::ReadlineError, history::{FileHistory, History}, validate::{ValidationContext, ValidationResult, Validator}, Context, Helper, Highlighter, Hinter, Validator};
+use rustyline::{completion::{Candidate, Completer, FilenameCompleter}, error::ReadlineError, highlight::Highlighter, hint::{Hint, Hinter}, history::{FileHistory, History}, validate::{ValidationContext, ValidationResult, Validator}, Context, Helper, Validator};
 use skim::{prelude::{Key, SkimItemReader, SkimOptionsBuilder}, Skim};
-use std::{collections::{HashMap, HashSet}, env, io::stdout, path::PathBuf};
+use std::{borrow::Cow, collections::{HashMap, HashSet}, env, io::stdout, path::PathBuf};
 
 use crate::{event::ShError, interp::{helper, parse::Span, token::KEYWORDS}, shellenv::read_vars};
 
@@ -171,11 +171,61 @@ pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 	Ok(true)
 }
 
+pub struct OxHint {
+	text: String,
+	styled_text: String
+}
 
-#[derive(Hinter,Highlighter,Helper)]
+impl OxHint {
+	pub fn new(text: String) -> Self {
+		let styled_text = style(&text).with(Color::DarkGrey).to_string();
+		Self { text, styled_text }
+	}
+}
+
+impl Hint for OxHint {
+	fn display(&self) -> &str {
+		&self.styled_text
+	}
+	fn completion(&self) -> Option<&str> {
+		if !self.text.is_empty() {
+			Some(&self.text)
+		} else {
+			None
+		}
+	}
+}
+
+
+#[derive(Helper)]
 pub struct OxHelper {
 	filename_comp: FilenameCompleter,
 	commands: Vec<String>, // List of built-in or cached commands
+}
+
+impl Highlighter for OxHelper {
+	fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+		Cow::Owned(style(hint).with(Color::Green).to_string())
+	}
+}
+
+impl Hinter for OxHelper {
+	fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<Self::Hint> {
+		if line.is_empty() {
+			return None
+		}
+		let history = ctx.history();
+		let result = self.hist_substr_search(line, history);
+		if let Some(hist_line) = result {
+			let window = hist_line[line.len()..].to_string();
+			let hint = OxHint::new(window);
+			Some(hint)
+		} else {
+			None
+		}
+	}
+
+type Hint = OxHint;
 }
 
 impl Validator for OxHelper {
@@ -214,6 +264,18 @@ impl OxHelper {
 		};
 		helper.update_commands_from_path();
 		helper
+	}
+
+	fn hist_substr_search(&self, term: &str, hist: &dyn History) -> Option<String> {
+		let limit = hist.len();
+		for i in 0..limit {
+			if let Some(hist_entry) = hist.get(i, rustyline::history::SearchDirection::Forward).ok()? {
+				if hist_entry.entry.starts_with(term) {
+					return Some(hist_entry.entry.into_owned());
+				}
+			}
+		}
+		None
 	}
 
 	// Dynamically add commands (if needed, e.g., external binaries in $PATH)
