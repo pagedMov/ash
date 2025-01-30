@@ -7,7 +7,7 @@ use rustyline::{completion::{Candidate, Completer, FilenameCompleter}, error::Re
 use skim::{prelude::{Key, SkimItemReader, SkimOptionsBuilder}, Skim};
 use std::{borrow::Cow, collections::{HashMap, HashSet, VecDeque}, env, io::stdout, mem, path::{Path, PathBuf}};
 
-use crate::{event::ShError, interp::{helper::{self, StrExtension}, parse::Span, token::KEYWORDS}, shellenv::{read_logic, read_vars}};
+use crate::{builtin::BUILTINS, event::ShError, interp::{helper::{self, StrExtension}, parse::Span, token::KEYWORDS}, shellenv::{read_logic, read_vars}};
 
 pub const RESET: &str = "\x1b[0m";
 pub const BLACK: &str = "\x1b[30m";
@@ -399,7 +399,7 @@ impl Hint for OxHint {
 	}
 }
 
-pub fn search_path(target: &str, path: &str) -> bool {
+pub fn validate_cmd(target: &str, path: &str) -> bool {
 	if target.is_empty() || path.is_empty() {
 		return false
 	}
@@ -409,8 +409,10 @@ pub fn search_path(target: &str, path: &str) -> bool {
 			.any(|p| p.join(target).exists());
 	let is_func = logic.get_func(target).is_some();
 	let is_alias = logic.get_alias(target).is_some();
+	let is_builtin = BUILTINS.contains(&target);
+	let is_path = Path::new(target).exists();
 
-	is_cmd | is_func | is_alias
+	is_cmd | is_func | is_alias | is_builtin | is_path
 }
 
 pub fn analyze_token(word: &str, ctx: SyntaxCtx, path: &str) -> SyntaxTk {
@@ -424,7 +426,7 @@ pub fn analyze_token(word: &str, ctx: SyntaxCtx, path: &str) -> SyntaxTk {
 				return STk::subshell(&word)
 			} else if word.has_unescaped("=") {
 				return STk::assignment(&word).unwrap()
-			} else if search_path(&word, &path) {
+			} else if validate_cmd(&word, &path) {
 				return STk::command_ok(&word)
 			} else {
 				return STk::command_not_found(&word)
@@ -536,6 +538,7 @@ impl OxHelper {
 		let mut prefix = ERROR; // Default case
 		let mut cur_word = String::new();
 		let mut dub_quote = false;
+		let mut paren_stack = vec![];
 		let path = read_vars(|v| v.get_evar("PATH")).unwrap().unwrap_or_default();
 		while let Some(ch) = line.pop_front() {
 			match ch {
@@ -544,6 +547,29 @@ impl OxHelper {
 					prefix = ESCAPED;
 					let escaped = line.pop_front().map(|ch| ch.to_string()).unwrap_or_default();
 					let formatted = format!("{}{}{}{}",prefix,ch,escaped,saved_prefix);
+					hl_block.push_str(&formatted);
+				}
+				'(' if cur_word.is_empty() => {
+					cur_word.push(ch);
+					paren_stack.push(ch);
+					while let Some(subsh_ch) = line.pop_front() {
+						cur_word.push(subsh_ch);
+						if subsh_ch == '\\' {
+							if let Some(esc_ch) = line.pop_front() {
+								cur_word.push(esc_ch);
+							}
+						}
+						if subsh_ch == '(' {
+							paren_stack.push(subsh_ch);
+						}
+						if subsh_ch == ')' {
+							paren_stack.pop();
+							if paren_stack.is_empty() {
+								break
+							}
+						}
+					}
+					let formatted = format!("{}{}{}",VARSUB,mem::take(&mut cur_word),RESET);
 					hl_block.push_str(&formatted);
 				}
 				'$' => {
@@ -605,7 +631,7 @@ impl OxHelper {
 					if hl_block.trim().is_empty() && !cur_word.is_empty() {
 						if KEYWORDS.contains(&cur_word.as_str()) {
 							prefix = KEYWORD;
-						} else if search_path(&cur_word, &path) {
+						} else if validate_cmd(&cur_word, &path) {
 							prefix = COMMAND;
 						}
 						let formatted = format!("{}{}{}",prefix,mem::take(&mut cur_word),RESET);
@@ -627,7 +653,7 @@ impl OxHelper {
 
 		if !cur_word.is_empty() {
 			if hl_block.trim().is_empty() && !cur_word.is_empty() {
-				let cmd_found = search_path(&cur_word, &path);
+				let cmd_found = validate_cmd(&cur_word, &path);
 				if cmd_found {
 					prefix = COMMAND;
 				}
