@@ -31,12 +31,14 @@ pub mod comp;
 pub mod signal;
 pub mod shopt;
 
-use std::{collections::VecDeque, env, fs::OpenOptions, os::fd::AsRawFd, path::PathBuf};
+use std::{collections::VecDeque, env, io::Write, fs::OpenOptions, os::fd::AsRawFd, path::PathBuf};
 
 use builtin::echo_internal;
+use env_logger::Builder;
 use event::ShError;
 use execute::{traverse_ast, OxWait, RustFd};
 use interp::{parse::{descend, NdType}, token::OxTokenizer};
+use log::LevelFilter;
 use nix::{fcntl::OFlag, sys::{stat::Mode, termios::{self, LocalFlags}}, unistd::{Pid,isatty}};
 use shellenv::{read_vars, write_meta, write_vars, EnvFlags, RSH_PATH};
 use termios::Termios;
@@ -64,6 +66,21 @@ fn restore_termios(orig: &Option<Termios>) {
 	}
 }
 
+fn init_logger() {
+	let log_file = OpenOptions::new()
+		.create(true)
+		.append(true)
+		.open("/home/pagedmov/ox.log")
+		.unwrap();
+
+		Builder::new()
+			.filter(None, LevelFilter::Debug) // Set log level
+			.format(move |buf, record| {
+				writeln!(log_file.try_clone().unwrap(), "{} - {}", record.level(), record.args())
+			})
+		.init();
+}
+
 fn initialize_proc_constants() {
 	/*
 	 * These two variables are set using Lazy,
@@ -74,7 +91,7 @@ fn initialize_proc_constants() {
 
 #[tokio::main]
 async fn main() {
-	env_logger::init();
+	init_logger();
 	initialize_proc_constants();
 	let mut interactive = true;
 	let mut args = env::args().collect::<Vec<String>>();

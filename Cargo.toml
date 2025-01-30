@@ -30,3 +30,4 @@ insta = "1.42.0"
 rayon = "1.10.0"
 serde = { version = "1.0.217", features = [ "serde_derive" ] }
 serde_json = "1.0.137"
+log = "0.4.25"

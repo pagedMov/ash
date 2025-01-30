@@ -25,7 +25,7 @@ impl ShOpts {
 			trunc_prompt_path: 4,
 			edit_mode: "vi".into(),
 			comp_limit: 100,
-			prompt_highlight: false,
+			prompt_highlight: true,
 			tab_stop: 8,
 			exit_status: PromptStatus {
 				success: " ".into(),

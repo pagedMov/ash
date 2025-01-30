@@ -1003,6 +1003,7 @@ dependencies = [
  "insta",
  "lazy_static",
  "libc",
+ "log 0.4.25",
  "logger",
  "nix 0.29.0",
  "once_cell",
