@@ -442,6 +442,9 @@ fn traverse(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 		NdType::Select {..} => {
 			todo!("handle select")
 		}
+		NdType::CommandSub {..} => {
+			last_status = handle_cmd_sub(node,io)?;
+		}
 		NdType::Subshell {..} => {
 			last_status = handle_subshell(node,io)?;
 		}
@@ -505,6 +508,15 @@ fn handle_func_def(node: Node) -> OxResult<OxWait> {
 		write_logic(|l| l.new_func(&name, &body))?;
 	});
 	Ok(last_status)
+}
+
+pub fn handle_cmd_sub(node: Node, io: ProcIO) -> OxResult<OxWait> {
+	let last_status;
+	dbg!("handling cmd sub");
+	node_operation!(NdType::CommandSub { body }, node, {
+		last_status = event::execute(&body, NdFlags::empty(), None, Some(io))
+	});
+	last_status
 }
 
 fn handle_case(node: Node, io: ProcIO) -> OxResult<OxWait> {
@@ -808,6 +820,7 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 	 * )
 	 * This would produce the output `hello`.
 	 */
+	dbg!("handling subshell");
 	let redirs = node.get_redirs()?;
 	if let NdType::CommandSub { body } = node.nd_type {
 		let var_table = read_vars(|v| v.clone())?;

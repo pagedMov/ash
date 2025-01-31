@@ -1038,14 +1038,14 @@ pub fn escseq_custom(query: &str) -> OxResult<String> {
 	let body = read_meta(|m| m.get_shopt(query))?.unwrap_or_default().trim_matches(['(',')']).to_string();
 	let subshell = Node {
 		command: None,
-		nd_type: NdType::Subshell { body, argv: VecDeque::new() },
+		nd_type: NdType::CommandSub { body },
 		span: Span::new(),
 		flags: NdFlags::VALID_OPERAND,
 		redirs: VecDeque::new()
 	};
 	let (r_pipe,w_pipe) = RustFd::pipe()?;
 	let io = ProcIO::from(None,Some(w_pipe.mk_shared()),None);
-	execute::handle_subshell(subshell, io)?;
+	execute::handle_cmd_sub(subshell, io)?;
 	Ok(r_pipe.read()?.trim().to_string())
 }
 
