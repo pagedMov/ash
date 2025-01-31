@@ -221,7 +221,7 @@ pub enum NdType {
 	Subshell { body: String, argv: VecDeque<Tk> }, // It's a string because we're going to parse it in a subshell later
 	CommandSub { body: String },
 	FuncDef { name: String, body: String },
-	Assignment {name: String, value: Option<String>, op: AssOp },
+	Assignment {name: String, value: Option<String>, op: AssOp, command: Option<Box<Node>> },
 	Command { argv: VecDeque<Tk> },
 	Builtin { argv: VecDeque<Tk> },
 	Function { body: String, argv: VecDeque<Tk> },
@@ -1447,13 +1447,32 @@ pub fn build_assignment(mut ctx: DescentContext) -> OxResult<DescentContext> {
 		} else {
 			Some(value.text().to_string())
 		};
+		let mut argv = VecDeque::new();
+		while ctx.front_tk().is_some_and(|tk| tk.flags().contains(WdFlags::IS_ARG)) {
+			let mut next_tk = ctx.next_tk().unwrap();
+			if argv.is_empty() {
+				next_tk.wd.flags &= !WdFlags::IS_ARG;
+			}
+			argv.push_back(next_tk);
+		}
+		let command = if !argv.is_empty() {
+			let root = parse_and_attach(argv.clone(), VecDeque::new())?;
+			let span = Span::from(argv.front().unwrap().span().start,argv.back().unwrap().span().end);
+			let mut node = Node::from(root,span);
+			node.command = Some(argv.front().unwrap().clone());
+			Some(node.boxed())
+		} else {
+			None
+		};
+
 		let span = ass.span();
 		let node = Node {
 			command: None,
 			nd_type: NdType::Assignment {
 				name: key.to_string(),
 				value,
-				op: op.clone()
+				op: op.clone(),
+				command
 			},
 			span,
 			flags: NdFlags::VALID_OPERAND,

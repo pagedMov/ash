@@ -169,6 +169,7 @@ pub fn tokenize_prompt(ps1: &str) -> VecDeque<PromptTk> {
 
 	while let Some(c) = chars.pop_front() {
 		match c {
+			'\n' => continue, // Ignore raw newlines, allows for more readable PS1 declarations
 			'\\' => {
 				// Flush any accumulated plain text as a token
 				if !buffer.is_empty() {

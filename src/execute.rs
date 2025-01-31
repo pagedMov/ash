@@ -452,7 +452,7 @@ fn traverse(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 			last_status = handle_func_def(node)?;
 		}
 		NdType::Assignment {..} => {
-			last_status = handle_assignment(node)?;
+			last_status = handle_assignment(node, io)?;
 		}
 		NdType::Cmdsep => {
 			last_status = OxWait::new();
@@ -700,8 +700,8 @@ fn handle_chain(node: Node) -> OxResult<OxWait> {
 	Ok(OxWait::Success)
 }
 
-fn handle_assignment(node: Node) -> OxResult<OxWait> {
-	node_operation!(NdType::Assignment { name, value, op }, node, {
+fn handle_assignment(node: Node, io: ProcIO) -> OxResult<OxWait> {
+	node_operation!(NdType::Assignment { name, value, op, command }, node, {
 		match op {
 			AssOp::Equals => {
 				let mut value = value.unwrap_or_default();
@@ -718,20 +718,43 @@ fn handle_assignment(node: Node) -> OxResult<OxWait> {
 					value = expanded.text().to_string();
 				}
 				let value = OxVal::parse(&value).unwrap_or_default();
-				write_vars(|v| v.set_var(&name, value))?;
+				if let Some(cmd_node) = command {
+					let snapshot = SavedEnv::get_snapshot()?;
+					write_vars(|v| v.export_var(&name, &value.to_string()))?;
+					traverse_root(*cmd_node, None, io)?;
+					snapshot.restore_snapshot()?;
+				} else {
+					write_vars(|v| v.set_var(&name, value))?;
+				}
 			}
 			AssOp::PlusEquals => {
 				if let Some(left_val) = read_vars(|v| v.get_var(&name))? {
 					let right_val = OxVal::parse(&value.unwrap_or_default()).map_err(|e| ShError::from_parse(&e, node.span()))?;
 					let result = helper::add_vars(left_val, right_val, node.span())?;
-					write_vars(|v| v.set_var(&name, result))?;
+
+					if let Some(cmd_node) = command {
+						let snapshot = SavedEnv::get_snapshot()?;
+						write_vars(|v| v.export_var(&name, &result.to_string()))?;
+						traverse_root(*cmd_node, None, io)?;
+						snapshot.restore_snapshot()?;
+					} else {
+						write_vars(|v| v.set_var(&name, result))?;
+					}
 				}
 			}
 			AssOp::MinusEquals => {
 				if let Some(left_val) = read_vars(|v| v.get_var(&name))? {
 					let right_val = OxVal::parse(&value.unwrap_or_default()).map_err(|e| ShError::from_parse(&e, node.span()))?;
 					let result = helper::subtract_vars(left_val, right_val, node.span())?;
-					write_vars(|v| v.set_var(&name, result))?;
+
+					if let Some(cmd_node) = command {
+						let snapshot = SavedEnv::get_snapshot()?;
+						write_vars(|v| v.export_var(&name, &result.to_string()))?;
+						traverse_root(*cmd_node, None, io)?;
+						snapshot.restore_snapshot()?;
+					} else {
+						write_vars(|v| v.set_var(&name, result))?;
+					}
 				}
 			}
 		}
