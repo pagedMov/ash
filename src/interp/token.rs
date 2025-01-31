@@ -573,7 +573,7 @@ impl OxTokenizer {
 		if input.starts_with("#!") { // Ignore shebangs
 			let mut lines = input.lines();
 			lines.next();
-			input = lines.collect::<Vec<&str>>().join("\n");
+			input = lines.collect::<Vec<&str>>().join("\n").trim().to_string();
 		}
 		Self { input, char_stream, context: vec![TkState::Command], initialized: false, tokens, spans: VecDeque::new() }
 	}
@@ -815,6 +815,7 @@ impl OxTokenizer {
 								break
 							}
 							'}' if is_braced => {
+								r_chars.next();
 								break
 							}
 							_ => {

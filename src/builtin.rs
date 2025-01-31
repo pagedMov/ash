@@ -527,6 +527,7 @@ pub fn test(mut argv: VecDeque<Tk>) -> OxResult<OxWait> {
 			if arg.text() != "]" {
 				return Err(ShError::from_syntax("Test is missing a closing bracket", arg.span()))
 			}
+			argv.pop_back();
 		} else {
 			return Err(ShError::from_syntax("Found a test with no arguments", command.span()))
 		}
@@ -552,7 +553,13 @@ pub fn test(mut argv: VecDeque<Tk>) -> OxResult<OxWait> {
 			"-S" => do_test(&mut argv, to_meta, |meta| meta.file_type().is_socket(), arg.span())?,
 			"-u" => do_test(&mut argv, to_meta, |meta| meta.mode() & 0o4000 != 0, arg.span())?,
 			"-n" => do_test(&mut argv, string_noop, |st| !st.is_empty(), arg.span())?,
-			"-z" => do_test(&mut argv, string_noop, |st| st.is_empty(), arg.span())?,
+			"-z" => {
+				if argv.is_empty() {
+					true
+				} else {
+					do_test(&mut argv, string_noop, |st| st.is_empty(), arg.span())?
+				}
+			}
 			"-e" => do_test(&mut argv, string_noop, |st| Path::new(st).exists(), arg.span())?,
 			"-r" => do_test(&mut argv, string_noop, |st| access(Path::new(st), AccessFlags::R_OK).is_ok(), arg.span())?,
 			"-w" => do_test(&mut argv, string_noop, |st| access(Path::new(st), AccessFlags::W_OK).is_ok(), arg.span())?,
