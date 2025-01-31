@@ -706,7 +706,7 @@ pub enum OxVal {
 }
 
 impl OxVal {
-	pub fn parse(s: &str) -> Result<Self, String> {
+	pub fn parse(mut s: &str) -> Result<Self, String> {
 		if let Ok(int) = s.parse::<i32>() {
 			return Ok(OxVal::Int(int));
 		}
@@ -715,6 +715,11 @@ impl OxVal {
 		}
 		if let Ok(boolean) = s.parse::<bool>() {
 			return Ok(OxVal::Bool(boolean));
+		}
+		if s.starts_with('"') && s.ends_with('"') {
+			s = s.trim_matches('"');
+		} else if s.starts_with('\'') && s.ends_with('\'') {
+			s = s.trim_matches('\'');
 		}
 		Ok(OxVal::String(s.to_string()))
 	}
@@ -1036,10 +1041,12 @@ impl EnvMeta {
 			in_prompt,
 		}
 	}
-	pub fn stop_timer(&mut self) {
+	pub fn stop_timer(&mut self) -> OxResult<()> {
 		if let Some(start_time) = self.timer_start {
-			self.cmd_duration = Some(start_time.elapsed())
+			self.cmd_duration = Some(start_time.elapsed());
+			write_vars(|v| v.export_var("OX_CMD_TIME", &self.cmd_duration.unwrap().as_millis().to_string()))?;
 		}
+		Ok(())
 	}
 	pub fn start_timer(&mut self) {
 		self.timer_start = Some(Instant::now())

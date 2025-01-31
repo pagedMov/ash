@@ -573,7 +573,7 @@ impl OxTokenizer {
 		if input.starts_with("#!") { // Ignore shebangs
 			let mut lines = input.lines();
 			lines.next();
-			input = lines.collect::<Vec<&str>>().join("\n");
+			input = lines.collect::<Vec<&str>>().join("\n").trim().to_string();
 		}
 		Self { input, char_stream, context: vec![TkState::Command], initialized: false, tokens, spans: VecDeque::new() }
 	}
@@ -815,6 +815,7 @@ impl OxTokenizer {
 								break
 							}
 							'}' if is_braced => {
+								r_chars.next();
 								break
 							}
 							_ => {
@@ -1352,6 +1353,7 @@ impl OxTokenizer {
 				"fi" => self.tokens.push(Tk { tk_type: TkType::Fi, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				"for" => self.tokens.push(Tk { tk_type: TkType::For, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				"do" => self.tokens.push(Tk { tk_type: TkType::Do, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"in" => self.tokens.push(Tk { tk_type: TkType::In, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				"done" => self.tokens.push(Tk { tk_type: TkType::Done, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				"while" => {
 					self.push_ctx(Loop);

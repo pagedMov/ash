@@ -29,10 +29,11 @@ pub const BUILTINS: [&str; 37] = [
 bitflags! {
 	#[derive(Debug)]
 	pub struct EchoFlags: u8 {
-		const USE_ESCAPE = 0b0001;
-		const NO_NEWLINE = 0b0010;
-		const NO_ESCAPE = 0b0100;
-		const STDERR = 0b1000;
+		const USE_ESCAPE = 0b00001;
+		const NO_NEWLINE = 0b00010;
+		const NO_ESCAPE = 0b00100;
+		const STDERR = 0b01000;
+		const EXPAND_OX_ESC = 0b10000;
 	}
 	pub struct CdFlags: u8 {
 		const CHANGE = 0b0001;
@@ -526,6 +527,7 @@ pub fn test(mut argv: VecDeque<Tk>) -> OxResult<OxWait> {
 			if arg.text() != "]" {
 				return Err(ShError::from_syntax("Test is missing a closing bracket", arg.span()))
 			}
+			argv.pop_back();
 		} else {
 			return Err(ShError::from_syntax("Found a test with no arguments", command.span()))
 		}
@@ -551,7 +553,13 @@ pub fn test(mut argv: VecDeque<Tk>) -> OxResult<OxWait> {
 			"-S" => do_test(&mut argv, to_meta, |meta| meta.file_type().is_socket(), arg.span())?,
 			"-u" => do_test(&mut argv, to_meta, |meta| meta.mode() & 0o4000 != 0, arg.span())?,
 			"-n" => do_test(&mut argv, string_noop, |st| !st.is_empty(), arg.span())?,
-			"-z" => do_test(&mut argv, string_noop, |st| st.is_empty(), arg.span())?,
+			"-z" => {
+				if argv.is_empty() {
+					true
+				} else {
+					do_test(&mut argv, string_noop, |st| st.is_empty(), arg.span())?
+				}
+			}
 			"-e" => do_test(&mut argv, string_noop, |st| Path::new(st).exists(), arg.span())?,
 			"-r" => do_test(&mut argv, string_noop, |st| access(Path::new(st), AccessFlags::R_OK).is_ok(), arg.span())?,
 			"-w" => do_test(&mut argv, string_noop, |st| access(Path::new(st), AccessFlags::W_OK).is_ok(), arg.span())?,
@@ -1336,6 +1344,7 @@ pub fn echo(node: Node, mut io: ProcIO,) -> OxResult<OxWait> {
 				}
 				Some('r') => flags |= EchoFlags::STDERR,
 				Some('n') => flags |= EchoFlags::NO_NEWLINE,
+				Some('P') => flags |= EchoFlags::EXPAND_OX_ESC,
 				Some('E') => {
 					if flags.contains(EchoFlags::USE_ESCAPE) {
 						flags &= !EchoFlags::USE_ESCAPE
@@ -1353,8 +1362,11 @@ pub fn echo(node: Node, mut io: ProcIO,) -> OxResult<OxWait> {
 		let text = tk.text();
 		if flags.contains(EchoFlags::USE_ESCAPE) {
 			CString::new(helper::process_ansi_escapes(text)).unwrap()
+		} else if flags.contains(EchoFlags::EXPAND_OX_ESC) {
+			let prompt_expansion = expand::expand_prompt(Some(text.to_string())).unwrap();
+			CString::new(prompt_expansion).unwrap()
 		} else {
-			CString::new(tk.text()).unwrap()
+			CString::new(text).unwrap()
 		}
 	}).collect::<VecDeque<CString>>();
 

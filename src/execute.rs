@@ -512,10 +512,11 @@ fn handle_func_def(node: Node) -> OxResult<OxWait> {
 
 pub fn handle_cmd_sub(node: Node, io: ProcIO) -> OxResult<OxWait> {
 	let last_status;
-	dbg!("handling cmd sub");
+	let snapshot = SavedEnv::get_snapshot()?;
 	node_operation!(NdType::CommandSub { body }, node, {
 		last_status = event::execute(&body, NdFlags::empty(), None, Some(io))
 	});
+	snapshot.restore_snapshot()?;
 	last_status
 }
 
@@ -716,7 +717,8 @@ fn handle_assignment(node: Node) -> OxResult<OxWait> {
 					let expanded = expand::expand_cmd_sub(dummy_tk)?;
 					value = expanded.text().to_string();
 				}
-				write_vars(|v| v.set_var(&name, OxVal::parse(&value).unwrap_or_default()))?;
+				let value = OxVal::parse(&value).unwrap_or_default();
+				write_vars(|v| v.set_var(&name, value))?;
 			}
 			AssOp::PlusEquals => {
 				if let Some(left_val) = read_vars(|v| v.get_var(&name))? {
@@ -820,11 +822,10 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 	 * )
 	 * This would produce the output `hello`.
 	 */
-	dbg!("handling subshell");
 	let redirs = node.get_redirs()?;
 	if let NdType::CommandSub { body } = node.nd_type {
 		let var_table = read_vars(|v| v.clone())?;
-		let expanded_body = expand::expand_var(body, &var_table)?.consume_escapes();
+		let expanded_body = expand::expand_var(body, &var_table)?;
 		node.nd_type = NdType::Subshell { body: expanded_body, argv: VecDeque::new() }
 	} else {
 		expand::expand_arguments(&mut node)?;
@@ -1096,7 +1097,7 @@ fn handle_command(node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 				let Err(_) = execve(&command, &argv, &envp);
 				let err = ShError::from_no_cmd(
 					&format!(
-						"\x1b[31mCommand not found (or not executable):\x1b[0m {}",
+						"\x1b[1;31mCommand not found\x1b[0m - {}",
 						command.to_str().unwrap()
 					),
 					node.span(),

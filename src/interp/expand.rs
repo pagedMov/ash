@@ -244,13 +244,14 @@ pub fn tokenize_prompt(ps1: &str) -> VecDeque<PromptTk> {
 	tokens
 }
 
-pub fn expand_prompt() -> OxResult<String> {
+pub fn expand_prompt(text: Option<String>) -> OxResult<String> {
 	// Determine the default color based on the user ID
 	let default_color = if read_vars(|vars| vars.get_evar("UID").is_some_and(|uid| uid == "0"))? {
 		"31" // Red if uid is 0, aka root user
 	} else {
 		"32" // Green if anyone else
 	};
+	let text_provided = text.is_some();
 
 	// Get the current working directory
 	let cwd: String = read_vars(|vars| vars.get_evar("PWD").map_or("".into(), |cwd| cwd).to_string())?;
@@ -263,9 +264,9 @@ pub fn expand_prompt() -> OxResult<String> {
 	};
 
 	// Get the PS1 environment variable or use a default prompt
-	let ps1 = read_vars(|vars| vars.get_evar("PS1"))?;
+	let ps1 = if text_provided { text } else { read_vars(|vars| vars.get_evar("PS1"))? };
 	let use_default = ps1.clone().is_none_or(|ps1| ps1.trim().is_empty());
-	let ps1 = if use_default {
+	let ps1 = if use_default && !text_provided {
 		format!("\\n{}\\n\\e[{}mdebug \\$\\e[36m>\\e[0m ", default_path, default_color)
 	} else {
 		ps1.unwrap()
