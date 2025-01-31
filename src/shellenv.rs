@@ -1230,7 +1230,30 @@ impl SavedEnv {
 		Ok(Self { vars, logic, meta })
 	}
 	pub fn restore_snapshot(self) -> OxResult<()> {
-		write_vars(|vars| *vars = self.vars)?;
+		let vars_to_unset = {
+			let old_env_vars = self.vars.borrow_evars();
+			let mut new_env_vars = read_vars(|v| v.borrow_evars().clone())?;
+			let mut result = HashMap::new();
+
+			let new_keys = new_env_vars.clone().into_keys();
+			for new_key in new_keys {
+				if !old_env_vars.contains_key(&new_key) {
+					let entry = new_env_vars.remove(&new_key).unwrap();
+					result.insert(new_key,entry);
+				}
+			}
+			result
+		};
+		for var in vars_to_unset.keys() {
+			env::remove_var(&var);
+		}
+
+		write_vars(|vars| {
+			*vars = self.vars;
+			for (key, val) in vars.borrow_evars().clone().iter() {
+				vars.export_var(&key, &val);
+			}
+		})?;
 		write_logic(|log| *log = self.logic)?;
 		write_meta(|meta| *meta = self.meta)?;
 		Ok(())
