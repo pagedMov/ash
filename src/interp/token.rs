@@ -701,7 +701,7 @@ impl OxTokenizer {
 				let is_last_word = words.peek().is_none();
 				if is_command {
 					if let Some(alias) = aliases.get(word.trim()) {
-						*word = alias.clone();
+						*word = format!("{} ", alias.clone());
 						replaced = true;
 					}
 					is_command = false;
@@ -709,11 +709,7 @@ impl OxTokenizer {
 				if word.ends_with(';') || word.ends_with('\n') {
 					is_command = true;
 				}
-				if is_last_word && !word.trim().is_empty() {
-					new_input.push_str(word);
-				} else if !word.trim().is_empty() {
-					new_input.push_str(format!("{} ",word).as_str());
-				}
+				new_input.push_str(&word);
 			}
 
 			self.input = new_input;
@@ -835,27 +831,30 @@ impl OxTokenizer {
 					let expanded = format!("{}{}{}",left,value,remainder).trim_matches([' ', '\t']).to_string();
 					new_input.push(expanded);
 					replaced = true;
-				}
-				if &word == "while" || &word == "until" || &word == "for" {
-					/*
-					 * Here we are going to defer the expansion of variables until later.
-					 * If we expand them here, they become static strings in the loop
-					 */
-					while let Some(word) = words.pop_front() {
-						new_input.push(word.trim().to_string());
-						if &word == "done" {
-							break
+				} else {
+					if &word == "while" || &word == "until" || &word == "for" {
+						/*
+						 * Here we are going to defer the expansion of variables until later.
+						 * If we expand them here, they become static strings in the loop
+						 */
+						while let Some(word) = words.pop_front() {
+							new_input.push(word.trim().to_string());
+							if &word == "done" {
+								break
+							}
 						}
 					}
-				}
-				if is_command {
-					is_command = false;
-				}
-				if word.ends_with([';','\n']) {
-					is_command = true;
-				}
-				if !word.trim().is_empty() && !replaced { new_input.push(word.trim_matches(' ').to_string()); }
+					if is_command {
+						is_command = false;
+					}
+					if word.ends_with([';','\n']) {
+						is_command = true;
+					}
+					if !word.trim().is_empty() { new_input.push(word.trim_matches(' ').to_string()); }
 			}
+			}
+
+			new_input.extend(words.drain(..));
 
 			self.input = new_input.join(" ");
 		}
@@ -1186,11 +1185,11 @@ impl OxTokenizer {
 			write_meta(|m| m.set_last_input(&self.input))?;
 			self.initialized = true;
 		}
-		//dbg!(&self.input);
 		let remainder = if expand { self.expand_one()? } else { String::new() };
+		//dbg!(&self.input);
 		let mut wd = WordDesc::empty();
 		while !self.char_stream.is_empty() {
-		//	dbg!(&self.char_stream);
+			//dbg!(&self.char_stream);
 			if *self.ctx() == DeadEnd && self.char_stream.front().is_some_and(|ch| !matches!(ch, ';' | '\n')) {
 				return Err(ShError::from_parse("Expected a semicolon or newline here", wd.span))
 			}
