@@ -704,7 +704,8 @@ fn handle_assignment(node: Node) -> OxResult<OxWait> {
 					let expanded = expand::expand_cmd_sub(dummy_tk)?;
 					value = expanded.text().to_string();
 				}
-				write_vars(|v| v.set_var(&name, OxVal::parse(&value).unwrap_or_default()))?;
+				let value = OxVal::parse(&value).unwrap_or_default();
+				write_vars(|v| v.set_var(&name, value))?;
 			}
 			AssOp::PlusEquals => {
 				if let Some(left_val) = read_vars(|v| v.get_var(&name))? {

@@ -706,7 +706,7 @@ pub enum OxVal {
 }
 
 impl OxVal {
-	pub fn parse(s: &str) -> Result<Self, String> {
+	pub fn parse(mut s: &str) -> Result<Self, String> {
 		if let Ok(int) = s.parse::<i32>() {
 			return Ok(OxVal::Int(int));
 		}
@@ -715,6 +715,11 @@ impl OxVal {
 		}
 		if let Ok(boolean) = s.parse::<bool>() {
 			return Ok(OxVal::Bool(boolean));
+		}
+		if s.starts_with('"') && s.ends_with('"') {
+			s = s.trim_matches('"');
+		} else if s.starts_with('\'') && s.ends_with('\'') {
+			s = s.trim_matches('\'');
 		}
 		Ok(OxVal::String(s.to_string()))
 	}
