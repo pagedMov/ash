@@ -16,6 +16,8 @@ use crate::shellenv::read_logic;
 use crate::shellenv::read_meta;
 use crate::shellenv::read_vars;
 use crate::shellenv::write_meta;
+use crate::shellenv::EnvFlags;
+use crate::shellenv::PARAMS;
 use crate::OxResult;
 use crate::builtin::BUILTINS;
 
@@ -788,13 +790,51 @@ impl OxTokenizer {
 			let mut words = self.split_input().into_iter().collect::<VecDeque<String>>();
 			let mut new_input = vec![];
 
-			while let Some(mut word) = words.pop_front() {
-				if word.starts_with('$') {
-					let var_candidate = word.strip_prefix('$').unwrap();
-					if let Some(var) = vartable.get_var(var_candidate) {
-						word = var.to_string();
-						replaced = true;
+			while let Some(word) = words.pop_front() {
+				if word.has_varsub() {
+					let (left,right) = helper::split_at_varsub(&word);
+					if right.is_empty() {
+						new_input.push(left);
+						continue
 					}
+					let mut middle = String::new();
+					let is_braced = right.starts_with('{');
+					let mut r_chars = right.chars().peekable();
+					if is_braced {
+						r_chars.next();
+					}
+					while let Some(ch) = r_chars.peek() {
+						match ch {
+							'\\' => {
+								let next = r_chars.next().unwrap();
+								middle.push(next);
+								if let Some(esc_ch) = r_chars.next() {
+									middle.push(esc_ch)
+								}
+							}
+							'"' | '\'' | ' ' | '\t' | ';' | '\n' | '/' => {
+								// TODO: Find a better way to break this loop
+								// Tried 'ch.is_whitespace() || !ch.is_alphanumeric()' but that failed to expand params
+								// Something similar will probably work
+								break
+							}
+							'}' if is_braced => {
+								break
+							}
+							_ => {
+								let next = r_chars.next().unwrap();
+								middle.push(next);
+							}
+						}
+						if PARAMS.contains(&middle.as_str()) {
+							break
+						}
+					}
+					let value = vartable.get_var(&middle).unwrap_or_default();
+					let remainder = r_chars.collect::<String>();
+					let expanded = format!("{}{}{}",left,value,remainder).trim_matches([' ', '\t']).to_string();
+					new_input.push(expanded);
+					replaced = true;
 				}
 				if &word == "while" || &word == "until" || &word == "for" {
 					/*
@@ -814,7 +854,7 @@ impl OxTokenizer {
 				if word.ends_with([';','\n']) {
 					is_command = true;
 				}
-				if !word.trim().is_empty() { new_input.push(word.trim_matches(' ').to_string()); }
+				if !word.trim().is_empty() && !replaced { new_input.push(word.trim_matches(' ').to_string()); }
 			}
 
 			self.input = new_input.join(" ");
@@ -825,7 +865,6 @@ impl OxTokenizer {
 		Ok(())
 	}
 	fn cmd_sub_pass(&mut self) -> OxResult<()> {
-		let var_table = read_vars(|v| v.clone())?;
 		let mut replaced = true;
 
 		while replaced {
@@ -1141,19 +1180,19 @@ impl OxTokenizer {
 		 * Instead, we are going to track context and parse the input one logical unit at a time
 		 */
 		use crate::interp::token::TkState::*;
+
 		if !self.initialized {
 			self.precompute_spans();
 			write_meta(|m| m.set_last_input(&self.input))?;
 			self.initialized = true;
 		}
+		//dbg!(&self.input);
 		let remainder = if expand { self.expand_one()? } else { String::new() };
 		let mut wd = WordDesc::empty();
 		while !self.char_stream.is_empty() {
+		//	dbg!(&self.char_stream);
 			if *self.ctx() == DeadEnd && self.char_stream.front().is_some_and(|ch| !matches!(ch, ';' | '\n')) {
 				return Err(ShError::from_parse("Expected a semicolon or newline here", wd.span))
-			}
-			if *self.ctx() == Arg {
-				wd = wd.add_flag(WdFlags::IS_ARG)
 			}
 			match self.char_stream.front().unwrap() {
 				'\\' => {
@@ -1168,6 +1207,7 @@ impl OxTokenizer {
 					let sep = self.advance().unwrap();
 					wd = wd.add_char(sep);
 					self.tokens.push(Tk::cmdsep(&wd, wd.span.end));
+					if *self.ctx() == Arg { self.pop_ctx(); }
 					if *self.ctx() == DeadEnd {
 						while self.context.len() != 1 {
 							if !matches!(*self.ctx(), For | FuncDef | Loop | If | Case | Select) {
@@ -1263,7 +1303,7 @@ impl OxTokenizer {
 				DQuote | SQuote => self.string_context(take(&mut wd), expand)?,
 				VarDec | SingleVarDec => self.vardec_context(take(&mut wd))?,
 				ArrDec => self.arrdec_context(take(&mut wd))?,
-				Subshell | CommandSub => self.subshell_context(take(&mut wd))?,
+				Subshell | CommandSub => self.subshell_context(take(&mut wd), expand)?,
 				FuncBody => self.func_context(take(&mut wd))?,
 				Case => self.case_context(take(&mut wd), expand)?,
 				Loop => self.loop_context(take(&mut wd)),
@@ -1285,6 +1325,7 @@ impl OxTokenizer {
 		// We need to include those unprocessed characters, and the unprocessed remainder from expand_one() here
 		let remaining_input: String = self.char_stream.iter().collect();
 		self.input = format!("{}{}",remaining_input,remainder);
+		//dbg!(&self.tokens.iter().map(|tk| (tk.class(),tk.text())).collect::<Vec<(TkType,&str)>>());
 		Ok(take(&mut self.tokens))
 	}
 	fn command_context(&mut self, mut wd: WordDesc, expand: bool) -> OxResult<()> {
@@ -1356,17 +1397,19 @@ impl OxTokenizer {
 				let mut val_wd = wd.clone();
 				val_wd.text = val.to_string();
 				let mut sub_tokenizer = OxTokenizer::new(&val_wd.text);
-				let mut val_tk = VecDeque::from(sub_tokenizer.tokenize_one(expand)?);
-				val_tk.pop_front();
-				if val_tk.is_empty() {
-					return Err(ShError::from_syntax("No value found for this assignment", wd.span))
+				let mut tokens = VecDeque::from(sub_tokenizer.tokenize_one(expand)?);
+				let mut new_val = String::new();
+				tokens.pop_front(); // Ignore SOI
+				while let Some(tk) = tokens.pop_front() {
+					if !expand && tk.class() == TkType::CommandSub {
+						let reconstructed = format!("{}{}{}","$(",tk.text(),')');
+						new_val.push_str(&reconstructed);
+					} else {
+						new_val.push_str(tk.text());
+					}
 				}
-				let mut val_tk = val_tk.pop_front().unwrap();
 
-				if val.starts_with('"') && val.ends_with('"') {
-					val_tk.tk_type = TkType::String;
-					val_tk.wd.text = val.trim_matches('"').to_string();
-				}
+				let val_tk = Tk::new(new_val,wd.span,wd.flags);
 
 				let mut expanded = if expand { expand::expand_token(val_tk, true)? } else { VecDeque::from([val_tk]) };
 				if let Some(tk) = expanded.pop_front() {
@@ -1390,6 +1433,10 @@ impl OxTokenizer {
 	}
 	fn arg_context(&mut self, mut wd: WordDesc, expand: bool) -> OxResult<()> {
 		use crate::interp::token::TkState::*;
+		if self.char_stream.front().is_some_and(|ch| matches!(ch, ';' | '\n')) {
+			self.pop_ctx();
+			return Ok(())
+		}
 		wd = self.complete_word(wd,None)?;
 		match wd.text.as_str() {
 			"||" | "&&" | "|" | "|&" => {
@@ -1595,7 +1642,7 @@ impl OxTokenizer {
 		self.pop_ctx();
 		Ok(())
 	}
-	fn subshell_context(&mut self, mut wd: WordDesc) -> OxResult<()> {
+	fn subshell_context(&mut self, mut wd: WordDesc, expand: bool) -> OxResult<()> {
 		use crate::interp::token::TkState::*;
 		self.advance();
 		if *self.ctx() == CommandSub { self.advance(); }
@@ -1634,7 +1681,7 @@ impl OxTokenizer {
 			}
 			_ => unreachable!()
 		};
-		if *self.ctx() == CommandSub {
+		if expand && *self.ctx() == CommandSub {
 			tk = expand_cmd_sub(tk)?;
 		}
 		if !paren_stack.is_empty() {
@@ -1669,7 +1716,7 @@ impl OxTokenizer {
 			}
 		}
 		wd = wd.set_span(self.spans.pop_front().unwrap_or_default());
-		wd.text = wd.text.trim().to_string();
+		wd.text = wd.text.to_string();
 		if !brace_stack.is_empty() {
 			return Err(ShError::from_syntax("This function is missing a closing brace", wd.span))
 		}
@@ -1915,11 +1962,23 @@ impl OxTokenizer {
 				'\n' | ';' | ' ' | '\t' if !bracket_stack.is_empty() || !paren_stack.is_empty() || dub_quote || sng_quote => {
 					wd = wd.add_char(ch)
 				}
-				'\n' | ';' | ' ' | '\t' => {
+				' ' | '\t' => {
+					if wd.text.is_empty() {
+						wd = wd.add_char(ch);
+						while self.char_stream.front().is_some_and(|ch| matches!(ch, ' ' | '\t')) {
+							wd = wd.add_char(ch)
+						}
+						return Ok(wd)
+					} else {
+						self.char_stream.push_front(ch);
+					}
+					break;
+				}
+				'\n' | ';' => {
 					// If we start out with a space, grab it and all of the following meta characters and put it in one word
 					if wd.text.is_empty() {
 						wd = wd.add_char(ch);
-						while self.char_stream.front().is_some_and(|ch| matches!(ch, '\n' | ';' | ' ' | '\t')) {
+						while self.char_stream.front().is_some_and(|ch| matches!(ch, '\n' | ';')) {
 							wd = wd.add_char(ch)
 						}
 						return Ok(wd)

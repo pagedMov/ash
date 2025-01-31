@@ -59,6 +59,7 @@ pub trait StrExtension {
 	fn trim_command_sub(&self) -> Option<String>;
 	fn split_last(&self, pat: &str) -> Option<(String,String)>;
 	fn has_unescaped(&self, pat: &str) -> bool;
+	fn has_varsub(&self) -> bool;
 	fn has_unquoted(&self, pat: &str) -> bool;
 	fn trim_quotes(&self) -> String;
 	fn split_outside_quotes(&self) -> Vec<String>;
@@ -68,6 +69,45 @@ pub trait StrExtension {
 }
 
 impl StrExtension for str {
+	fn has_varsub(&self) -> bool {
+		let mut chars = self.chars().peekable();
+		let mut paren_stack = vec![];
+		while let Some(ch) = chars.next() {
+			match ch {
+				'$' if chars.peek() != Some(&'(') => return true,
+				'\\' => {
+					chars.next();
+				}
+				'(' => {
+					paren_stack.push('(');
+					while let Some(paren_ch) = chars.next() {
+						match paren_ch {
+							'\\' => {
+								chars.next();
+							}
+							')' => {
+								paren_stack.pop();
+								if paren_stack.is_empty() {
+									break
+								}
+							}
+							'(' => paren_stack.push('('),
+							_ => { /* Do nothing */ }
+						}
+					}
+				}
+				'\'' => {
+					while let Some(squote_ch) = chars.next() {
+						if squote_ch == '\'' {
+							break
+						}
+					}
+				}
+				_ => { /* Do nothing */ }
+			}
+		}
+		false
+	}
 	fn consume_escapes(&self) -> String {
 		// This function consumes one layer of escape characters
 		// Meaning that double escapes will still be left with one escape, i.e. \\ -> \
@@ -289,6 +329,47 @@ impl StrExtension for str {
 		false
 	}
 
+}
+
+pub fn split_at_varsub(word: &str) -> (String,String) {
+	let mut left = String::new();
+	let mut right = String::new();
+	let mut chars = word.chars().peekable();
+	let mut brace_stack = vec![];
+	while let Some(ch) = chars.next() {
+		match ch {
+			'\\' => {
+				left.push(ch);
+				if let Some(esc_ch) = chars.next() {
+					left.push(ch);
+				}
+			}
+			'{' => {
+				brace_stack.push(ch);
+				left.push(ch);
+				while let Some(ch) = chars.next() {
+					left.push(ch);
+					match ch {
+						'{' => brace_stack.push(ch),
+						'}' => {
+							brace_stack.pop();
+							if brace_stack.is_empty() {
+								break
+							}
+						}
+						_ => { /* Do nothing */ }
+					}
+				}
+			}
+			'$' if chars.peek() != Some(&'(') => {
+				right = chars.collect::<String>();
+				break
+			}
+			_ => left.push(ch)
+		}
+	}
+	let result = (left,right);
+	result
 }
 
 /// I don't feel like learning how to use a debugger

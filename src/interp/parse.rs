@@ -1428,7 +1428,7 @@ pub fn build_func_def(mut ctx: DescentContext) -> OxResult<DescentContext> {
 		let body = body_tk.text();
 		let node = Node {
 			command: Some(def.clone()),
-			nd_type: NdType::FuncDef { name: name.to_string(), body: body.to_string() },
+			nd_type: NdType::FuncDef { name: name.to_string(), body: body.trim().to_string() },
 			span: def.span(),
 			flags: NdFlags::empty(),
 			redirs: VecDeque::new()

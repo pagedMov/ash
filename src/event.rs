@@ -123,7 +123,7 @@ impl ShErrorWindow {
 			pos += 1
 		}
 
-		let first_line = lines.nth(line).unwrap();
+		let first_line = lines.nth(line).map(|ln| ln.to_string()).unwrap_or_default();
 		let second_line = {
 			let caret = String::from("\x1b[31m^\x1b[0m");
 			let padding = String::from(" ").repeat(col);

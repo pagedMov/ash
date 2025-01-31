@@ -361,11 +361,9 @@ pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 
 	// Check if any delimiters or keywords remain unclosed
 	if !delim_stack.is_empty() {
-		helper::breakpoint(format!("delim_stack: {}", delim_stack.last().unwrap()));
 		return Ok(false);
 	}
 	if !keyword_stack.is_empty() {
-		helper::breakpoint(format!("kw_stack: {}", keyword_stack.last().unwrap()));
 		return Ok(false);
 	}
 
@@ -510,7 +508,7 @@ pub fn highlight_token(tk: Tk, path: &str) -> String {
 			return style_text(OPERATOR,tk.text());
 		}
     TkT::FuncDef => {
-			let func_name = tk.text().strip_suffix("()").unwrap();
+			let func_name = tk.text();
 			let hl_name = style_text(STRING, func_name);
 			return format!("{}{}",hl_name,"()");
 		}
@@ -526,7 +524,10 @@ pub fn highlight_token(tk: Tk, path: &str) -> String {
 		}
 
     TkT::ProcessSub |
-		TkT::CommandSub |
+		TkT::CommandSub => {
+			let hl_body = style_text(KEYWORD,tk.text());
+			return format!("{}{}{}{}","$(",hl_body,RESET,')');
+		}
     TkT::Subshell => {
 			let hl_body = style_text(KEYWORD,tk.text());
 			return format!("{}{}{}{}",'(',hl_body,RESET,')');

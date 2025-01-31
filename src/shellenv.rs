@@ -13,6 +13,8 @@ use crate::{event::{self, ShError}, interp::{helper::{self, VecDequeExtension}, 
 #[derive(Debug)]
 pub struct DisplayWaitStatus(pub WaitStatus);
 
+pub const PARAMS: [&str;8] = ["#", "@", "*", "$", "!", "?", "-", "_"];
+
 impl fmt::Display for DisplayWaitStatus {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match &self.0 {
@@ -112,6 +114,7 @@ bitflags! {
 		const HIST_SUB         = 0b00000001000000000000000000000000; // set -H
 		const NO_CD_SYMLINKS   = 0b00000010000000000000000000000000; // set -P
 		const INHERIT_RET      = 0b00000100000000000000000000000000; // set -T
+		const SOURCING         = 0b00001000000000000000000000000000;
 	}
 	#[derive(Debug,Copy,Clone)]
 	pub struct JobCmdFlags: i8 { // Options for the jobs builtin
@@ -1299,6 +1302,9 @@ pub fn source_file(path: PathBuf) -> OxResult<()> {
 	let mut buffer = String::new();
 	file.read_to_string(&mut buffer).map_err(|_| ShError::from_io())?;
 	write_meta(|meta| meta.set_last_input(&buffer.clone()))?;
+	write_meta(|m| m.flags |= EnvFlags::SOURCING)?;
 
-	event::execute(&buffer, NdFlags::empty(), None, None).map(|_| ())
+	let result = event::execute(&buffer, NdFlags::empty(), None, None).map(|_| ());
+	write_meta(|m| m.flags &= !EnvFlags::SOURCING)?;
+	result
 }
