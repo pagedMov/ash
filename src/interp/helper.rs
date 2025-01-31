@@ -1127,8 +1127,8 @@ pub fn escseq_non_printing_sequence(chars: &mut VecDeque<char>, result: &mut Str
 
 /// Handles the current working directory.
 pub fn escseq_working_directory() -> OxResult<String> {
-	let mut cwd = read_vars(|vars| vars.get_evar("PWD").map_or(String::new(), |pwd| pwd.to_string()))?;
-	let home = read_vars(|vars| vars.get_evar("HOME").map_or("".into(), |home| home))?;
+	let mut cwd = env::var("PWD").unwrap_or_default();
+	let home = env::var("HOME").unwrap_or_default();
 	if cwd.starts_with(&home) {
 		cwd = cwd.replacen(&home, "~", 1); // Use `replacen` to replace only the first occurrence
 	}
