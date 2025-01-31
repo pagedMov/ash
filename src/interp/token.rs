@@ -1352,6 +1352,7 @@ impl OxTokenizer {
 				"fi" => self.tokens.push(Tk { tk_type: TkType::Fi, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				"for" => self.tokens.push(Tk { tk_type: TkType::For, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				"do" => self.tokens.push(Tk { tk_type: TkType::Do, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"in" => self.tokens.push(Tk { tk_type: TkType::In, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				"done" => self.tokens.push(Tk { tk_type: TkType::Done, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				"while" => {
 					self.push_ctx(Loop);

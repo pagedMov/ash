@@ -1027,11 +1027,7 @@ pub fn format_cmd_runtime(dur: Duration) -> String {
 }
 
 pub fn escseq_cmdtime() -> OxResult<String> {
-	if let Some(duration) = read_meta(|m| m.get_cmd_duration())? {
-		Ok(format_cmd_runtime(duration))
-	} else {
-		Ok(String::new())
-	}
+	Ok(env::var("OX_CMD_TIME").unwrap_or_default())
 }
 
 pub fn escseq_custom(query: &str) -> OxResult<String> {

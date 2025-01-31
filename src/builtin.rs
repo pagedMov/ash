@@ -29,10 +29,11 @@ pub const BUILTINS: [&str; 37] = [
 bitflags! {
 	#[derive(Debug)]
 	pub struct EchoFlags: u8 {
-		const USE_ESCAPE = 0b0001;
-		const NO_NEWLINE = 0b0010;
-		const NO_ESCAPE = 0b0100;
-		const STDERR = 0b1000;
+		const USE_ESCAPE = 0b00001;
+		const NO_NEWLINE = 0b00010;
+		const NO_ESCAPE = 0b00100;
+		const STDERR = 0b01000;
+		const EXPAND_OX_ESC = 0b10000;
 	}
 	pub struct CdFlags: u8 {
 		const CHANGE = 0b0001;
@@ -1336,6 +1337,7 @@ pub fn echo(node: Node, mut io: ProcIO,) -> OxResult<OxWait> {
 				}
 				Some('r') => flags |= EchoFlags::STDERR,
 				Some('n') => flags |= EchoFlags::NO_NEWLINE,
+				Some('P') => flags |= EchoFlags::EXPAND_OX_ESC,
 				Some('E') => {
 					if flags.contains(EchoFlags::USE_ESCAPE) {
 						flags &= !EchoFlags::USE_ESCAPE
@@ -1353,8 +1355,11 @@ pub fn echo(node: Node, mut io: ProcIO,) -> OxResult<OxWait> {
 		let text = tk.text();
 		if flags.contains(EchoFlags::USE_ESCAPE) {
 			CString::new(helper::process_ansi_escapes(text)).unwrap()
+		} else if flags.contains(EchoFlags::EXPAND_OX_ESC) {
+			let prompt_expansion = expand::expand_prompt(Some(text.to_string())).unwrap();
+			CString::new(prompt_expansion).unwrap()
 		} else {
-			CString::new(tk.text()).unwrap()
+			CString::new(text).unwrap()
 		}
 	}).collect::<VecDeque<CString>>();
 

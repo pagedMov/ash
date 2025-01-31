@@ -184,6 +184,7 @@ fn main_noninteractive(args: Vec<String>, script_path: Option<String>) -> OxResu
 		input = args[2].clone(); // Store the command string
 	} else {
 		let script_name = if let Some(path) = script_path { path } else { args[1].clone() };
+		dbg!(&script_name);
 		let path = PathBuf::from(script_name);
 		if args.len() > 2 {
 			pos_params = args[2..].to_vec();

@@ -1036,10 +1036,12 @@ impl EnvMeta {
 			in_prompt,
 		}
 	}
-	pub fn stop_timer(&mut self) {
+	pub fn stop_timer(&mut self) -> OxResult<()> {
 		if let Some(start_time) = self.timer_start {
-			self.cmd_duration = Some(start_time.elapsed())
+			self.cmd_duration = Some(start_time.elapsed());
+			write_vars(|v| v.export_var("OX_CMD_TIME", &self.cmd_duration.unwrap().as_millis().to_string()))?;
 		}
+		Ok(())
 	}
 	pub fn start_timer(&mut self) {
 		self.timer_start = Some(Instant::now())
