@@ -5,7 +5,7 @@ use log::debug;
 use once_cell::sync::Lazy;
 use rustyline::{completion::{Candidate, Completer, FilenameCompleter}, error::ReadlineError, highlight::Highlighter, hint::{Hint, Hinter}, history::{FileHistory, History}, validate::{ValidationContext, ValidationResult, Validator}, Context, Helper, Validator};
 use skim::{prelude::{Key, SkimItemReader, SkimOptionsBuilder}, Skim};
-use std::{borrow::Cow, collections::{HashMap, HashSet, VecDeque}, env, io::stdout, mem, path::{Path, PathBuf}};
+use std::{borrow::Cow, collections::{HashMap, HashSet, VecDeque}, env, fmt::Display, io::stdout, mem, path::{Path, PathBuf}};
 
 use crate::{builtin::BUILTINS, event::ShError, interp::{expand, helper::{self, StrExtension}, parse::Span, token::{AssOp, OxTokenizer, Tk, WdFlags, KEYWORDS}}, shellenv::{read_logic, read_vars}};
 
@@ -32,12 +32,100 @@ pub const COMMAND: &str = GREEN;
 pub const KEYWORD: &str = YELLOW;
 pub const STRING: &str = BLUE;
 pub const ESCAPED: &str = CYAN;
-pub const OPERATOR: &str = BRIGHT_MAGENTA;
+pub const OPERATOR: &str = CYAN;
 pub const NUMBER: &str = BRIGHT_BLUE;
 pub const PATH: &str = BRIGHT_CYAN;
 pub const VARSUB: &str = MAGENTA;
 pub const COMMENT: &str = BRIGHT_BLACK;
 pub const FUNCNAME: &str = CYAN;
+
+pub struct CompRegistry {
+	path_completer: FilenameCompleter,
+	cmds: HashMap<String, Vec<CompOption>>
+}
+
+impl CompRegistry {
+	pub fn new() -> Self {
+		let cmds = HashMap::new();
+		let path_completer = FilenameCompleter::new();
+		Self { cmds, path_completer }
+	}
+	pub fn get_cmd(&self, key: String) -> Option<Vec<CompOption>> {
+		let result = self.cmds.get(&key).map(|comp_vec| comp_vec.to_vec());
+		result
+	}
+}
+
+#[derive(Clone,Debug)]
+pub enum CompType {
+	Variables,
+	EnvVars,
+	Params,
+	AbsPaths,
+	Paths,
+	Directories,
+	Tilde,
+	Commands,
+	Aliases,
+	Functions,
+	Builtins,
+	Keywords,
+	Users,
+	Groups,
+	Pids,
+	Jobs,
+	Hosts,
+	Mounts,
+	Services
+}
+
+#[derive(Clone,Debug)]
+pub struct CompOption {
+	value: String,
+	desc: Option<String>,
+	comp_type: CompType,
+	priority: usize
+}
+
+impl Candidate for CompOption {
+	fn display(&self) -> &str {
+		&self.value
+	}
+	fn replacement(&self) -> &str {
+	  &self.value
+	}
+}
+
+impl CompOption {
+	pub fn path(path: &str) -> Self {
+		Self {
+			value: path.to_string(),
+			desc: None,
+			comp_type: CompType::Paths,
+			priority: 0
+		}
+	}
+	pub fn by_type(categories: Vec<CompType>) -> Vec<Self> {
+		let mut options = vec![];
+		for category in categories {
+			match category {
+				_ => unimplemented!()
+			}
+		}
+		options
+	}
+	pub fn by_cmd(cmd: String) -> Vec<Self> {
+		let mut options = vec![];
+		options
+	}
+}
+
+impl Display for CompOption {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f,"{}",self.value)
+	}
+}
+
 
 pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 	let mut delim_stack = vec![]; // Stack for delimiters like (), {}, []
@@ -484,13 +572,13 @@ impl Default for OxHelper {
 }
 
 impl Completer for OxHelper {
-	type Candidate = String;
+	type Candidate = CompOption;
 
 	fn complete(
 		&self,
 		line: &str,
 		pos: usize,
-		_: &Context<'_>,
+		ctx: &Context<'_>,
 	) -> Result<(usize, Vec<Self::Candidate>), ReadlineError> {
 		let mut completions = Vec::new();
 		let line = line.to_string();
@@ -499,34 +587,28 @@ impl Completer for OxHelper {
 		// Determine if this is a file path or a command completion
 		if !line.is_empty() && (num_words > 1 || line.split(" ").into_iter().next().is_some_and(|wrd| wrd.starts_with(['.','/','~']))) {
 			//TODO: Handle these unwraps
-			let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE")).unwrap().unwrap_or_else(|| -> String {
-				let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
-				format!("{home}/.ox_hist")
-			});
-			let hist_path = PathBuf::from(hist_path);
-
-			// Delegate to FilenameCompleter for file path completion
-			let mut history = FileHistory::new();
-			history.load(&hist_path).unwrap();
-			let (start, matches) = self.filename_comp.complete(&line, pos, &Context::new(&history))?;
+			let (start, matches) = self.filename_comp.complete(&line, pos, ctx)?;
 			completions.extend(matches.iter().map(|c| c.display().to_string()));
+			let mut comp_opts = completions.into_iter().map(|opt| {
+				CompOption::path(&opt)
+			}).collect::<Vec<CompOption>>();
 
 			// Invoke fuzzyfinder if there are matches
-			if !completions.is_empty() && completions.len() > 1 {
-				if let Some(selected) = skim_comp(completions.clone()) {
+			if !comp_opts.is_empty() && comp_opts.len() > 1 {
+				if let Some(selected) = skim_comp(comp_opts.clone()) {
 					let result = helper::slice_completion(&line, &selected);
 					let unfinished = line.split_whitespace().last().unwrap();
-					let result = format!("{unfinished}{result}");
+					let result = CompOption::path(&format!("{unfinished}{result}"));
 					return Ok((start, vec![result]));
 				}
 			}
 
 			// Return completions, starting from the beginning of the word
-			if let Some(candidate) = completions.pop() {
-				let result = helper::slice_completion(&line, &candidate);
-				completions.push(result);
+			if let Some(candidate) = comp_opts.pop() {
+				let result = CompOption::path(&helper::slice_completion(&line, &candidate.to_string()));
+				comp_opts.push(result);
 			}
-			return Ok((pos, completions))
+			return Ok((pos, comp_opts))
 		}
 
 		// Command completion
@@ -538,23 +620,32 @@ impl Completer for OxHelper {
 			.cloned(), // Clone matched command names
 		);
 
+		let mut comp_opts = completions.into_iter().map(|opt| {
+			CompOption {
+				value: opt,
+				desc: None,
+				comp_type: CompType::Paths,
+				priority: 0
+			}
+		}).collect::<Vec<CompOption>>();
 		// Invoke fuzzyfinder if there are matches
-		if completions.len() > 1 {
-			if let Some(selected) = skim_comp(completions.clone()) {
-				let result = helper::slice_completion(&line, &selected);
+		if comp_opts.len() > 1 {
+			if let Some(selected) = skim_comp(comp_opts.clone()) {
+				let result = CompOption::path(&helper::slice_completion(&line, &selected));
 				return Ok((pos, vec![result]));
 			}
 		}
-		if let Some(candidate) = completions.pop() {
-			let result = helper::slice_completion(&line, &candidate);
-			completions.push(result);
+		if let Some(candidate) = comp_opts.pop() {
+			let expanded = helper::slice_completion(&line, &candidate.to_string());
+			let result = CompOption::path(&expanded);
+			comp_opts.push(result);
 		}
 		// Return completions, starting from the beginning of the word
-		Ok((pos, completions))
+		Ok((pos, comp_opts))
 	}
 }
 
-pub fn skim_comp(options: Vec<String>) -> Option<String> {
+pub fn skim_comp(options: Vec<CompOption>) -> Option<String> {
 	let mut stdout = stdout();
 
 	let (init_col, _) = cursor::position().unwrap();
@@ -563,7 +654,7 @@ pub fn skim_comp(options: Vec<String>) -> Option<String> {
 	let height = options.len().min(10) as u16; // Set maximum number of options to display
 
 	// Prepare options for skim
-	let options_join = options.join("\n");
+	let options_join = options.iter().map(|opt| opt.to_string()).collect::<Vec<String>>().join("\n");
 	let input = SkimItemReader::default().of_bufread(std::io::Cursor::new(options_join));
 
 	let skim_options = SkimOptionsBuilder::default()

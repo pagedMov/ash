@@ -1262,6 +1262,7 @@ impl OxTokenizer {
 						self.pop_ctx();
 					}
 					let op = self.advance().unwrap();
+					wd = wd.add_char(op);
 					match op {
 						'|' => {
 							if self.char_stream.front().is_some_and(|ch| *ch == '|') {
@@ -1281,6 +1282,7 @@ impl OxTokenizer {
 						}
 						_ => unreachable!()
 					}
+					wd = WordDesc::empty();
 					continue
 				}
 				' ' | '\t' => {
@@ -1568,7 +1570,7 @@ impl OxTokenizer {
 						flags: WdFlags::empty()
 					};
 					self.tokens.push(Tk { tk_type: TkType::String, wd: take(&mut wd) });
-					self.tokens.push(Tk::d_quote(&s_quote_wd));
+					self.tokens.push(Tk::s_quote(&s_quote_wd));
 					break
 				}
 				_ => {
