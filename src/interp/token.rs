@@ -1247,7 +1247,16 @@ impl LashTokenizer {
 				_ => { /* Do nothing */ }
 			}
 			match *self.ctx() {
-				Command => self.command_context(take(&mut wd), expand)?,
+				Command => {
+					// TODO: clean this up
+					let ctx = self.context.pop().unwrap(); // Context always has at least one element. Hopefully.
+					if *self.ctx() == Loop {
+						self.loop_context(take(&mut wd));
+					} else {
+						self.context.push(ctx);
+						self.command_context(take(&mut wd), expand)?
+					}
+				}
 				Arg => self.arg_context(take(&mut wd), expand)?,
 				DQuote | SQuote => self.string_context(take(&mut wd), expand)?,
 				VarDec | SingleVarDec => self.vardec_context(take(&mut wd))?,
