@@ -1,4 +1,4 @@
-use crate::{event::ShError, execute::{self, ProcIO, RustFd}, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, HashFloat, Job, OxVal}, OxResult};
+use crate::{event::ShError, execute::{self, ProcIO, RustFd}, interp::token::REGEX, shellenv::{attach_tty, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, HashFloat, Job, AshVal}, AshResult};
 use nix::{sys::wait::WaitStatus, unistd::{dup2, getpgrp}, NixPath};
 use serde_json::Value;
 use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, f32::INFINITY, fs, io::{self, Read}, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread, time::Duration};
@@ -418,7 +418,7 @@ pub fn contains_glob(word: &str) -> bool {
 	false
 }
 
-pub fn parse_vec(input: &str) -> Result<Vec<OxVal>,String> {
+pub fn parse_vec(input: &str) -> Result<Vec<AshVal>,String> {
 	if !input.starts_with('[') {
 		return Err("Did not find an opening bracket for this array definition".into())
 	}
@@ -433,11 +433,11 @@ pub fn parse_vec(input: &str) -> Result<Vec<OxVal>,String> {
 	}
 }
 
-pub fn vec_by_type(str: &str) -> Option<Vec<OxVal>> {
+pub fn vec_by_type(str: &str) -> Option<Vec<AshVal>> {
 	str.split(',')
 		.map(str::trim)
-		.map(OxVal::parse)
-		.collect::<Result<Vec<OxVal>, _>>()
+		.map(AshVal::parse)
+		.collect::<Result<Vec<AshVal>, _>>()
 		.ok()
 }
 
@@ -544,7 +544,7 @@ pub fn is_exec(path: &Path) -> bool {
 		.unwrap_or(false)
 }
 
-pub fn handle_autocd_check(node: &Node, argv: &[Tk]) -> OxResult<bool> {
+pub fn handle_autocd_check(node: &Node, argv: &[Tk]) -> AshResult<bool> {
 	if read_meta(|m| m.get_shopt("core.autocd").is_ok_and(|opt| opt.parse::<bool>().unwrap()))? && argv.len() == 1 {
 		let path_cand = argv.first().unwrap();
 		let is_relative = path_cand.text().starts_with('.');
@@ -558,21 +558,21 @@ pub fn handle_autocd_check(node: &Node, argv: &[Tk]) -> OxResult<bool> {
 	Ok(false)
 }
 
-pub fn overwrite_func(alias: &str) -> OxResult<()> {
+pub fn overwrite_func(alias: &str) -> AshResult<()> {
 	if read_logic(|l| l.get_func(alias))?.is_some() {
 		write_logic(|l| l.remove_func(alias))?;
 	}
 	Ok(())
 }
 
-pub fn overwrite_alias(func: &str) -> OxResult<()> {
+pub fn overwrite_alias(func: &str) -> AshResult<()> {
 	if read_logic(|l| l.get_alias(func))?.is_some() {
 		write_logic(|l| l.remove_alias(func))?;
 	}
 	Ok(())
 }
 
-pub fn unset_var_conflicts(key: &str) -> OxResult<()> {
+pub fn unset_var_conflicts(key: &str) -> AshResult<()> {
 	if read_vars(|v| v.get_var(key))?.is_some() {
 		write_vars(|v| v.unset_var(key))?
 	}
@@ -584,7 +584,7 @@ pub fn unset_var_conflicts(key: &str) -> OxResult<()> {
 	Ok(())
 }
 
-pub fn set_last_status(status: &WaitStatus) -> OxResult<()> {
+pub fn set_last_status(status: &WaitStatus) -> AshResult<()> {
 	match status {
 		WaitStatus::Exited(pid, code) => {
 			write_vars(|v| v.set_param("?".into(), code.to_string()))?;
@@ -598,7 +598,7 @@ pub fn set_last_status(status: &WaitStatus) -> OxResult<()> {
 	Ok(())
 }
 
-pub fn handle_fg(job: Job) -> OxResult<()> {
+pub fn handle_fg(job: Job) -> AshResult<()> {
 	disable_reaping();
 	let statuses = write_jobs(|j| j.new_fg(job))??;
 	for status in statuses {
@@ -717,7 +717,7 @@ pub fn capture_ansi_escape(chars: &mut VecDeque<char>) -> String {
 	sequence
 }
 
-pub fn handle_prompt_hidegroup(tokens: &mut VecDeque<PromptTk>) -> OxResult<String> {
+pub fn handle_prompt_hidegroup(tokens: &mut VecDeque<PromptTk>) -> AshResult<String> {
 	let mut result = String::new();
 	let mut found = false;
 	while let Some(token) = tokens.pop_front() {
@@ -1026,11 +1026,11 @@ pub fn format_cmd_runtime(dur: Duration) -> String {
 	result.join(" ")
 }
 
-pub fn escseq_cmdtime() -> OxResult<String> {
+pub fn escseq_cmdtime() -> AshResult<String> {
 	Ok(env::var("OX_CMD_TIME").unwrap_or_default())
 }
 
-pub fn escseq_custom(query: &str) -> OxResult<String> {
+pub fn escseq_custom(query: &str) -> AshResult<String> {
 	let body = read_meta(|m| m.get_shopt(query))?.unwrap_or_default().trim_matches(['(',')']).to_string();
 	let subshell = Node {
 		command: None,
@@ -1045,11 +1045,11 @@ pub fn escseq_custom(query: &str) -> OxResult<String> {
 	Ok(r_pipe.read()?.trim().to_string())
 }
 
-pub fn escseq_exitcode() -> OxResult<String> {
+pub fn escseq_exitcode() -> AshResult<String> {
 	Ok(read_vars(|v| v.get_param("?"))?.unwrap_or_default())
 }
 
-pub fn escseq_success() -> OxResult<String> {
+pub fn escseq_success() -> AshResult<String> {
 	let code = read_vars(|v| v.get_param("?"))?;
 	let success = read_meta(|m| m.get_shopt("prompt.exit_status.success"))??.trim_matches('"').to_string();
 	if let Some(code) = code {
@@ -1062,7 +1062,7 @@ pub fn escseq_success() -> OxResult<String> {
 	}
 }
 
-pub fn escseq_fail() -> OxResult<String> {
+pub fn escseq_fail() -> AshResult<String> {
 	let code = read_vars(|v| v.get_param("?"))?;
 	let failure = read_meta(|m| m.get_shopt("prompt.exit_status.failure"))??.trim_matches('"').to_string();
 	if let Some(code) = code {
@@ -1075,7 +1075,7 @@ pub fn escseq_fail() -> OxResult<String> {
 	}
 }
 
-pub fn escseq_octal_escape(chars: &mut VecDeque<char>, first_digit: char) -> OxResult<char> {
+pub fn escseq_octal_escape(chars: &mut VecDeque<char>, first_digit: char) -> AshResult<char> {
 	let mut octal_digits = String::new();
 	octal_digits.push(first_digit); // Add the first digit
 
@@ -1122,7 +1122,7 @@ pub fn escseq_non_printing_sequence(chars: &mut VecDeque<char>, result: &mut Str
 }
 
 /// Handles the current working directory.
-pub fn escseq_working_directory() -> OxResult<String> {
+pub fn escseq_working_directory() -> AshResult<String> {
 	let mut cwd = env::var("PWD").unwrap_or_default();
 	let home = env::var("HOME").unwrap_or_default();
 	if cwd.starts_with(&home) {
@@ -1142,7 +1142,7 @@ pub fn escseq_working_directory() -> OxResult<String> {
 }
 
 /// Handles the basename of the current working directory.
-pub fn escseq_basename_working_directory() -> OxResult<String> {
+pub fn escseq_basename_working_directory() -> AshResult<String> {
 	let cwd = PathBuf::from(read_vars(|vars| vars.get_evar("PWD").map_or("".to_string(), |pwd| pwd.to_string()))?);
 	let mut cwd = cwd.components().last().map(|comp| comp.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
 	let home = read_vars(|vars| vars.get_evar("HOME").map_or("".into(), |home| home))?;
@@ -1153,13 +1153,13 @@ pub fn escseq_basename_working_directory() -> OxResult<String> {
 }
 
 /// Handles the full hostname.
-pub fn escseq_full_hostname() -> OxResult<String> {
+pub fn escseq_full_hostname() -> AshResult<String> {
 	let hostname: String = read_vars(|vars| vars.get_evar("HOSTNAME").map_or("unknown host".into(), |host| host))?;
 	Ok(hostname)
 }
 
 /// Handles the short hostname.
-pub fn escseq_short_hostname() -> OxResult<String> {
+pub fn escseq_short_hostname() -> AshResult<String> {
 	let hostname = read_vars(|vars| vars.get_evar("HOSTNAME").map_or("unknown host".into(), |host| host))?;
 	if let Some((hostname, _)) = hostname.split_once('.') {
 		Ok(hostname.to_string())
@@ -1169,19 +1169,19 @@ pub fn escseq_short_hostname() -> OxResult<String> {
 }
 
 /// Handles the shell name.
-pub fn escseq_shell_name() -> OxResult<String> {
+pub fn escseq_shell_name() -> AshResult<String> {
 	let sh_name = read_vars(|vars| vars.get_evar("SHELL").map_or("rsh".into(), |sh| sh))?;
 	Ok(sh_name)
 }
 
 /// Handles the username.
-pub fn escseq_username() -> OxResult<String> {
+pub fn escseq_username() -> AshResult<String> {
 	let user = read_vars(|vars| vars.get_evar("USER").map_or("unknown".into(), |user| user))?;
 	Ok(user)
 }
 
 /// Handles the prompt symbol based on the user ID.
-pub fn escseq_prompt_symbol() -> OxResult<char> {
+pub fn escseq_prompt_symbol() -> AshResult<char> {
 	let uid = read_vars(|vars| vars.get_evar("UID").map_or("0".into(), |uid| uid))?;
 	match uid.as_str() {
 		"0" => Ok('#'),
@@ -1254,7 +1254,7 @@ pub fn process_ansi_escapes(input: &str) -> String {
 	result
 }
 
-pub fn extract_deck_from_root(node: &Node) -> OxResult<VecDeque<Node>> {
+pub fn extract_deck_from_root(node: &Node) -> AshResult<VecDeque<Node>> {
 	if let NdType::Root { deck } = &node.nd_type {
 		Ok(deck.clone())
 	} else {
@@ -1365,90 +1365,90 @@ pub fn has_valid_delims(input: &str, open: &str, close: &str) -> bool {
 }
 
 
-pub fn subtract_vars(left: OxVal, right: OxVal, span: Span) -> OxResult<OxVal> {
+pub fn subtract_vars(left: AshVal, right: AshVal, span: Span) -> AshResult<AshVal> {
 	match left {
-		OxVal::String(left_str) => {
+		AshVal::String(left_str) => {
 			let right_str = right.to_string();
 			if let Some(result) = left_str.strip_suffix(&right_str) {
-				Ok(OxVal::String(result.to_string()))
+				Ok(AshVal::String(result.to_string()))
 			} else {
-				Ok(OxVal::String(left_str))
+				Ok(AshVal::String(left_str))
 			}
 		}
-		OxVal::Int(left_num) => {
-			if let OxVal::Int(right_num) = right {
+		AshVal::Int(left_num) => {
+			if let AshVal::Int(right_num) = right {
 				let diff = left_num - right_num;
-				Ok(OxVal::Int(diff))
+				Ok(AshVal::Int(diff))
 			} else {
 				Err(ShError::from_parse(format!("Tried to subtract non-integer type '{}' from integer", right.fmt_type()).as_str(), span))
 			}
 		}
-		OxVal::Float(left_num) => {
-			if let OxVal::Float(right_num) = right {
+		AshVal::Float(left_num) => {
+			if let AshVal::Float(right_num) = right {
 				let diff = left_num.to_f64() - right_num.to_f64();
-				Ok(OxVal::Float(HashFloat::from_f64(diff)))
+				Ok(AshVal::Float(HashFloat::from_f64(diff)))
 			} else {
 				Err(ShError::from_parse(format!("Tried to subtract non-float type '{}' from float", right.fmt_type()).as_str(), span))
 			}
 		}
-		OxVal::Bool(left_bool) => {
-			if let OxVal::Bool(right_bool) = right {
+		AshVal::Bool(left_bool) => {
+			if let AshVal::Bool(right_bool) = right {
 				// Treat as "remove" operation (XOR-like behavior)
 				let result = left_bool != right_bool;
-				Ok(OxVal::Bool(result))
+				Ok(AshVal::Bool(result))
 			} else {
 				Err(ShError::from_parse(format!("Tried to subtract non-bool type '{}' from bool", right.fmt_type()).as_str(), span))
 			}
 		}
-		OxVal::Array(mut vec) => {
+		AshVal::Array(mut vec) => {
 			if let Some(pos) = vec.iter().position(|elem| *elem == right) {
 				vec.remove(pos);
-				Ok(OxVal::Array(vec))
+				Ok(AshVal::Array(vec))
 			} else {
-				Ok(OxVal::Array(vec))
+				Ok(AshVal::Array(vec))
 			}
 		}
-		OxVal::Dict(_) => todo!(),
+		AshVal::Dict(_) => todo!(),
 	}
 }
 
-pub fn add_vars(left: OxVal, right: OxVal, span: Span) -> OxResult<OxVal> {
+pub fn add_vars(left: AshVal, right: AshVal, span: Span) -> AshResult<AshVal> {
 	match left {
-		OxVal::String(_) => {
+		AshVal::String(_) => {
 			let left_string = left.to_string();
 			let right_string = right.to_string();
-			Ok(OxVal::String(format!("{}{}",left_string,right_string)))
+			Ok(AshVal::String(format!("{}{}",left_string,right_string)))
 		}
-		OxVal::Int(left_num) => {
-			if let OxVal::Int(right_num) = right {
+		AshVal::Int(left_num) => {
+			if let AshVal::Int(right_num) = right {
 				let sum = left_num + right_num;
-				Ok(OxVal::Int(sum))
+				Ok(AshVal::Int(sum))
 			} else {
 				Err(ShError::from_parse(format!("Tried to add non-integer type '{}' to integer",right.fmt_type()).as_str(), span))
 			}
 		}
-		OxVal::Float(left_num) => {
-			if let OxVal::Float(right_num) = right {
+		AshVal::Float(left_num) => {
+			if let AshVal::Float(right_num) = right {
 				let sum = left_num.to_f64() + right_num.to_f64();
-				Ok(OxVal::Float(HashFloat::from_f64(sum)))
+				Ok(AshVal::Float(HashFloat::from_f64(sum)))
 			} else {
 				Err(ShError::from_parse(format!("Tried to add non-float type '{}' to float",right.fmt_type()).as_str(), span))
 			}
 		}
-		OxVal::Bool(left_bool) => {
-			if let OxVal::Bool(right_bool) = right {
+		AshVal::Bool(left_bool) => {
+			if let AshVal::Bool(right_bool) = right {
 				let result = left_bool | right_bool;
-				Ok(OxVal::Bool(result))
+				Ok(AshVal::Bool(result))
 			} else {
 				Err(ShError::from_parse(format!("Tried to add non-bool type '{}' to bool",right.fmt_type()).as_str(), span))
 			}
 		}
-		OxVal::Array(vec) => {
+		AshVal::Array(vec) => {
 			let mut new_vec = vec.clone();
 			new_vec.push(right);
-			Ok(OxVal::Array(new_vec))
+			Ok(AshVal::Array(new_vec))
 		}
-		OxVal::Dict(btree_map) => todo!(),
+		AshVal::Dict(btree_map) => todo!(),
 	}
 }
 

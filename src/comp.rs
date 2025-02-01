@@ -7,7 +7,7 @@ use rustyline::{completion::{Candidate, Completer, FilenameCompleter}, error::Re
 use skim::{prelude::{Key, SkimItemReader, SkimOptionsBuilder}, Skim};
 use std::{borrow::Cow, collections::{HashMap, HashSet, VecDeque}, env, fmt::Display, io::stdout, mem, path::{Path, PathBuf}};
 
-use crate::{builtin::BUILTINS, event::ShError, interp::{expand, helper::{self, StrExtension}, parse::Span, token::{AssOp, OxTokenizer, Tk, WdFlags, KEYWORDS}}, shellenv::{read_logic, read_vars}};
+use crate::{builtin::BUILTINS, event::ShError, interp::{expand, helper::{self, StrExtension}, parse::Span, token::{AssOp, AshTokenizer, Tk, WdFlags, KEYWORDS}}, shellenv::{read_logic, read_vars}};
 
 pub const RESET: &str = "\x1b[0m";
 pub const BLACK: &str = "\x1b[30m";
@@ -263,19 +263,19 @@ pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 
 
 
-pub struct OxHint {
+pub struct AshHint {
 	text: String,
 	styled_text: String
 }
 
-impl OxHint {
+impl AshHint {
 	pub fn new(text: String) -> Self {
 		let styled_text = style(&text).with(Color::DarkGrey).to_string();
 		Self { text, styled_text }
 	}
 }
 
-impl Hint for OxHint {
+impl Hint for AshHint {
 	fn display(&self) -> &str {
 		&self.styled_text
 	}
@@ -342,7 +342,7 @@ pub fn highlight_token(tk: Tk, path: &str) -> String {
 			return format!("{}{}{}",'{',hl_body,'}');
 		}
     TkT::LoopCond | TkT::LoopBody => {
-			let mut sub_tokenizer = OxTokenizer::new(tk.text());
+			let mut sub_tokenizer = AshTokenizer::new(tk.text());
 			let mut hl_cond = String::new();
 			loop {
 				let result = sub_tokenizer.tokenize_one(false);
@@ -444,18 +444,18 @@ pub fn highlight_token(tk: Tk, path: &str) -> String {
 
 
 #[derive(Helper)]
-pub struct OxHelper {
+pub struct AshHelper {
 	filename_comp: FilenameCompleter,
 	commands: Vec<String>, // List of built-in or cached commands
 }
 
-impl Highlighter for OxHelper {
+impl Highlighter for AshHelper {
 	fn highlight_char(&self, line: &str, pos: usize, kind: rustyline::highlight::CmdKind) -> bool {
 	    return true
 	}
 	fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
 
-		let mut line_tokenizer = OxTokenizer::new(line);
+		let mut line_tokenizer = AshTokenizer::new(line);
 		let mut hl_buffer = String::new();
 		let path = read_vars(|v| v.get_evar("PATH")).unwrap().unwrap_or_default();
 		loop {
@@ -478,7 +478,7 @@ impl Highlighter for OxHelper {
 	}
 }
 
-impl Hinter for OxHelper {
+impl Hinter for AshHelper {
 	fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<Self::Hint> {
 		if line.is_empty() {
 			return None
@@ -487,17 +487,17 @@ impl Hinter for OxHelper {
 		let result = self.hist_substr_search(line, history);
 		if let Some(hist_line) = result {
 			let window = hist_line[line.len()..].to_string();
-			let hint = OxHint::new(window);
+			let hint = AshHint::new(window);
 			Some(hint)
 		} else {
 			None
 		}
 	}
 
-type Hint = OxHint;
+type Hint = AshHint;
 }
 
-impl Validator for OxHelper {
+impl Validator for AshHelper {
 	fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
 		// Get the current input from the context
 		let input = ctx.input();
@@ -517,7 +517,7 @@ impl Validator for OxHelper {
 	}
 }
 
-impl OxHelper {
+impl AshHelper {
 	pub fn new() -> Self {
 		// Prepopulate some built-in commands (could also load dynamically)
 		let commands = vec![
@@ -527,7 +527,7 @@ impl OxHelper {
 			"exit".to_string(),
 		];
 
-		let mut helper = OxHelper {
+		let mut helper = AshHelper {
 			filename_comp: FilenameCompleter::new(),
 			commands,
 		};
@@ -565,13 +565,13 @@ impl OxHelper {
 	}
 }
 
-impl Default for OxHelper {
+impl Default for AshHelper {
 	fn default() -> Self {
 		Self::new()
 	}
 }
 
-impl Completer for OxHelper {
+impl Completer for AshHelper {
 	type Candidate = CompOption;
 
 	fn complete(
