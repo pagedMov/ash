@@ -6,6 +6,8 @@ use std::sync::Mutex;
 
 use crate::{builtin::{self, CdFlags}, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{AssOp, OxTokenizer, Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, OxVal, SavedEnv}, OxResult};
 
+/// This macro is used for deconstructing a Node into it's NdType
+/// This macro is not safe. Make sure that the node is *definitely* the type you think it is.
 #[macro_export]
 macro_rules! node_operation {
 	($node_type:path { $($field:tt)* }, $node:expr, $node_op:block) => {
@@ -23,6 +25,10 @@ bitflags::bitflags! {
 	}
 }
 
+/// A load-bearing struct. Used for basically everything involving i/o
+/// Managing file descriptor lifetimes is not necessary with these,
+/// The file descriptor will be closed automatically as soon as the variable
+/// falls out of scope.
 #[derive(Hash, Eq, PartialEq, Debug)]
 pub struct RustFd {
 	fd: RawFd,
@@ -282,6 +288,11 @@ impl Default for OxWait {
 	}
 }
 
+/// Another extremely important struct for this program
+///
+/// This struct trivializes managing input and output.
+/// route_input() and route_output() are used to actually wire the contained RustFds to the process' stdin or stdout/stderr
+/// backup_fildescs allows for easy saving of i/o state in a process.
 #[derive(Debug)]
 pub struct ProcIO {
 	pub stdin: Option<Arc<Mutex<RustFd>>>,
@@ -378,7 +389,7 @@ impl Clone for ProcIO {
 	/// but for all intents and purposes the ProcIO struct is meant to be a unique identifier for an open file descriptor.
 	/// Use this if you have to, but know that it may cause unintended side effects.
 	///
-	/// Since ProcIO uses Arc<Mutex<RustFd>>, these clones will refer to the same data as the original. That means modifications will effect both instances.
+	/// Since ProcIO uses Arc<Mutex<RustFd>>, these clones will refer to the same data as the original. That means modifications will effect both instances. It also means that a cloned ProcIO can keep a RustFd alive longer than it's supposed to be. Keep that in mind.
 	fn clone(&self) -> Self {
 		ProcIO::from(self.stdin.clone(),self.stdout.clone(),self.stderr.clone())
 	}
@@ -390,11 +401,14 @@ impl Default for ProcIO {
 	}
 }
 
+/// This function traverses a Root node.
+///
+/// If given a ProcIO, it will use that in the traverse() call, otherwise it creates a new one.
 pub fn traverse_ast(ast: Node, io: Option<ProcIO>) -> OxResult<OxWait> {
 	let saved_in = RustFd::from_stdin()?;
 	let saved_out = RustFd::from_stdout()?;
 	let saved_err = RustFd::from_stderr()?;
-	let io = if let Some(proc_io) = io { proc_io } else { ProcIO::new() };
+	let io = io.unwrap_or_default();
 	let status = traverse(ast, io)?;
 	saved_in.dup2(&0)?;
 	saved_out.dup2(&1)?;
@@ -402,7 +416,9 @@ pub fn traverse_ast(ast: Node, io: Option<ProcIO>) -> OxResult<OxWait> {
 	Ok(status)
 }
 
-
+/// The core of the execution logic.
+///
+/// This directs traffic for nodes by matching the NdType of the node to the corresponding function.
 fn traverse(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 	let last_status;
 
@@ -465,6 +481,10 @@ fn traverse(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 	Ok(last_status)
 }
 
+/// This function traverses a Root node.
+///
+/// It's behavior is different from traverse_ast(), it deconstructs the Root node and iterates over the deque directly.
+/// You can specify a break condition. True means that if an execution is successful, the loop breaks. False does the opposite.
 fn traverse_root(mut root_node: Node, break_condition: Option<bool>, io: ProcIO) -> OxResult<OxWait> {
 	let mut last_status = OxWait::new();
 	if !root_node.redirs.is_empty() {
@@ -566,10 +586,10 @@ fn handle_for(node: Node,io: ProcIO) -> OxResult<OxWait> {
 					write_vars(|v| v.set_var(&current_var, OxVal::parse(&current_val).unwrap_or_default()))?;
 
 					iteration_count += 1;
-					// TODO: modulo is expensive; find a better way to do this
+					// TODO: modulo is probably too expensive for a loop; find a better way to do this
 					var_index = iteration_count % var_count;
 
-					event::execute(&loop_body, NdFlags::empty(), None, Some(body_io.clone()));
+					event::execute(&loop_body, NdFlags::empty(), None, Some(body_io.clone()))?;
 				}
 			});
 			std::process::exit(0);
@@ -655,7 +675,6 @@ fn handle_if(node: Node, io: ProcIO) -> OxResult<OxWait> {
 
 			traverse(cond, cond_io.clone())?;
 			let code = read_vars(|v| v.get_param("?"))?;
-			let cmd = read_meta(|m| m.get_last_command())?;
 			let is_success = code.clone().unwrap_or("0".to_string()) == "0";
 			if is_success {
 				traverse(body, body_io.clone())?;
@@ -674,14 +693,6 @@ fn handle_chain(node: Node) -> OxResult<OxWait> {
 		let mut commands = commands;
 		while let Some(cmd) = commands.pop_front() {
 			traverse(cmd, ProcIO::new())?;
-
-			let statuses = write_jobs(|j| {
-				if let Some(job) = j.get_fg_mut() {
-					job.get_statuses()
-				} else {
-					vec![]
-				}
-			})?;
 
 			let is_success = read_vars(|v| v.get_param("?").is_some_and(|val| val == "0"))?;
 

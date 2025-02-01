@@ -1200,12 +1200,11 @@ pub fn attach_tty(pgid: Pid) -> OxResult<()> {
 	}
 
 	// Attempt to set the process group for the terminal
-	// TODO: If this fails, it fails silently. Consider finding a more robust way to do this.
+	// FIXME: If this fails, it fails silently. Consider finding a more robust way to do this.
 	let result = unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), pgid) };
 	match result {
 		Ok(_) => Ok(()),
-		Err(e) => {
-			eprintln!("Failed to set terminal process group: {}", e);
+		Err(_) => {
 			unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), getpgrp()).unwrap(); }
 			Ok(())
 		}

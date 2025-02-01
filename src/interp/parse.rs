@@ -104,6 +104,9 @@ pub struct Conditional {
 	pub body: Box<Node>
 }
 
+/// The spine of this entire program. Nodes are used for anything that involves execution.
+/// The abstract syntax tree is contained in a Root node, and executable nodes are leaf nodes in the tree
+/// Uses the NdType struct to identify nodes and wrap type-specific metadata
 #[derive(Debug,Clone,PartialEq)]
 pub struct Node {
 	pub command: Option<Tk>,
@@ -203,6 +206,12 @@ impl Default for Node {
 		Self::new()
 	}
 }
+
+/// Each type of AST node is contained in this enum
+///
+/// PipelineBranch and ChainTree are intermediate node types,
+/// They are tree-like structures containing commands
+/// These two are flatted into a Pipeline and Chain respectively
 #[derive(Debug,Clone,PartialEq)]
 pub enum NdType {
 	Root { deck: VecDeque<Node> },
@@ -249,6 +258,8 @@ pub struct DescentContext {
 	end: usize,
 }
 
+/// This struct carries the parser. It is passed around as the parser recurses through the syntax tree.
+/// It contains all of the tokens created by the tokenizer, and it's `root` field contains the syntax tree being constructed
 impl DescentContext {
 	pub fn new(tokens: VecDeque<Tk>) -> Self {
 		Self {
@@ -317,6 +328,11 @@ impl DescentContext {
 	}
 }
 
+/// This is the top-level function for parsing input.
+/// It takes an &mut OxTokenizer as an argument.
+/// This function is called repeatedly until the mutably referenced tokenizer expends it's input.
+///
+/// The call to tokenize_one() consumes a single logical block from the tokenizer's input
 pub fn descend(tokenizer: &mut OxTokenizer) -> OxResult<ParseState> {
 	let input = tokenizer.input();
 	let mut state = ParseState {
@@ -372,8 +388,9 @@ pub fn get_tree(ctx: DescentContext) -> OxResult<Node> {
 	Ok(tree)
 }
 
+/// This function creates an intermediate syntax tree. Operator nodes are placed literally into the tree here,
+/// And then nodes are collected and grouped at operator nodes in join_at_operators().
 pub fn parse_linear(mut ctx: DescentContext, once: bool) -> OxResult<DescentContext> {
-	// First pass just makes nodes without joining at operators
 	while let Some(tk) = ctx.next_tk() {
 		use crate::interp::token::TkType::*;
 		match tk.class() {
@@ -524,11 +541,14 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> OxResult<DescentCont
 	Ok(ctx)
 }
 
+/// A 'valid operand' is a node that can have a pipe or chain attached to it
 pub fn check_valid_operand(node: &Node) -> bool {
 	use crate::interp::parse::NdType::*;
 	matches!(node.nd_type, PipelineBranch {..} | Pipeline {..} | Subshell {..} | Chain {..} | If {..} | For {..} | Loop {..} | Case {..} | Select {..} | Function {..} | Command {..} | Builtin {..})
 }
 
+/// The second half of the parsing operation. Parse_linear() produces a straight line of nodes.
+/// This function takes that straight line and builds it into a proper tree.
 pub fn join_at_operators(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	let mut buffer: VecDeque<Node> = VecDeque::new();
 
@@ -650,10 +670,12 @@ pub fn join_at_operators(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	ctx.root.extend(buffer.drain(..));
 	Ok(ctx)
 }
+
+/// This function allows for redirections on higher order control flow structures
+/// For instance, `if foo; then echo bar; fi > file.txt`
+///
+/// In this function, the entire AST is rebuilt in-place, and redirections are carried out to the leaf nodes
 pub fn propagate_redirections(mut node: Node) -> OxResult<Node> {
-	// This function allows for redirections for higher order control flow structures
-	// e.g. `while true; do echo hello world; done > file.txt`
-	// The entire AST is rebuilt in-place, while carrying redirections out to the leaf nodes
 	let mut nd_type = node.nd_type.clone();
 	match nd_type {
 		NdType::Root { ref mut deck } => {
@@ -798,10 +820,13 @@ pub fn propagate_redirections(mut node: Node) -> OxResult<Node> {
 	Ok(node)
 }
 
+/// Sorts redirections into two boxes; one for conditions and one for bodies.
+/// In this case, a condition refers to something that a control structure is checking, i.e. `if true`
+/// and bodies refers to the code that will be executed if that condition is true.
+///
+/// Input redirections like `while read -r line; do echo $line; done < lines.txt` go to the condition
+/// Output redirections like `while true; do echo hello world; done >> hello.txt` go to the body
 fn get_flow_ctl_redirections(node: &Node) -> OxResult<(Vec<Node>, Vec<Node>)> {
-	// Separates redirections into two baskets; one for conditions and one for bodies
-	// Input redirections like `while read -r line; do echo $line; done < lines.txt` go to the condition
-	// Output redirections like `while true; do echo hello world; done >> hello.txt` go to the body
 	let redirs = node.get_redirs()?;
 	let (cond_redirs, body_redirs): (Vec<Node>, Vec<Node>) = redirs.into_iter().partition(|redir_nd| {
 		if let NdType::Redirection { ref redir } = redir_nd.nd_type {
@@ -813,6 +838,8 @@ fn get_flow_ctl_redirections(node: &Node) -> OxResult<(Vec<Node>, Vec<Node>)> {
 	Ok((cond_redirs,body_redirs))
 }
 
+/// Gets the total span of a VecDeque of tokens.
+/// By just taking the span start of the first node and the span end of the last node
 fn compute_span(tokens: &VecDeque<Tk>) -> Span {
 	if tokens.is_empty() {
 		Span::from(0, 0) // Default span for empty tokens
@@ -821,6 +848,11 @@ fn compute_span(tokens: &VecDeque<Tk>) -> Span {
 	}
 }
 
+/// This function takes a VecDeque of tokens to read from, and a VecDeque of nodes to write to.
+///
+/// It parses from the VecDeque of tokens, and afterward it detaches the resulting ast from the sub_ctx variable
+/// And then attaches it to the Node VecDeque provided to the function
+/// The function then returns the Node VecDeque
 fn parse_and_attach(mut tokens: VecDeque<Tk>, mut root: VecDeque<Node>) -> OxResult<VecDeque<Node>> {
 	let mut sub_ctx = DescentContext::new(take(&mut tokens));
 	while !sub_ctx.tokens.is_empty() {
@@ -885,6 +917,11 @@ pub fn build_redirection(mut ctx: DescentContext) -> OxResult<DescentContext> {
 		Ok(ctx)
 }
 
+/// This function builds an if statement from the tokens contained in `ctx`
+///
+/// The idea is to just build condition/body pairs, with an optional extra body in the else block
+/// It tracks context using the `phase` variable, and alternates between Condition and Body when it finds certain keywords
+/// If it finds an opening keyword (`if`, `while`, `for`, etc.) then the parser descends further.
 pub fn build_if(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	let mut cond_tokens = VecDeque::new();
 	let mut cond_root = VecDeque::new();
@@ -1021,6 +1058,11 @@ pub fn build_if(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	Ok(ctx)
 }
 
+/// This function builds a `for` loop.
+///
+/// Unlike the `build_if` function, this one uses Vars, Array, and Body for the phases
+/// The phases should be pretty self-explanatory based on the names.
+/// Just like `build_if`, if an opening keyword is found in the body, the parser descends further.
 pub fn build_for(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	let mut phase = Phase::Vars;
 
@@ -1123,6 +1165,10 @@ pub fn build_for(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	Ok(ctx)
 }
 
+/// This function builds both `while` and `until` loops. The behavior of `while` and `until` is equal and opposite
+/// Therefore, we can use the same function for both and just use a boolean to choose which one to build.
+///
+/// The logic is fairly simple; it's essentially just a single `if` statement that repeats.
 pub fn build_loop(condition: bool, mut ctx: DescentContext) -> OxResult<DescentContext> {
 	let loop_condition = condition;
 
@@ -1197,6 +1243,11 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> OxResult<DescentC
 	Ok(ctx)
 }
 
+/// This function builds a `case` statement, which matches a pattern to a specific code pathway.
+///
+/// This one is pretty fucked up. Will almost certainly have to rewrite this at some point.
+/// The logic is extremely brittle and any time I make any changes to the tokenizer, this breaks somehow.
+/// Might not really be a fixable issue, the syntax used for these is extremely prone to conflicting with other syntax structures
 pub fn build_case(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	let mut cases = HashMap::new();
 	let mut block_string = String::new();
@@ -1320,6 +1371,9 @@ pub fn build_case(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	Ok(ctx)
 }
 
+/// This builds a `select` statement, which allows for creating interactive menus in scripts
+///
+/// I'm not even sure if this works or not. Select statements haven't even been implemented yet, so this function has never been called.
 pub fn build_select(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	// TODO: figure out a way to get 'in' to actually be a keyword
 	// Fix the logic in general so this code doesn't have to use awkward work arounds
@@ -1417,12 +1471,13 @@ pub fn build_select(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	Ok(ctx)
 }
 
+/// Builds a function definition. Functions look `like() { this }`
+///
+/// The FuncDef node_type contains the name (`foo()`) and the body (`{ bar }`)
+/// Later on, the body is tokenized and parsed separately.
 pub fn build_func_def(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	let def = ctx.next_tk().unwrap();
 	if let TkType::FuncDef = def.tk_type {
-		//TODO: initializing a new shellenv instead of cloning the current one here
-		//could cause issues later, keep an eye on this
-		//Might be fine to just build the AST since nothing is being executed or expanded
 		let name = def.text();
 		let body_tk = ctx.next_tk().unwrap(); // We can be reasonably sure that this exists
 		let body = body_tk.text();
@@ -1439,6 +1494,11 @@ pub fn build_func_def(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	} else { unreachable!() }
 }
 
+/// Builds an assignment node. Assignments look `like=this`
+///
+/// Assignment nodes can have arguments. The first arg should be a command name.
+/// When an arg is given, the arg is executed as a command and the assignment is exported for just that execution.
+/// This means that running a command like `VAR=foo command` means that the VAR env variable is available for just that process.
 pub fn build_assignment(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	let ass = ctx.next_tk().unwrap();
 	if let TkType::Assignment { key, value, op } = &ass.tk_type {
@@ -1485,10 +1545,13 @@ pub fn build_assignment(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	} else { unreachable!() }
 }
 
-pub fn build_brace_group(tokens: VecDeque<Tk>) -> OxResult<(Node, VecDeque<Tk>)> {
-	todo!("Implement build_brace_group")
-}
-
+/// The final destination for the parser. All roads lead to this function.
+///
+/// This function builds an executable node. The specific node type is decided based on context.
+/// For instance, if the first arg is found to be a function, it is assigned the Function node type.
+/// Same for builtins, subshells, and if neither of those are true for this node, the command gets a generic Command type.
+///
+/// Redirections are also handled here. if a redirection operator doesn't have a file or fd target, it tries to find one.
 pub fn build_command(mut ctx: DescentContext) -> OxResult<DescentContext> {
 	let mut argv = VecDeque::new();
 	// We handle redirections in join_at_operators(), so hold them here and push them back onto the queue afterward

@@ -97,6 +97,13 @@ bitflags! {
 	}
 }
 
+/*
+ * This struct contains metadata for tokens
+ * The span is the actual space in the input that the token uses up
+ * Spans are used for error handling to blame lines
+ *
+ * The flags field contains a ton of metadata regarding the context surrounding the token
+ */
 #[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub struct WordDesc {
 	pub text: String,
@@ -218,6 +225,7 @@ pub struct Tk {
 	pub wd: WordDesc
 }
 
+// Used to identify tokens easily
 #[derive(Debug,Hash,Clone,PartialEq,Eq)]
 pub enum TkType {
 	// Control Flow Keywords
@@ -284,6 +292,15 @@ pub enum TkType {
 }
 
 impl Tk {
+	/*
+	 * This is a load-bearing struct, used widely throughout the entire program
+	 * The constructor methods are used mainly in the tokenizer, but the getter methods are used everywhere
+	 *
+	 * Most of the actual token metadata is held in the `wd` field, and the getter methods extract this info
+	 *
+	 * tk_type is used in place of some trait implementation, to avoid having to use something like &dyn Tk
+	 * Avoiding dynamic dispatch in this way is faster and simpler
+	 */
 	pub fn new(text: String, span: Span, flags: WdFlags) -> Self {
 		Self {
 			tk_type: TkType::String,
@@ -484,77 +501,6 @@ pub enum TkState {
 	Invalid // Used when an unexpected state is discovered
 }
 
-impl TkState {
-	pub fn check_str(slice: &str, context: TkState) -> Self {
-		use crate::interp::token::TkState::*;
-		match slice {
-			// Loop and conditional openers
-			"for" if matches!(context, Command) => For,
-			"if" if matches!(context, Command) => If,
-			"while" if matches!(context, Command) => Loop,
-			"until" if matches!(context, Command) => Loop,
-
-			// Conditional separators and terminators
-			"then" if matches!(context, If | Elif) => Then,
-			"elif" if matches!(context, Then | Elif) => Elif,
-			"else" if matches!(context, If | Then | Elif) => Else,
-			"fi" if matches!(context, If | Then | Elif | Else) => Fi,
-
-			// Loop terminators
-			"do" if matches!(context, For | Loop) => Do,
-			"done" if matches!(context, Do) => Done,
-
-			// Case-specific keywords
-			"case" if matches!(context, Command) => Case,
-			"in" if matches!(context, Case | For | Select) => In,
-			"esac" if matches!(context, CaseIn | CaseBlock | CaseBody) => Esac,
-
-			// Select-specific keywords
-			"select" if matches!(context, Command) => Select,
-
-			// General flow control
-			"in" if matches!(context, For | Case | Select) => In,
-			"|" if Self::executable().contains(&context) => Operator,
-			"&" if Self::executable().contains(&context) => Operator,
-
-			// Defaults to Ident for non-keyword or unmatched cases
-			_ => Ident,
-		}
-	}
-	pub fn executable() -> Vec<Self> {
-		use crate::interp::token::TkState::*;
-		let mut execs = vec![
-			Command,
-			Subshell
-		];
-		execs.extend(Self::openers());
-		execs
-	}
-	pub fn body() -> Vec<Self> {
-		use crate::interp::token::TkState::*;
-		vec![
-			Command,
-			Arg,
-			Separator,
-			Redirect,
-			SQuote,
-			DQuote,
-			CommandSub,
-			Subshell
-		]
-	}
-	pub fn openers() -> Vec<Self> {
-		use crate::interp::token::TkState::*;
-		vec![
-			For,
-			Loop,
-			If,
-			Case,
-			Select
-		]
-	}
-}
-
 #[derive(Debug)]
 pub struct OxTokenizer {
 	input: String,
@@ -598,6 +544,8 @@ impl OxTokenizer {
 	fn split_input(&self) -> Vec<String> {
 		/*
 		 * Used to split raw input during expansion
+		 * Important to do it this way rather than just using split(' '),
+		 * This function follows all of the rules associated with shell syntax
 		 * TODO: find some way to combine this logic with complete_word()
 		 */
 		let input = &self.input;
