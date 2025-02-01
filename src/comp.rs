@@ -39,203 +39,6 @@ pub const VARSUB: &str = MAGENTA;
 pub const COMMENT: &str = BRIGHT_BLACK;
 pub const FUNCNAME: &str = CYAN;
 
-#[derive(Debug)]
-pub enum SyntaxTk {
-	Keyword(String),
-	CommandOk(String),
-	CommandNotFound(String),
-	Comment(String),
-	Assignment(String),
-	VarSub(String),
-	CmdSub(String),
-	Subshell(String),
-	Path(String),
-	Number(String),
-	Arg(String),
-	String(String),
-	FuncName(String),
-	Delim(String),
-	Escaped(String),
-	Operator(String),
-	Space,
-	Semi,
-	Newline,
-}
-
-impl SyntaxTk {
-	pub fn to_string(&self) -> String {
-		match self {
-    SyntaxTk::Keyword(word) |
-    SyntaxTk::CommandOk(word) |
-    SyntaxTk::CommandNotFound(word) |
-    SyntaxTk::Comment(word) |
-    SyntaxTk::Assignment(word) |
-    SyntaxTk::VarSub(word) |
-    SyntaxTk::CmdSub(word) |
-    SyntaxTk::Subshell(word) |
-    SyntaxTk::Path(word) |
-    SyntaxTk::Number(word) |
-    SyntaxTk::Arg(word) |
-    SyntaxTk::String(word) |
-    SyntaxTk::FuncName(word) |
-    SyntaxTk::Delim(word) |
-    SyntaxTk::Escaped(word) |
-    SyntaxTk::Operator(word) => word.to_string(),
-    SyntaxTk::Space => String::from(' '),
-    SyntaxTk::Semi => String::from(';'),
-    SyntaxTk::Newline => String::from('\n')
-}
-	}
-	pub fn keyword(word: &str) -> Self {
-		let formatted = format!("{}{}{}", KEYWORD, word, RESET);
-		Self::Keyword(formatted)
-	}
-	pub fn assignment(word: &str) -> Option<Self> {
-		if let Some((left,right)) = word.split_once('=') {
-			let left_fmt = format!("{}{}{}",FUNCNAME,left,RESET);
-			let right_fmt = format!("{}{}{}",VARSUB,right,RESET);
-			let formatted = vec![left_fmt,right_fmt].join("=");
-			Some(Self::Assignment(formatted))
-		} else {
-			None
-		}
-	}
-	pub fn subshell(word: &str) -> Self {
-		let word = word.trim_matches(['(',')']);
-		let formatted = format!("{}{}{}{}{}{}{}",
-			VARSUB,
-			'(',
-			RESET,
-			word,
-			VARSUB,
-			')',
-			RESET
-		);
-		Self::Subshell(formatted)
-	}
-	pub fn command_ok(word: &str) -> Self {
-		let formatted = format!("{}{}{}", COMMAND, word, RESET);
-		Self::CommandOk(formatted)
-	}
-	pub fn command_not_found(word: &str) -> Self {
-		let formatted = format!("{}{}{}", ERROR, word, RESET);
-		Self::CommandNotFound(formatted)
-	}
-
-	pub fn comment(text: &str) -> Self {
-		let formatted = format!("{}{}{}", COMMENT, text, RESET);
-		Self::Comment(formatted)
-	}
-
-	pub fn varsub(text: &str) -> Self {
-		let formatted = format!("{}{}{}", VARSUB, text, RESET);
-		Self::VarSub(formatted)
-	}
-
-	pub fn cmdsub(text: &str) -> Self {
-		let formatted = format!("{}{}{}", FUNCNAME, text, RESET);
-		Self::CmdSub(formatted)
-	}
-
-	pub fn path(path: &str) -> Self {
-		let formatted = format!("{}{}{}", PATH, path, RESET);
-		Self::Path(formatted)
-	}
-
-	pub fn number(num: &str) -> Self {
-		let formatted = format!("{}{}{}", NUMBER, num, RESET);
-		Self::Number(formatted)
-	}
-
-	pub fn arg(arg: &str) -> Self {
-		let formatted = format!("{}{}{}", RESET, arg, RESET);
-		Self::Arg(formatted)
-	}
-
-	pub fn string(literal: &str) -> Self {
-		let formatted = format!("{}{}{}", STRING, literal, RESET);
-		Self::String(formatted)
-	}
-
-	pub fn func_name(name: &str) -> Self {
-		let formatted = format!("{}{}{}", FUNCNAME, name, RESET);
-		Self::FuncName(formatted)
-	}
-
-	pub fn delim(delim: &str) -> Self {
-		let formatted = format!("{}{}{}", OPERATOR, delim, RESET); // Assuming Delim is styled like Operator
-		Self::Delim(formatted)
-	}
-
-	pub fn escaped(escaped: &str) -> Self {
-		let formatted = format!("{}{}{}", ESCAPED, escaped, RESET);
-		Self::Escaped(formatted)
-	}
-
-	pub fn operator(op: &str) -> Self {
-		let formatted = format!("{}{}{}", OPERATOR, op, RESET);
-		Self::Operator(formatted)
-	}
-
-	pub fn space() -> Self {
-		Self::Space
-	}
-
-	pub fn semi() -> Self {
-		Self::Semi
-	}
-
-	pub fn newline() -> Self {
-		Self::Newline
-	}
-}
-
-#[derive(Clone,PartialEq,Debug)]
-pub enum SyntaxCtx {
-	Arg, // Command arguments; only appear after commands
-	Command, // Starting point for the tokenizer
-	VarSub,
-	FuncDef, // Function names
-	FuncBody, // Function bodies
-	Escaped, // Used to denote an escaped character like \a
-	Comment, // #Comments like this
-	CommandSub, // $(Command substitution)
-	Operator, // operators
-}
-
-impl Default for SyntaxCtx {
-	fn default() -> Self {
-	    Self::Command
-	}
-}
-
-static DELIM_PAIRS: Lazy<HashMap<String, Vec<String>>> = Lazy::new(|| {
-	let mut m = HashMap::new();
-
-	// Parentheses
-	m.insert(")".into(), vec!["(".into()]);
-
-	// Braces and brackets
-	m.insert("}".into(), vec!["{".into()]);
-	m.insert("]".into(), vec!["[".into()]);
-
-	// Conditional statements
-	m.insert("if".into(), vec!["then".into()]);
-	m.insert("then".into(), vec!["elif".into(), "else".into(), "fi".into()]);
-	m.insert("elif".into(), vec!["then".into()]);
-	m.insert("else".into(), vec!["fi".into()]);
-
-	// Loops
-	m.insert("for".into(), vec!["do".into()]);
-	m.insert("while".into(), vec!["do".into()]);
-	m.insert("do".into(), vec!["done".into()]);
-
-	// Case statements
-	m.insert("case".into(), vec!["esac".into()]);
-
-	m
-});
-
 pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 	let mut delim_stack = vec![]; // Stack for delimiters like (), {}, []
 	let mut keyword_stack = vec![]; // Stack for keywords like if/then/fi
@@ -274,7 +77,7 @@ pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 				// Check if the top of the stack matches the expected opening delimiter
 				if delim_stack.pop() != Some(expected) {
 					return Err(ShError::from_syntax(
-							format!("Unmatched closing delimiter: {}", ch).as_str(),
+							format!("Unmatched closing delimiter: {ch}").as_str(),
 							Span::new(),
 					));
 				}
@@ -408,51 +211,22 @@ pub fn validate_cmd(target: &str, path: &str) -> bool {
 	let is_func = logic.get_func(target).is_some();
 	let is_alias = logic.get_alias(target).is_some();
 	let is_builtin = BUILTINS.contains(&target);
-	let is_path = Path::new(target).exists();
+	let is_file = {
+		let mut path_cand = target.to_string();
+		if path_cand.starts_with("~/") {
+			path_cand = path_cand.strip_prefix("~").unwrap().to_string();
+			let home = env::var("HOME").unwrap();
+			path_cand = format!("{home}{path_cand}");
+		}
+		let path = Path::new(&path_cand);
+		path.exists() && path.is_file()
+	};
 
-	is_cmd | is_func | is_alias | is_builtin | is_path
-}
-
-pub fn analyze_token(word: &str, ctx: SyntaxCtx, path: &str) -> SyntaxTk {
-	use crate::comp::SyntaxCtx::*;
-	use crate::comp::SyntaxTk as STk;
-	match ctx {
-		Command => {
-			if KEYWORDS.contains(&word) {
-				return STk::keyword(&word)
-			} else if word.starts_with('(') && word.ends_with(')') {
-				return STk::subshell(&word)
-			} else if word.has_unescaped("=") {
-				return STk::assignment(&word).unwrap()
-			} else if validate_cmd(&word, &path) {
-				return STk::command_ok(&word)
-			} else {
-				return STk::command_not_found(&word)
-			}
-		}
-		Arg => {
-			if (word.starts_with('"') && word.ends_with('"')) || (word.starts_with('\'') && word.ends_with('\'')) {
-				return STk::string(&word)
-			} else if word.parse::<i32>().is_ok() || word.parse::<f32>().is_ok() {
-				return STk::number(&word)
-			} else {
-				return STk::arg(&word)
-			}
-		}
-		VarSub => {
-			return STk::varsub(&word)
-		}
-    FuncDef => return STk::func_name(&word),
-    FuncBody => todo!(),
-    Escaped => return STk::escaped(&word),
-    Comment => return STk::comment(&word),
-    CommandSub => todo!(),
-    Operator => todo!(),
-	}
+	is_cmd | is_func | is_alias | is_builtin | is_file
 }
 
 pub fn style_text(code: &str, text: &str) -> String {
-	format!("{}{}{}",code,text,RESET)
+	format!("{code}{text}{RESET}")
 }
 
 pub fn highlight_token(tk: Tk, path: &str) -> String {
@@ -520,7 +294,7 @@ pub fn highlight_token(tk: Tk, path: &str) -> String {
 				AssOp::MinusEquals => style_text(RESET,"-="),
 				AssOp::Equals => style_text(RESET,"="),
 			};
-			return format!("{}{}{}",hl_key,op,hl_val);
+			return format!("{hl_key}{op}{hl_val}");
 		}
 
     TkT::ProcessSub |
@@ -592,8 +366,6 @@ impl Highlighter for OxHelper {
 	    return true
 	}
 	fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
-		use crate::comp::SyntaxCtx::*;
-		use crate::comp::SyntaxTk as STk;
 
 		let mut line_tokenizer = OxTokenizer::new(line);
 		let mut hl_buffer = String::new();
@@ -675,141 +447,6 @@ impl OxHelper {
 		helper
 	}
 
-	fn highlight_one(&self, line: &mut VecDeque<char>) -> String {
-		let mut hl_block = String::new();
-		let mut prefix = ERROR; // Default case
-		let mut cur_word = String::new();
-		let mut dub_quote = false;
-		let mut paren_stack = vec![];
-		let path = read_vars(|v| v.get_evar("PATH")).unwrap().unwrap_or_default();
-		while let Some(ch) = line.pop_front() {
-			match ch {
-				'\\' => {
-					let saved_prefix = prefix;
-					prefix = ESCAPED;
-					let escaped = line.pop_front().map(|ch| ch.to_string()).unwrap_or_default();
-					let formatted = format!("{}{}{}{}",prefix,ch,escaped,saved_prefix);
-					hl_block.push_str(&formatted);
-				}
-				'(' if cur_word.is_empty() => {
-					cur_word.push(ch);
-					paren_stack.push(ch);
-					while let Some(subsh_ch) = line.pop_front() {
-						cur_word.push(subsh_ch);
-						if subsh_ch == '\\' {
-							if let Some(esc_ch) = line.pop_front() {
-								cur_word.push(esc_ch);
-							}
-						}
-						if subsh_ch == '(' {
-							paren_stack.push(subsh_ch);
-						}
-						if subsh_ch == ')' {
-							paren_stack.pop();
-							if paren_stack.is_empty() {
-								break
-							}
-						}
-					}
-					let formatted = format!("{}{}{}",VARSUB,mem::take(&mut cur_word),RESET);
-					hl_block.push_str(&formatted);
-				}
-				'$' => {
-					let mut var_name = String::from(format!("{}{}",VARSUB,ch));
-					if line.front() == Some(&'{') {
-						while let Some(var_ch) = line.pop_front() {
-							var_name.push(var_ch);
-							if var_ch == '\\' {
-								if let Some(esc_ch) = line.pop_front() {
-									var_name.push(esc_ch);
-								}
-							}
-							if var_ch == '}' {
-								var_name.push_str(RESET);
-								break
-							}
-						}
-					} else {
-						while let Some(var_ch) = line.pop_front() {
-							var_name.push(var_ch);
-							if var_ch == '\\' {
-								if let Some(esc_ch) = line.pop_front() {
-									var_name.push(esc_ch);
-								}
-							}
-							if var_ch == ' ' || var_ch == '\t' || var_ch == ';' || var_ch == '\n' {
-								var_name.push_str(RESET);
-								break
-							}
-						}
-					}
-					hl_block.push_str(&var_name);
-				}
-				'"' => {
-					dub_quote = !dub_quote;
-					let formatted = if dub_quote {
-						prefix = STRING;
-						format!("{}{}",prefix,ch)
-					} else {
-						prefix = RESET;
-						format!("{}{}",ch,prefix)
-					};
-					hl_block.push_str(&formatted);
-				}
-				_ if dub_quote => {
-					hl_block.push(ch);
-				}
-				'\'' => {
-					let mut sng_quoted = String::from(format!("{}{}",STRING,ch));
-					while let Some(quoted_ch) = line.pop_front() {
-						sng_quoted.push(quoted_ch);
-						if quoted_ch == '\'' {
-							sng_quoted.push_str(&format!("{}{}",quoted_ch,RESET));
-							break
-						}
-					}
-				}
-				' ' | '\t' | ';' | '\n' => {
-					if hl_block.trim().is_empty() && !cur_word.is_empty() {
-						if KEYWORDS.contains(&cur_word.as_str()) {
-							prefix = KEYWORD;
-						} else if validate_cmd(&cur_word, &path) {
-							prefix = COMMAND;
-						}
-						let formatted = format!("{}{}{}",prefix,mem::take(&mut cur_word),RESET);
-						hl_block.push_str(&formatted);
-					} else if !cur_word.is_empty() {
-						let formatted = format!("{}{}{}",RESET,mem::take(&mut cur_word),RESET);
-						hl_block.push_str(&formatted);
-					}
-					hl_block.push(ch);
-					if matches!(ch, ';' | '\n') {
-						break
-					}
-				}
-				_ => {
-					cur_word.push(ch);
-				}
-			}
-		}
-
-		if !cur_word.is_empty() {
-			if hl_block.trim().is_empty() && !cur_word.is_empty() {
-				let cmd_found = validate_cmd(&cur_word, &path);
-				if cmd_found {
-					prefix = COMMAND;
-				}
-				let formatted = format!("{}{}{}",prefix,cur_word,RESET);
-				hl_block.push_str(&formatted);
-			} else if !cur_word.is_empty() {
-				let formatted = format!("{}{}{}",RESET,cur_word,RESET);
-				hl_block.push_str(&formatted);
-			}
-		}
-
-		hl_block
-	}
-
 	fn hist_substr_search(&self, term: &str, hist: &dyn History) -> Option<String> {
 		let limit = hist.len();
 		for i in 0..limit {
@@ -824,7 +461,7 @@ impl OxHelper {
 
 	// Dynamically add commands (if needed, e.g., external binaries in $PATH)
 	fn update_commands_from_path(&mut self) {
-		if let Some(paths) = env::var_os("PATH") {
+		if let Ok(paths) = env::var("PATH") {
 			let mut external_commands = HashSet::new();
 			for path in env::split_paths(&paths) {
 				if let Ok(entries) = std::fs::read_dir(path) {
@@ -856,36 +493,37 @@ impl Completer for OxHelper {
 		_: &Context<'_>,
 	) -> Result<(usize, Vec<Self::Candidate>), ReadlineError> {
 		let mut completions = Vec::new();
+		let line = line.to_string();
 		let num_words = line.split_whitespace().count();
 
 		// Determine if this is a file path or a command completion
-		if !line.is_empty() && (num_words > 1 || line.split(" ").into_iter().next().is_some_and(|wrd| wrd.starts_with(['.','/']))) {
+		if !line.is_empty() && (num_words > 1 || line.split(" ").into_iter().next().is_some_and(|wrd| wrd.starts_with(['.','/','~']))) {
 			//TODO: Handle these unwraps
 			let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE")).unwrap().unwrap_or_else(|| -> String {
 				let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
-				format!("{}/.ox_hist",home)
+				format!("{home}/.ox_hist")
 			});
 			let hist_path = PathBuf::from(hist_path);
 
 			// Delegate to FilenameCompleter for file path completion
 			let mut history = FileHistory::new();
 			history.load(&hist_path).unwrap();
-			let (start, matches) = self.filename_comp.complete(line, pos, &Context::new(&history))?;
+			let (start, matches) = self.filename_comp.complete(&line, pos, &Context::new(&history))?;
 			completions.extend(matches.iter().map(|c| c.display().to_string()));
 
 			// Invoke fuzzyfinder if there are matches
 			if !completions.is_empty() && completions.len() > 1 {
 				if let Some(selected) = skim_comp(completions.clone()) {
-					let result = helper::slice_completion(line, &selected);
+					let result = helper::slice_completion(&line, &selected);
 					let unfinished = line.split_whitespace().last().unwrap();
-					let result = format!("{}{}",unfinished,result);
+					let result = format!("{unfinished}{result}");
 					return Ok((start, vec![result]));
 				}
 			}
 
 			// Return completions, starting from the beginning of the word
 			if let Some(candidate) = completions.pop() {
-				let result = helper::slice_completion(line, &candidate);
+				let result = helper::slice_completion(&line, &candidate);
 				completions.push(result);
 			}
 			return Ok((pos, completions))
@@ -903,12 +541,12 @@ impl Completer for OxHelper {
 		// Invoke fuzzyfinder if there are matches
 		if completions.len() > 1 {
 			if let Some(selected) = skim_comp(completions.clone()) {
-				let result = helper::slice_completion(line, &selected);
+				let result = helper::slice_completion(&line, &selected);
 				return Ok((pos, vec![result]));
 			}
 		}
 		if let Some(candidate) = completions.pop() {
-			let result = helper::slice_completion(line, &candidate);
+			let result = helper::slice_completion(&line, &candidate);
 			completions.push(result);
 		}
 		// Return completions, starting from the beginning of the word
@@ -919,8 +557,7 @@ impl Completer for OxHelper {
 pub fn skim_comp(options: Vec<String>) -> Option<String> {
 	let mut stdout = stdout();
 
-	let (init_col, init_row) = cursor::position().unwrap();
-	let (_,rows) = terminal::size().unwrap();
+	let (init_col, _) = cursor::position().unwrap();
 
 	// Get terminal dimensions
 	let height = options.len().min(10) as u16; // Set maximum number of options to display
@@ -937,7 +574,6 @@ pub fn skim_comp(options: Vec<String>) -> Option<String> {
 		.build()
 		.unwrap();
 
-		// Run skim and detect if Escape was pressed
 		let selected = Skim::run_with(&skim_options, Some(input))
 			.and_then(|out| {
 				if out.final_key == Key::ESC {
@@ -950,11 +586,18 @@ pub fn skim_comp(options: Vec<String>) -> Option<String> {
 
 		let (_, new_row) = cursor::position().unwrap();
 
+		for i in 0..height + 2 {
+			execute!(
+				stdout,
+				MoveTo(0,new_row + i),
+				Clear(ClearType::CurrentLine)
+			).unwrap();
+		}
+
 		// Restore cursor position to where the prompt was before completion
 		execute!(
 			stdout,
 			MoveTo(init_col, new_row - 1),
-			Clear(ClearType::FromCursorDown),
 		).unwrap();
 
 		selected
