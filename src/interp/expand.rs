@@ -7,8 +7,8 @@ use crate::execute::{self, ProcIO, RustFd};
 use crate::interp::parse::NdFlags;
 use crate::interp::token::{Tk, TkType, WdFlags, WordDesc};
 use crate::interp::helper::{self,StrExtension};
-use crate::shellenv::{self, read_logic, read_vars, AshVal, VarTable, RSH_PATH};
-use crate::AshResult;
+use crate::shellenv::{self, read_logic, read_vars, LashVal, VarTable, RSH_PATH};
+use crate::LashResult;
 
 use super::parse::{NdType, Node, Span};
 use super::token::REGEX;
@@ -32,7 +32,7 @@ pub fn check_globs(tk: &Tk) -> bool {
 	has_globs || has_brackets
 }
 
-pub fn expand_shebang(mut body: String) -> AshResult<String> {
+pub fn expand_shebang(mut body: String) -> LashResult<String> {
 	// If no shebang, use the path to rsh
 	// and attach the '--subshell' argument to signal to the rsh subprocess that it is in a subshell context
 	if !body.starts_with("#!") {
@@ -72,7 +72,7 @@ pub fn expand_shebang(mut body: String) -> AshResult<String> {
 	Ok(body)
 }
 
-pub fn expand_arguments(node: &mut Node) -> AshResult<Vec<Tk>> {
+pub fn expand_arguments(node: &mut Node) -> LashResult<Vec<Tk>> {
 	let argv = node.get_argv()?;
 	let mut cmd_name = None;
 	let mut glob = true;
@@ -140,7 +140,7 @@ pub enum PromptTk {
 	WorkingDirAbridged, // Abridged working directory (e.g., ~/projects)
 	Hostname,           // Full hostname of the machine
 	HostnameAbridged,   // Abridged hostname (e.g., "host" from "host.domain.com")
-	ShellName,          // Name of the shell (e.g., "bash", "zsh", "ash")
+	ShellName,          // Name of the shell (e.g., "bash", "zsh", "lash")
 	Username,           // Username of the current user
 	PromptSymbol,       // The shell's prompt symbol (e.g., $ for user, # for root)
 	ExitSuccess,
@@ -245,7 +245,7 @@ pub fn tokenize_prompt(ps1: &str) -> VecDeque<PromptTk> {
 	tokens
 }
 
-pub fn expand_prompt(text: Option<String>) -> AshResult<String> {
+pub fn expand_prompt(text: Option<String>) -> LashResult<String> {
 	// Determine the default color based on the user ID
 	let default_color = if read_vars(|vars| vars.get_evar("UID").is_some_and(|uid| uid == "0"))? {
 		"31" // Red if uid is 0, aka root user
@@ -319,7 +319,7 @@ pub fn expand_prompt(text: Option<String>) -> AshResult<String> {
 }
 
 
-pub fn expand_alias(alias: &str) -> AshResult<String> {
+pub fn expand_alias(alias: &str) -> LashResult<String> {
 	if let Some(alias_content) = read_logic(|log| log.get_alias(alias))? {
 		Ok(alias_content)
 	} else {
@@ -334,7 +334,7 @@ pub fn check_home_expansion(text: &str) -> bool {
 	)
 }
 
-pub fn expand_token(token: Tk, expand_glob: bool) -> AshResult<VecDeque<Tk>> {
+pub fn expand_token(token: Tk, expand_glob: bool) -> LashResult<VecDeque<Tk>> {
 	let mut working_buffer: VecDeque<Tk> = VecDeque::new();
 	let mut product_buffer: VecDeque<Tk> = VecDeque::new();
 	let split_words = token.tk_type != TkType::String;
@@ -437,7 +437,7 @@ pub fn clean_escape_chars(token_buffer: &mut VecDeque<Tk>) {
 	}
 }
 
-pub fn expand_cmd_sub(token: Tk) -> AshResult<Tk> {
+pub fn expand_cmd_sub(token: Tk) -> LashResult<Tk> {
 	let new_token;
 	if let TkType::CommandSub = token.tk_type {
 		let body = token.text().to_string();
@@ -541,7 +541,7 @@ fn split_braces(word: &str) -> Option<(&str, &str, &str)> {
 	None
 }
 
-pub fn expand_braces(word: String) -> AshResult<VecDeque<String>> {
+pub fn expand_braces(word: String) -> LashResult<VecDeque<String>> {
 	let mut result = VecDeque::new(); // Final results
 	let mut working_buffer = String::new(); // Reusable buffer
 	let mut product_stack = VecDeque::new(); // First pass results
@@ -645,7 +645,7 @@ pub fn expand_amble(amble: &str) -> Vec<String> {
 	result
 }
 
-pub fn expand_var(mut string: String, var_table: &VarTable) -> AshResult<String> {
+pub fn expand_var(mut string: String, var_table: &VarTable) -> LashResult<String> {
 	loop {
 		let mut left = String::new();
 		let mut right = String::new();
@@ -695,7 +695,7 @@ pub fn expand_var(mut string: String, var_table: &VarTable) -> AshResult<String>
 		}
 		let right = right_chars.iter().collect::<String>();
 
-		let value: AshVal = if REGEX["var_index"].is_match(&var_name) {
+		let value: LashVal = if REGEX["var_index"].is_match(&var_name) {
 			if let Some(caps) = REGEX["var_index"].captures(&var_name) {
 				let var_name = caps.get(1).map_or("", |m| m.as_str());
 				let index = caps.get(2).map_or("", |m| m.as_str());
@@ -718,7 +718,7 @@ pub fn expand_var(mut string: String, var_table: &VarTable) -> AshResult<String>
 	}
 }
 
-fn expand_params(token: Tk) -> AshResult<VecDeque<Tk>> {
+fn expand_params(token: Tk) -> LashResult<VecDeque<Tk>> {
 	let mut expanded_tokens = VecDeque::new();
 	// Get the positional parameter string from shellenv and split it
 	let arg_string = read_vars(|vars| vars.get_param("@").unwrap_or_default())?;

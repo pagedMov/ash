@@ -36,8 +36,8 @@ use std::{collections::VecDeque, env, io::Write, fs::OpenOptions, os::fd::AsRawF
 use builtin::echo_internal;
 use env_logger::Builder;
 use event::ShError;
-use execute::{traverse_ast, AshWait, RustFd};
-use interp::{parse::{descend, NdType}, token::AshTokenizer};
+use execute::{traverse_ast, LashWait, RustFd};
+use interp::{parse::{descend, NdType}, token::LashTokenizer};
 use log::LevelFilter;
 use nix::{fcntl::OFlag, sys::{stat::Mode, termios::{self, LocalFlags}}, unistd::{Pid,isatty}};
 use shellenv::{read_vars, write_meta, write_vars, EnvFlags, RSH_PATH};
@@ -45,7 +45,7 @@ use termios::Termios;
 
 //use crate::event::EventLoop;
 
-pub type AshResult<T> = Result<T, ShError>;
+pub type LashResult<T> = Result<T, ShError>;
 const RSH_VERSION: &str = "v0.3.0-alpha";
 
 fn set_termios() -> Option<Termios> {
@@ -70,7 +70,7 @@ fn init_logger() {
 	let log_file = OpenOptions::new()
 		.create(true)
 		.append(true)
-		.open("/home/pagedmov/ash.log")
+		.open("/home/pagedmov/lash.log")
 		.unwrap();
 
 		Builder::new()
@@ -132,7 +132,7 @@ async fn main() {
 	if args[0].starts_with('-') {
 		// TODO: handle unwrap
 		let home = read_vars(|vars| vars.get_evar("HOME")).unwrap().unwrap();
-		let path = PathBuf::from(format!("{}/.ash_profile",home));
+		let path = PathBuf::from(format!("{}/.lash_profile",home));
 		if path.exists() {
 			shellenv::source_file(path).unwrap();
 		}
@@ -143,7 +143,7 @@ async fn main() {
 	}
 	if !args.contains(&"--no-rc".into()) {
 		let home = read_vars(|vars| vars.get_evar("HOME")).unwrap().unwrap();
-		let path = PathBuf::from(format!("{}/.ashrc",home));
+		let path = PathBuf::from(format!("{}/.lashrc",home));
 		if path.exists() {
 			shellenv::source_file(path).unwrap();
 		}
@@ -171,7 +171,7 @@ async fn main() {
 
 
 
-fn main_noninteractive(args: Vec<String>, script_path: Option<String>) -> AshResult<AshWait> {
+fn main_noninteractive(args: Vec<String>, script_path: Option<String>) -> LashResult<LashWait> {
 	let mut pos_params: Vec<String> = vec![];
 	let input;
 
@@ -179,7 +179,7 @@ fn main_noninteractive(args: Vec<String>, script_path: Option<String>) -> AshRes
 	if args[1] == "-c" {
 		if args.len() < 3 {
 			eprintln!("Expected a command after '-c' flag");
-			return Ok(AshWait::Fail { code: 1, cmd: None, });
+			return Ok(LashWait::Fail { code: 1, cmd: None, });
 		}
 		input = args[2].clone(); // Store the command string
 	} else {
@@ -196,7 +196,7 @@ fn main_noninteractive(args: Vec<String>, script_path: Option<String>) -> AshRes
 			}
 			Err(e) => {
 				eprintln!("Error opening file: {}\n", e);
-				return Ok(AshWait::Fail { code: 1, cmd: None, });
+				return Ok(LashWait::Fail { code: 1, cmd: None, });
 			}
 		}
 	}
@@ -207,19 +207,19 @@ fn main_noninteractive(args: Vec<String>, script_path: Option<String>) -> AshRes
 		let key = format!("{}",index + 1);
 		write_vars(|v| v.set_param(key, param))?;
 	}
-	let mut tokenizer = AshTokenizer::new(&input);
-	let mut last_result = AshWait::new();
+	let mut tokenizer = LashTokenizer::new(&input);
+	let mut last_result = LashWait::new();
 	loop {
 		let state = descend(&mut tokenizer);
 		match state {
 			Ok(parse_state) => {
 				if deconstruct!(NdType::Root { deck }, &parse_state.ast.nd_type, {
 					deck.is_empty()
-				}) { break Ok(AshWait::Success) }
+				}) { break Ok(LashWait::Success) }
 				let result = traverse_ast(parse_state.ast, None);
 				match result {
 					Ok(code) => {
-						if let AshWait::Fail { code, cmd } = code {
+						if let LashWait::Fail { code, cmd } = code {
 							panic!()
 						} else {
 							last_result = code;

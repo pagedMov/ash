@@ -4,7 +4,7 @@ use std::{collections::VecDeque, ffi::c_int, fmt::Display, io, panic::Location, 
 use bitflags::Flags;
 use nix::unistd::{getpgrp, isatty, Pid};
 
-use crate::{execute::{self, AshWait, ProcIO}, interp::{helper, parse::{descend, NdFlags, Node, Span}, token::AshTokenizer}, prompt, shellenv::{self, read_meta, read_vars, write_meta, EnvFlags}, AshResult};
+use crate::{execute::{self, LashWait, ProcIO}, interp::{helper, parse::{descend, NdFlags, Node, Span}, token::LashTokenizer}, prompt, shellenv::{self, read_meta, read_vars, write_meta, EnvFlags}, LashResult};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShError {
@@ -206,20 +206,20 @@ pub enum ShEvent {
 	Exit(i32),
 	Signal(c_int),
 	Error(ShError),
-	LastStatus(AshWait),
+	LastStatus(LashWait),
 	Prompt
 }
 
-pub fn throw(err: ShError) -> AshResult<()> {
+pub fn throw(err: ShError) -> LashResult<()> {
 	let input = read_meta(|m| m.get_last_input())?;
 	eprintln!("{}", ShErrorFull::from(err,&input));
 	Ok(())
 }
 
-pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: Option<ProcIO>) -> AshResult<AshWait> {
-	let mut last_status = AshWait::Fail { code: 1, cmd: None };
+pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: Option<ProcIO>) -> LashResult<LashWait> {
+	let mut last_status = LashWait::Fail { code: 1, cmd: None };
 	if !input.is_empty() {
-		let mut tokenizer = AshTokenizer::new(input);
+		let mut tokenizer = LashTokenizer::new(input);
 
 		loop {
 			let result = descend(&mut tokenizer);
@@ -253,7 +253,7 @@ pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: 
 	Ok(last_status)
 }
 
-pub fn main_loop() -> AshResult<()> {
+pub fn main_loop() -> LashResult<()> {
 	if read_meta(|m| m.flags().contains(EnvFlags::IN_SUBSH))? {
 		eprintln!("I shouldnt be here");
 	}

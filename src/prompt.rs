@@ -1,4 +1,4 @@
-use crate::{comp::AshHelper, event::{self, ShError}, interp::parse::NdFlags, shellenv::{self, read_meta, read_vars, write_meta}, AshResult};
+use crate::{comp::LashHelper, event::{self, ShError}, interp::parse::NdFlags, shellenv::{self, read_meta, read_vars, write_meta}, LashResult};
 use std::{env, path::{Path, PathBuf}};
 use nix::{sys::signal::{kill, Signal}, unistd::{getpgrp, Pid}};
 
@@ -8,14 +8,14 @@ use crate::interp::expand;
 
 
 
-fn init_prompt() -> AshResult<Editor<AshHelper, DefaultHistory>> {
+fn init_prompt() -> LashResult<Editor<LashHelper, DefaultHistory>> {
 	let config = build_editor_config()?;
 	let mut rl = initialize_editor(config)?;
 	load_history(&mut rl)?;
 	Ok(rl)
 }
 
-fn build_editor_config() -> AshResult<Config> {
+fn build_editor_config() -> LashResult<Config> {
 	let mut config = Config::builder();
 
 	let max_size = read_shell_option("core.max_hist")?.parse::<usize>().unwrap();
@@ -51,24 +51,24 @@ fn build_editor_config() -> AshResult<Config> {
 		Ok(config.build())
 }
 
-fn read_shell_option(option: &str) -> AshResult<String> {
+fn read_shell_option(option: &str) -> LashResult<String> {
 	read_meta(|m| m.get_shopt(option).unwrap_or_default())
 }
 
-fn initialize_editor(config: Config) -> AshResult<Editor<AshHelper, DefaultHistory>> {
+fn initialize_editor(config: Config) -> LashResult<Editor<LashHelper, DefaultHistory>> {
 	let mut rl = Editor::with_config(config).unwrap_or_else(|e| {
 		eprintln!("Failed to initialize Rustyline editor: {}", e);
 		std::process::exit(1);
 	});
 	rl.set_completion_type(rustyline::CompletionType::List);
-	rl.set_helper(Some(AshHelper::new()));
+	rl.set_helper(Some(LashHelper::new()));
 	Ok(rl)
 }
 
-fn load_history(rl: &mut Editor<AshHelper, DefaultHistory>) -> AshResult<()> {
+fn load_history(rl: &mut Editor<LashHelper, DefaultHistory>) -> LashResult<()> {
 	let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE"))?.unwrap_or_else(|| {
 		let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
-		format!("{}/.ash_hist", home)
+		format!("{}/.lash_hist", home)
 	});
 	let hist_path = PathBuf::from(hist_path);
 	if let Err(e) = rl.load_history(&hist_path) {
@@ -77,13 +77,13 @@ fn load_history(rl: &mut Editor<AshHelper, DefaultHistory>) -> AshResult<()> {
 	Ok(())
 }
 
-pub fn run() -> AshResult<String> {
+pub fn run() -> LashResult<String> {
 	write_meta(|m| m.enter_prompt())?;
 
 	let mut rl = init_prompt()?;
 	let hist_path = read_vars(|vars| vars.get_evar("HIST_FILE"))?.unwrap_or_else(|| -> String {
 		let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
-		format!("{}/.ash_hist",home)
+		format!("{}/.lash_hist",home)
 	});
 	if let Ok(cmd) = env::var("OX_PROMPT_AUTOEXEC") {
 		event::execute(&cmd, NdFlags::empty(), None, None)?;

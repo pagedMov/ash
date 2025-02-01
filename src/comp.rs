@@ -7,7 +7,7 @@ use rustyline::{completion::{Candidate, Completer, FilenameCompleter}, error::Re
 use skim::{prelude::{Key, SkimItemReader, SkimOptionsBuilder}, Skim};
 use std::{borrow::Cow, collections::{HashMap, HashSet, VecDeque}, env, fmt::Display, io::stdout, mem, path::{Path, PathBuf}};
 
-use crate::{builtin::BUILTINS, event::ShError, interp::{expand, helper::{self, StrExtension}, parse::Span, token::{AssOp, AshTokenizer, Tk, WdFlags, KEYWORDS}}, shellenv::{read_logic, read_vars}};
+use crate::{builtin::BUILTINS, event::ShError, interp::{expand, helper::{self, StrExtension}, parse::Span, token::{AssOp, LashTokenizer, Tk, WdFlags, KEYWORDS}}, shellenv::{read_logic, read_vars}};
 
 pub const RESET: &str = "\x1b[0m";
 pub const BLACK: &str = "\x1b[30m";
@@ -263,19 +263,19 @@ pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 
 
 
-pub struct AshHint {
+pub struct LashHint {
 	text: String,
 	styled_text: String
 }
 
-impl AshHint {
+impl LashHint {
 	pub fn new(text: String) -> Self {
 		let styled_text = style(&text).with(Color::DarkGrey).to_string();
 		Self { text, styled_text }
 	}
 }
 
-impl Hint for AshHint {
+impl Hint for LashHint {
 	fn display(&self) -> &str {
 		&self.styled_text
 	}
@@ -342,7 +342,7 @@ pub fn highlight_token(tk: Tk, path: &str) -> String {
 			return format!("{}{}{}",'{',hl_body,'}');
 		}
     TkT::LoopCond | TkT::LoopBody => {
-			let mut sub_tokenizer = AshTokenizer::new(tk.text());
+			let mut sub_tokenizer = LashTokenizer::new(tk.text());
 			let mut hl_cond = String::new();
 			loop {
 				let result = sub_tokenizer.tokenize_one(false);
@@ -444,18 +444,18 @@ pub fn highlight_token(tk: Tk, path: &str) -> String {
 
 
 #[derive(Helper)]
-pub struct AshHelper {
+pub struct LashHelper {
 	filename_comp: FilenameCompleter,
 	commands: Vec<String>, // List of built-in or cached commands
 }
 
-impl Highlighter for AshHelper {
+impl Highlighter for LashHelper {
 	fn highlight_char(&self, line: &str, pos: usize, kind: rustyline::highlight::CmdKind) -> bool {
 	    return true
 	}
 	fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
 
-		let mut line_tokenizer = AshTokenizer::new(line);
+		let mut line_tokenizer = LashTokenizer::new(line);
 		let mut hl_buffer = String::new();
 		let path = read_vars(|v| v.get_evar("PATH")).unwrap().unwrap_or_default();
 		loop {
@@ -478,7 +478,7 @@ impl Highlighter for AshHelper {
 	}
 }
 
-impl Hinter for AshHelper {
+impl Hinter for LashHelper {
 	fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<Self::Hint> {
 		if line.is_empty() {
 			return None
@@ -487,17 +487,17 @@ impl Hinter for AshHelper {
 		let result = self.hist_substr_search(line, history);
 		if let Some(hist_line) = result {
 			let window = hist_line[line.len()..].to_string();
-			let hint = AshHint::new(window);
+			let hint = LashHint::new(window);
 			Some(hint)
 		} else {
 			None
 		}
 	}
 
-type Hint = AshHint;
+type Hint = LashHint;
 }
 
-impl Validator for AshHelper {
+impl Validator for LashHelper {
 	fn validate(&self, ctx: &mut ValidationContext) -> rustyline::Result<ValidationResult> {
 		// Get the current input from the context
 		let input = ctx.input();
@@ -517,7 +517,7 @@ impl Validator for AshHelper {
 	}
 }
 
-impl AshHelper {
+impl LashHelper {
 	pub fn new() -> Self {
 		// Prepopulate some built-in commands (could also load dynamically)
 		let commands = vec![
@@ -527,7 +527,7 @@ impl AshHelper {
 			"exit".to_string(),
 		];
 
-		let mut helper = AshHelper {
+		let mut helper = LashHelper {
 			filename_comp: FilenameCompleter::new(),
 			commands,
 		};
@@ -565,13 +565,13 @@ impl AshHelper {
 	}
 }
 
-impl Default for AshHelper {
+impl Default for LashHelper {
 	fn default() -> Self {
 		Self::new()
 	}
 }
 
-impl Completer for AshHelper {
+impl Completer for LashHelper {
 	type Candidate = CompOption;
 
 	fn complete(

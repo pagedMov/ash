@@ -18,7 +18,7 @@ use crate::shellenv::read_vars;
 use crate::shellenv::write_meta;
 use crate::shellenv::EnvFlags;
 use crate::shellenv::PARAMS;
-use crate::AshResult;
+use crate::LashResult;
 use crate::builtin::BUILTINS;
 
 use super::expand;
@@ -311,7 +311,7 @@ impl Tk {
 			}
 		}
 	}
-	pub fn from(wd: WordDesc, context: TkState) -> AshResult<Self> {
+	pub fn from(wd: WordDesc, context: TkState) -> LashResult<Self> {
 		use crate::interp::token::TkState::*;
 		use crate::interp::token::TkType as TkT;
 		match context {
@@ -502,7 +502,7 @@ pub enum TkState {
 }
 
 #[derive(Debug)]
-pub struct AshTokenizer {
+pub struct LashTokenizer {
 	input: String,
 	char_stream: VecDeque<char>,
 	context: Vec<TkState>,
@@ -511,7 +511,7 @@ pub struct AshTokenizer {
 	pub spans: VecDeque<Span>
 }
 
-impl AshTokenizer {
+impl LashTokenizer {
 	pub fn new(input: &str) -> Self {
 		let mut input = input.to_string();
 		let char_stream = input.chars().collect::<VecDeque<char>>();
@@ -634,7 +634,7 @@ impl AshTokenizer {
 		words
 	}
 
-	fn alias_pass(&mut self) -> AshResult<()> {
+	fn alias_pass(&mut self) -> LashResult<()> {
 		let aliases = read_logic(|m| m.borrow_aliases().clone())?;
 		let mut replaced = true;
 		let mut is_command = true;
@@ -667,7 +667,7 @@ impl AshTokenizer {
 
 		Ok(())
 	}
-	fn glob_pass(&mut self) -> AshResult<()> {
+	fn glob_pass(&mut self) -> LashResult<()> {
 		let words = self.split_input();
 		let mut new_input = String::new();
 		let mut is_command = true;
@@ -724,7 +724,7 @@ impl AshTokenizer {
 
 		Ok(())
 	}
-	fn var_pass(&mut self) -> AshResult<()> {
+	fn var_pass(&mut self) -> LashResult<()> {
 		let vartable = read_vars(|v| v.clone())?;
 		let mut is_command = true;
 		let mut replaced = true;
@@ -812,7 +812,7 @@ impl AshTokenizer {
 
 		Ok(())
 	}
-	fn cmd_sub_pass(&mut self) -> AshResult<()> {
+	fn cmd_sub_pass(&mut self) -> LashResult<()> {
 		let mut replaced = true;
 
 		while replaced {
@@ -891,7 +891,7 @@ impl AshTokenizer {
 
 		self.spans = VecDeque::from(spans);
 	}
-	pub fn expand_one(&mut self) -> AshResult<String> {
+	pub fn expand_one(&mut self) -> LashResult<String> {
 		/*
 		 * Here we use basically the same logic as tokenize_one for maintaining context
 		 * The idea is to localize expansion to just the section of the input being worked on
@@ -1121,7 +1121,7 @@ impl AshTokenizer {
 		// We return the remaining unexpanded input here
 		Ok(sliced_input)
 	}
-	pub fn tokenize_one(&mut self, expand: bool) -> AshResult<Vec<Tk>> {
+	pub fn tokenize_one(&mut self, expand: bool) -> LashResult<Vec<Tk>> {
 		/*
 		 * It's called `tokenize_one` because we are only tokenizing a single executable block of logic
 		 * Traditionally, shells parse line by line, but that doesn't really make sense when logic can span several lines
@@ -1278,7 +1278,7 @@ impl AshTokenizer {
 		//dbg!(&self.tokens.iter().map(|tk| (tk.class(),tk.text())).collect::<Vec<(TkType,&str)>>());
 		Ok(take(&mut self.tokens))
 	}
-	fn command_context(&mut self, mut wd: WordDesc, expand: bool) -> AshResult<()> {
+	fn command_context(&mut self, mut wd: WordDesc, expand: bool) -> LashResult<()> {
 		use crate::interp::token::TkState::*;
 		wd = self.complete_word(wd,None)?;
 		if wd.text.ends_with("()") {
@@ -1347,7 +1347,7 @@ impl AshTokenizer {
 				};
 				let mut val_wd = wd.clone();
 				val_wd.text = val.to_string();
-				let mut sub_tokenizer = AshTokenizer::new(&val_wd.text);
+				let mut sub_tokenizer = LashTokenizer::new(&val_wd.text);
 				let mut tokens = VecDeque::from(sub_tokenizer.tokenize_one(expand)?);
 				let mut new_val = String::new();
 				tokens.pop_front(); // Ignore SOI
@@ -1382,7 +1382,7 @@ impl AshTokenizer {
 		}
 		Ok(())
 	}
-	fn arg_context(&mut self, mut wd: WordDesc, expand: bool) -> AshResult<()> {
+	fn arg_context(&mut self, mut wd: WordDesc, expand: bool) -> LashResult<()> {
 		use crate::interp::token::TkState::*;
 		wd.flags |= WdFlags::IS_ARG;
 		if self.char_stream.front().is_some_and(|ch| matches!(ch, ';' | '\n')) {
@@ -1488,7 +1488,7 @@ impl AshTokenizer {
 		}
 		Ok(())
 	}
-	fn string_context(&mut self, mut wd: WordDesc, expand: bool) -> AshResult<()> {
+	fn string_context(&mut self, mut wd: WordDesc, expand: bool) -> LashResult<()> {
 		use crate::interp::token::TkState::*;
 		while let Some(ch) = self.advance() {
 			match ch {
@@ -1538,7 +1538,7 @@ impl AshTokenizer {
 		self.pop_ctx();
 		Ok(())
 	}
-	fn vardec_context(&mut self, mut wd: WordDesc) -> AshResult<()> {
+	fn vardec_context(&mut self, mut wd: WordDesc) -> LashResult<()> {
 		use crate::interp::token::TkState::*;
 		let mut found = false;
 		loop {
@@ -1576,7 +1576,7 @@ impl AshTokenizer {
 		self.push_ctx(ArrDec);
 		Ok(())
 	}
-	fn arrdec_context(&mut self, mut wd: WordDesc) -> AshResult<()> {
+	fn arrdec_context(&mut self, mut wd: WordDesc) -> LashResult<()> {
 		let mut found = false;
 		while self.char_stream.front().is_some_and(|ch| !matches!(ch, ';' | '\n')) {
 			found = true;
@@ -1594,7 +1594,7 @@ impl AshTokenizer {
 		self.pop_ctx();
 		Ok(())
 	}
-	fn subshell_context(&mut self, mut wd: WordDesc, expand: bool) -> AshResult<()> {
+	fn subshell_context(&mut self, mut wd: WordDesc, expand: bool) -> LashResult<()> {
 		use crate::interp::token::TkState::*;
 		self.advance();
 		if *self.ctx() == CommandSub { self.advance(); }
@@ -1644,7 +1644,7 @@ impl AshTokenizer {
 		self.tokens.push(tk);
 		Ok(())
 	}
-	fn func_context(&mut self, mut wd: WordDesc) -> AshResult<()> {
+	fn func_context(&mut self, mut wd: WordDesc) -> LashResult<()> {
 		use crate::interp::token::TkState::*;
 		self.advance();
 		if *self.ctx() == CommandSub { self.advance(); }
@@ -1755,7 +1755,7 @@ impl AshTokenizer {
 		}
 		self.pop_ctx();
 	}
-	fn case_context(&mut self, mut wd: WordDesc, expand: bool) -> AshResult<()> {
+	fn case_context(&mut self, mut wd: WordDesc, expand: bool) -> LashResult<()> {
 		use crate::interp::token::TkState::*;
 		let span = wd.span;
 		let mut closed = false;
@@ -1799,7 +1799,7 @@ impl AshTokenizer {
 					}
 				};
 				let mut body_tokens = vec![];
-				let mut body_tokenizer = AshTokenizer::new(body);
+				let mut body_tokenizer = LashTokenizer::new(body);
 				while let Ok(mut block) = body_tokenizer.tokenize_one(expand) {
 					if !block.is_empty() {
 						if block.first().is_some_and(|tk| tk.tk_type == TkType::SOI) {
@@ -1835,7 +1835,7 @@ impl AshTokenizer {
 		self.pop_ctx();
 		self.tokens.push(var_tk)
 	}
-	fn complete_word(&mut self, mut wd: WordDesc, brk_pattern: Option<char>) -> AshResult<WordDesc> {
+	fn complete_word(&mut self, mut wd: WordDesc, brk_pattern: Option<char>) -> LashResult<WordDesc> {
 		let mut dub_quote = false;
 		let mut sng_quote = false;
 		let mut paren_stack = vec![];
