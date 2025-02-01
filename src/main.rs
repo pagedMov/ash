@@ -46,7 +46,7 @@ use termios::Termios;
 //use crate::event::EventLoop;
 
 pub type OxResult<T> = Result<T, ShError>;
-const RSH_VERSION: &str = "v0.2.0-alpha";
+const RSH_VERSION: &str = "v0.3.0-alpha";
 
 fn set_termios() -> Option<Termios> {
 	if isatty(std::io::stdin().as_raw_fd()).unwrap() {
