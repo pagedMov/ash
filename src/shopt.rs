@@ -395,7 +395,6 @@ impl PromptCustom {
 				}
 			}
 		}
-		dbg!(&self);
 
 		Ok(())
 	}

@@ -1,5 +1,5 @@
-use crate::{comp::OxHelper, event::ShError, shellenv::{self, read_meta, read_vars, write_meta}, OxResult};
-use std::path::{Path, PathBuf};
+use crate::{comp::OxHelper, event::{self, ShError}, interp::parse::NdFlags, shellenv::{self, read_meta, read_vars, write_meta}, OxResult};
+use std::{env, path::{Path, PathBuf}};
 use nix::{sys::signal::{kill, Signal}, unistd::{getpgrp, Pid}};
 
 use rustyline::{self, config::Configurer, error::ReadlineError, history::{DefaultHistory, History}, ColorMode, Config, EditMode, Editor};
@@ -85,6 +85,9 @@ pub fn run() -> OxResult<String> {
 		let home = read_vars(|vars| vars.get_evar("HOME").unwrap()).unwrap();
 		format!("{}/.ox_hist",home)
 	});
+	if let Ok(cmd) = env::var("OX_PROMPT_AUTOEXEC") {
+		event::execute(&cmd, NdFlags::empty(), None, None)?;
+	}
 	write_meta(|m| m.stop_timer())??;
 	let prompt = expand::expand_prompt(None)?;
 
@@ -113,8 +116,6 @@ pub fn run() -> OxResult<String> {
 		}
 		Err(e) => {
 			write_meta(|m| m.leave_prompt())?;
-			dbg!(shellenv::term_controller());
-			dbg!(getpgrp());
 			Err(ShError::from_internal(format!("rustyline error: {}",e.to_string().as_str()).as_str()))
 		}
 	}

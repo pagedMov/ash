@@ -1434,6 +1434,7 @@ impl OxTokenizer {
 	}
 	fn arg_context(&mut self, mut wd: WordDesc, expand: bool) -> OxResult<()> {
 		use crate::interp::token::TkState::*;
+		wd.flags |= WdFlags::IS_ARG;
 		if self.char_stream.front().is_some_and(|ch| matches!(ch, ';' | '\n')) {
 			self.pop_ctx();
 			return Ok(())

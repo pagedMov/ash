@@ -168,7 +168,7 @@ pub fn shift(node: Node) -> OxResult<OxWait> {
 	let mut shift_count = 1;
 	let pos_param_count = var_table.borrow_pos_params().len();
 
-	// Skip the command name and parse the optional shift count
+	// Skip the command name and parse the optional shift countbuiltin
 	argv.pop_front(); // Remove the command name
 	if let Some(arg) = argv.pop_front() {
 		shift_count = arg.text().parse::<usize>().map_err(|_| {
@@ -309,15 +309,12 @@ where
 		F1: FnOnce(Tk) -> OxResult<T>,
 		F2: FnOnce(&T) -> bool
 {
-	if let Some(st) = args.pop_front() {
-		let transformed = transform(st).map_err(|_| false);
-		if transformed.is_err() {
-			return Ok(false)
-		}
-		Ok(property(&transformed.unwrap()))
-	} else {
-		Err(ShError::from_syntax("Did not find a comparison target for integer in test", span))
+	let st = args.pop_front().unwrap_or_default();
+	let transformed = transform(st).map_err(|_| false);
+	if transformed.is_err() {
+		return Ok(false)
 	}
+	Ok(property(&transformed.unwrap()))
 }
 
 /// Compares two arguments by transforming them and then applying a comparison function.
@@ -359,16 +356,13 @@ where
 		F1: Fn(Tk) -> OxResult<T>,
 		F2: FnOnce(&T, &T) -> bool
 {
-	if let Some(st) = args.pop_front() {
-		let left = transform(arg1).map_err(|_| false);
-		let right = transform(st).map_err(|_| false);
-		if left.is_err() || right.is_err() {
-			return Ok(false)
-		}
-		Ok(comparison(&left.unwrap(), &right.unwrap()))
-	} else {
-		Err(ShError::from_syntax("Did not find a comparison target for integer in test", arg1.span()))
+	let st = args.pop_front().unwrap_or_default();
+	let left = transform(arg1).map_err(|_| false);
+	let right = transform(st).map_err(|_| false);
+	if left.is_err() || right.is_err() {
+		return Ok(false)
 	}
+	Ok(comparison(&left.unwrap(), &right.unwrap()))
 }
 
 /// Performs a logical operation (AND or OR) on two boolean results.
@@ -553,13 +547,7 @@ pub fn test(mut argv: VecDeque<Tk>) -> OxResult<OxWait> {
 			"-S" => do_test(&mut argv, to_meta, |meta| meta.file_type().is_socket(), arg.span())?,
 			"-u" => do_test(&mut argv, to_meta, |meta| meta.mode() & 0o4000 != 0, arg.span())?,
 			"-n" => do_test(&mut argv, string_noop, |st| !st.is_empty(), arg.span())?,
-			"-z" => {
-				if argv.is_empty() {
-					true
-				} else {
-					do_test(&mut argv, string_noop, |st| st.is_empty(), arg.span())?
-				}
-			}
+			"-z" => do_test(&mut argv, string_noop, |st| st.is_empty(), arg.span())?,
 			"-e" => do_test(&mut argv, string_noop, |st| Path::new(st).exists(), arg.span())?,
 			"-r" => do_test(&mut argv, string_noop, |st| access(Path::new(st), AccessFlags::R_OK).is_ok(), arg.span())?,
 			"-w" => do_test(&mut argv, string_noop, |st| access(Path::new(st), AccessFlags::W_OK).is_ok(), arg.span())?,
@@ -598,6 +586,16 @@ pub fn test(mut argv: VecDeque<Tk>) -> OxResult<OxWait> {
 			_ => {
 				if argv.is_empty() {
 					!arg.text().is_empty() // Default behavior is to return true if a string is not empty
+				} else if matches!(arg.text(), "=" | "==") {
+					// The left side is empty, most likely an expansion that didnt return anything
+					// Therefore, the only situations which will return true are an empty arg deque,
+					// or a logical continuation operator
+					let result = argv.is_empty() || argv.front().is_some_and(|next| matches!(next.text(), "-o" | "-a"));
+					if argv.front().is_some_and(|next| !matches!(next.text(), "-o" | "-a")) {
+						// If there is an arg to compare the empty string to, let's ignore it here
+						argv.pop_front();
+					}
+					result
 				} else if let Some(cmp) = argv.pop_front() {
 					match cmp.text() {
 						"=" => do_cmp(arg, &mut argv, string_noop, |left, right| left == right)?,

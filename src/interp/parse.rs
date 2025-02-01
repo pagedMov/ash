@@ -1448,12 +1448,14 @@ pub fn build_assignment(mut ctx: DescentContext) -> OxResult<DescentContext> {
 			Some(value.text().to_string())
 		};
 		let mut argv = VecDeque::new();
-		while ctx.front_tk().is_some_and(|tk| tk.flags().contains(WdFlags::IS_ARG)) {
+		while ctx.front_tk().is_some_and(|tk| matches!(tk.class(), TkType::String | TkType::Ident)) {
 			let mut next_tk = ctx.next_tk().unwrap();
 			if argv.is_empty() {
 				next_tk.wd.flags &= !WdFlags::IS_ARG;
 			}
 			argv.push_back(next_tk);
+		}
+		if !argv.is_empty() {
 		}
 		let command = if !argv.is_empty() {
 			let root = parse_and_attach(argv.clone(), VecDeque::new())?;
