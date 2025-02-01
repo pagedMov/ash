@@ -358,11 +358,15 @@ pub fn highlight_token(tk: Tk, path: &str) -> String {
 		}
 		TkT::MatchArm {..} => {
 			let (pat,body) = tk.text().split_once("=>").unwrap();
-			let pat = style_text(STRING,pat);
+			let pat = style_text(RESET,pat);
 			let body = if body.trim().starts_with('{') && body.trim().trim_end_matches(',').ends_with('}') {
 				let (left,middle,right) = body.split_twice("{","}").unwrap();
 				let middle = style_text(STRING,&middle);
-				format!("{}{}{}{}{}",left,'{',middle,'}',right)
+				format!("{left}{}{middle}{}{right}",'{','}')
+			} else if body.trim().ends_with(',') && !body.trim().ends_with("\\,") {
+				let (left,right) = body.split_last(",").unwrap();
+				let left = style_text(STRING,&left);
+				format!("{left}{}{right}",',')
 			} else {
 				style_text(STRING,body)
 			};

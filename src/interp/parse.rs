@@ -457,9 +457,6 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> LashResult<DescentCo
 			Else | Elif | Then | Fi => {
 				return Err(ShError::from_parse(format!("Found `{}` outside of `if` context",tk.text()).as_str(), tk.span()))
 			}
-			Esac => {
-				return Err(ShError::from_parse("Found `esac` outside of `case` context", tk.span()))
-			}
 			Redirection { .. } => {
 				ctx.tokens.push_front(tk);
 				ctx = build_redirection(ctx)?;
@@ -1176,6 +1173,10 @@ pub fn build_match(mut ctx: DescentContext) -> LashResult<DescentContext> {
 	let mut span = Span::new();
 	if ctx.front_tk().is_some_and(|tk| matches!(tk.class(), TkType::Ident | TkType::String)) {
 		input_var = ctx.next_tk().unwrap();
+		if input_var.class() == TkType::In {
+			// We fucked up
+			return Err(ShError::from_parse("Did not find an input pattern for this match statement", input_var.span()))
+		}
 		span.start = input_var.span().start;
 	} else {
 		return Err(ShError::from_parse("Did not find an input pattern for this match statement", Span::new()));

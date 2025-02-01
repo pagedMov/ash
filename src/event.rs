@@ -269,7 +269,10 @@ pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: 
 								ShError::LoopCont |
 								ShError::LoopBreak |
 								ShError::FuncReturn(_) => return Err(e),
-								_ => throw(e)?
+								_ => {
+									throw(e)?;
+									break
+								}
 							}
 						} else {
 							last_status = result.unwrap();
@@ -280,6 +283,7 @@ pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: 
 				}
 				Err(e) => {
 					throw(e)?;
+					break
 				}
 			}
 		}
