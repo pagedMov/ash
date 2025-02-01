@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::{event::ShError, interp::parse::Span, shellenv::OxVal, OxResult};
+use crate::{event::ShError, interp::parse::Span, shellenv::AshVal, AshResult};
 
 
 #[derive(Clone, Debug)]
@@ -32,7 +32,7 @@ impl ShOpts {
 				failure: "✗".into(),
 			},
 			custom: PromptCustom {
-				opts: OxVal::Dict(BTreeMap::new()),
+				opts: AshVal::Dict(BTreeMap::new()),
 			}
 		};
 		let exec = ShOptsExec {
@@ -41,7 +41,7 @@ impl ShOpts {
 		Self { core, prompt, exec }
 	}
 
-	pub fn get(&self, query: &str) -> OxResult<OxVal> {
+	pub fn get(&self, query: &str) -> AshResult<AshVal> {
 		let mut query = query.split('.').map(|seg| seg.to_string()).collect::<VecDeque<String>>();
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
@@ -51,7 +51,7 @@ impl ShOpts {
 			_ => Err(ShError::from_execf(format!("Invalid shopt key: {}",key).as_str(), 1, Span::new()))
 		}
 	}
-	pub fn set(&mut self, mut query: VecDeque<String>, value: OxVal) -> OxResult<()> {
+	pub fn set(&mut self, mut query: VecDeque<String>, value: AshVal) -> AshResult<()> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
 			"core" => self.core.set(query, value),
@@ -84,24 +84,24 @@ pub struct ShOptsCore {
 }
 
 impl ShOptsCore {
-	pub fn get(&self, mut query: VecDeque<String>) -> OxResult<OxVal> {
+	pub fn get(&self, mut query: VecDeque<String>) -> AshResult<AshVal> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
-			"dotglob" => Ok(OxVal::Bool(self.dotglob)),
-			"autocd" => Ok(OxVal::Bool(self.autocd)),
-			"hist_ignore_dupes" => Ok(OxVal::Bool(self.hist_ignore_dupes)),
-			"max_hist" => Ok(OxVal::Int(self.max_hist as i32)),
-			"int_comments" => Ok(OxVal::Bool(self.int_comments)),
-			"auto_hist" => Ok(OxVal::Bool(self.auto_hist)),
-			"bell_style" => Ok(OxVal::Int(self.bell_style as i32)),
+			"dotglob" => Ok(AshVal::Bool(self.dotglob)),
+			"autocd" => Ok(AshVal::Bool(self.autocd)),
+			"hist_ignore_dupes" => Ok(AshVal::Bool(self.hist_ignore_dupes)),
+			"max_hist" => Ok(AshVal::Int(self.max_hist as i32)),
+			"int_comments" => Ok(AshVal::Bool(self.int_comments)),
+			"auto_hist" => Ok(AshVal::Bool(self.auto_hist)),
+			"bell_style" => Ok(AshVal::Int(self.bell_style as i32)),
 			_ => Err(ShError::from_execf(format!("Invalid core opts key: {}",key).as_str(), 1, Span::new()))
 		}
 	}
-	pub fn set(&mut self, mut query: VecDeque<String>, value: OxVal) -> OxResult<()> {
+	pub fn set(&mut self, mut query: VecDeque<String>, value: AshVal) -> AshResult<()> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
 			"dotglob" => {
-				self.dotglob = if let OxVal::Bool(val) = value { val } else {
+				self.dotglob = if let AshVal::Bool(val) = value { val } else {
 					return Err(ShError::from_execf(
 						format!("Invalid value for core.dotglob: {:?}", value).as_str(),
 						1,
@@ -110,7 +110,7 @@ impl ShOptsCore {
 				};
 			}
 			"autocd" => {
-				self.autocd = if let OxVal::Bool(val) = value { val } else {
+				self.autocd = if let AshVal::Bool(val) = value { val } else {
 					return Err(ShError::from_execf(
 						format!("Invalid value for core.autocd: {:?}", value).as_str(),
 						1,
@@ -119,7 +119,7 @@ impl ShOptsCore {
 				};
 			}
 			"hist_ignore_dupes" => {
-				self.hist_ignore_dupes = if let OxVal::Bool(val) = value { val } else {
+				self.hist_ignore_dupes = if let AshVal::Bool(val) = value { val } else {
 					return Err(ShError::from_execf(
 						format!("Invalid value for core.hist_ignore_dupes: {:?}", value).as_str(),
 						1,
@@ -128,7 +128,7 @@ impl ShOptsCore {
 				};
 			}
 			"max_hist" => {
-				self.max_hist = if let OxVal::Int(val) = value { val as usize } else {
+				self.max_hist = if let AshVal::Int(val) = value { val as usize } else {
 					return Err(ShError::from_execf(
 						format!("Invalid value for core.max_hist: {:?}", value).as_str(),
 						1,
@@ -137,7 +137,7 @@ impl ShOptsCore {
 				};
 			}
 			"int_comments" => {
-				self.int_comments = if let OxVal::Bool(val) = value { val } else {
+				self.int_comments = if let AshVal::Bool(val) = value { val } else {
 					return Err(ShError::from_execf(
 						format!("Invalid value for core.int_comments: {:?}", value).as_str(),
 						1,
@@ -146,7 +146,7 @@ impl ShOptsCore {
 				};
 			}
 			"auto_hist" => {
-				self.auto_hist = if let OxVal::Bool(val) = value { val } else {
+				self.auto_hist = if let AshVal::Bool(val) = value { val } else {
 					return Err(ShError::from_execf(
 						format!("Invalid value for core.auto_hist: {:?}", value).as_str(),
 						1,
@@ -155,7 +155,7 @@ impl ShOptsCore {
 				};
 			}
 			"bell_style" => {
-				self.bell_style = if let OxVal::Int(val) = value { val as usize } else {
+				self.bell_style = if let AshVal::Int(val) = value { val as usize } else {
 					return Err(ShError::from_execf(
 						format!("Invalid value for core.bell_style: {:?}", value).as_str(),
 						1,
@@ -187,25 +187,25 @@ pub struct ShOptsPrompt {
 }
 
 impl ShOptsPrompt {
-	pub fn get(&self, mut query: VecDeque<String>) -> OxResult<OxVal> {
+	pub fn get(&self, mut query: VecDeque<String>) -> AshResult<AshVal> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
-			"trunc_prompt_path" => Ok(OxVal::Int(self.trunc_prompt_path as i32)),
-			"edit_mode" => Ok(OxVal::String(self.edit_mode.clone())),
-			"comp_limit" => Ok(OxVal::Int(self.comp_limit as i32)),
-			"prompt_highlight" => Ok(OxVal::Bool(self.prompt_highlight)),
-			"tab_stop" => Ok(OxVal::Int(self.tab_stop as i32)),
+			"trunc_prompt_path" => Ok(AshVal::Int(self.trunc_prompt_path as i32)),
+			"edit_mode" => Ok(AshVal::String(self.edit_mode.clone())),
+			"comp_limit" => Ok(AshVal::Int(self.comp_limit as i32)),
+			"prompt_highlight" => Ok(AshVal::Bool(self.prompt_highlight)),
+			"tab_stop" => Ok(AshVal::Int(self.tab_stop as i32)),
 			"exit_status" => Ok(self.exit_status.get(query)?),
 			"custom" => Ok(self.custom.get(query)?),
 			_ => Err(ShError::from_execf(format!("Invalid key for prompt opts: {}",key).as_str(), 1, Span::new()))
 		}
 	}
 
-	pub fn set(&mut self, mut query: VecDeque<String>, value: OxVal) -> OxResult<()> {
+	pub fn set(&mut self, mut query: VecDeque<String>, value: AshVal) -> AshResult<()> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
 			"trunc_prompt_path" => {
-				self.trunc_prompt_path = if let OxVal::Int(val) = value { val as usize } else {
+				self.trunc_prompt_path = if let AshVal::Int(val) = value { val as usize } else {
 					return Err(ShError::from_execf(
 						format!("Invalid value for core.trunc_prompt_path: {:?}", value).as_str(),
 						1,
@@ -214,7 +214,7 @@ impl ShOptsPrompt {
 				};
 			}
 			"edit_mode" => {
-				self.edit_mode = if let OxVal::String(val) = value { val } else {
+				self.edit_mode = if let AshVal::String(val) = value { val } else {
 					return Err(ShError::from_execf(
 						format!("Invalid value for core.edit_mode: {:?}", value).as_str(),
 						1,
@@ -223,7 +223,7 @@ impl ShOptsPrompt {
 				};
 			}
 			"comp_limit" => {
-				self.comp_limit = if let OxVal::Int(val) = value { val as usize } else {
+				self.comp_limit = if let AshVal::Int(val) = value { val as usize } else {
 					return Err(ShError::from_execf(
 						format!("Invalid value for core.comp_limit: {:?}", value).as_str(),
 						1,
@@ -232,7 +232,7 @@ impl ShOptsPrompt {
 				};
 			}
 			"prompt_highlight" => {
-				self.prompt_highlight = if let OxVal::Bool(val) = value { val } else {
+				self.prompt_highlight = if let AshVal::Bool(val) = value { val } else {
 					return Err(ShError::from_execf(
 						format!("Invalid value for core.prompt_highlight: {:?}", value).as_str(),
 						1,
@@ -241,7 +241,7 @@ impl ShOptsPrompt {
 				};
 			}
 			"tab_stop" => {
-				self.tab_stop = if let OxVal::Int(val) = value { val as usize } else {
+				self.tab_stop = if let AshVal::Int(val) = value { val as usize } else {
 					return Err(ShError::from_execf(
 						format!("Invalid value for core.tab_stop: {:?}", value).as_str(),
 						1,
@@ -265,21 +265,21 @@ impl ShOptsPrompt {
 
 #[derive(Clone, Debug)]
 pub struct PromptCustom {
-	opts: OxVal
+	opts: AshVal
 }
 
 impl PromptCustom {
 	pub fn new() -> Self {
-		Self { opts: OxVal::Dict(BTreeMap::new()) }
+		Self { opts: AshVal::Dict(BTreeMap::new()) }
 	}
-	pub fn get(&self, mut query: VecDeque<String>) -> OxResult<OxVal> {
+	pub fn get(&self, mut query: VecDeque<String>) -> AshResult<AshVal> {
 		// Start traversal at the root map
-		if let OxVal::Dict(map) = &self.opts {
+		if let AshVal::Dict(map) = &self.opts {
 			let mut current_map = map.clone();
 
 			while let Some(key) = query.pop_front() {
 				match current_map.get(&key) {
-					Some(OxVal::Dict(inner_map)) => {
+					Some(AshVal::Dict(inner_map)) => {
 						// If it's an object, descend into it
 						current_map = inner_map.clone();
 					}
@@ -318,7 +318,7 @@ impl PromptCustom {
 			))
 		} else { unreachable!() }
 	}
-	pub fn traverse_namespace(&mut self, map: &mut BTreeMap<String,OxVal>, mut query: VecDeque<String>, value: OxVal) -> OxResult<()> {
+	pub fn traverse_namespace(&mut self, map: &mut BTreeMap<String,AshVal>, mut query: VecDeque<String>, value: AshVal) -> AshResult<()> {
 		if let Some(key) = query.pop_front() {
 			if query.is_empty() {
 				map.insert(key,value);
@@ -328,11 +328,11 @@ impl PromptCustom {
 				None => {
 					let mut new_map = BTreeMap::new();
 					self.traverse_namespace(&mut new_map, query, value)?;
-					map.insert(key,OxVal::Dict(new_map));
+					map.insert(key,AshVal::Dict(new_map));
 				}
 				Some(ref mut val) => {
 					match val {
-						OxVal::Dict(ref mut inner_map) => {
+						AshVal::Dict(ref mut inner_map) => {
 							self.traverse_namespace(inner_map, query, value)?;
 						}
 						_ => {
@@ -344,12 +344,12 @@ impl PromptCustom {
 		}
 		Ok(())
 	}
-	pub fn insert_top_level(&mut self, key: String, val: OxVal) {
-		if let OxVal::Dict(map) = &mut self.opts {
+	pub fn insert_top_level(&mut self, key: String, val: AshVal) {
+		if let AshVal::Dict(map) = &mut self.opts {
 			map.insert(key,val);
 		} else { unreachable!() }
 	}
-	pub fn set(&mut self, mut query: VecDeque<String>, value: OxVal) -> OxResult<()> {
+	pub fn set(&mut self, mut query: VecDeque<String>, value: AshVal) -> AshResult<()> {
 		if query.len() == 1 {
 			let key = query.pop_front().unwrap();
 			self.insert_top_level(key, value);
@@ -363,16 +363,16 @@ impl PromptCustom {
 			let existing_value = current_map.try_remove(&key)?;
 
 			match existing_value {
-				Some(OxVal::Dict(mut map)) => {
+				Some(AshVal::Dict(mut map)) => {
 					// Navigate into the existing map
 					if query.is_empty() {
 						map.insert(key.clone(), value.clone());
 					}
 					// Re-insert the modified map
-					current_map.try_insert(key.clone(), OxVal::Dict(map))?;
+					current_map.try_insert(key.clone(), AshVal::Dict(map))?;
 					let new_map = current_map.try_get_mut(&key)?.unwrap();
 					current_map = match new_map {
-						OxVal::Dict(_) => new_map,
+						AshVal::Dict(_) => new_map,
 						_ => break
 					};
 				}
@@ -381,7 +381,7 @@ impl PromptCustom {
 				}
 				None => {
 					// If the key doesn't exist, create a new map for the remaining keys
-					let new_map = OxVal::Dict(BTreeMap::new());
+					let new_map = AshVal::Dict(BTreeMap::new());
 					if query.is_empty() {
 						current_map.try_insert(key.clone(), value.clone())?; // Placeholder object
 					} else {
@@ -389,7 +389,7 @@ impl PromptCustom {
 					}
 					let new_map = current_map.try_get_mut(&key)?.unwrap();
 					current_map = match new_map {
-						OxVal::Dict(_) => new_map,
+						AshVal::Dict(_) => new_map,
 						_ => break
 					};
 				}
@@ -407,20 +407,20 @@ pub struct PromptStatus {
 }
 
 impl PromptStatus {
-	pub fn get(&self, mut query: VecDeque<String>) -> OxResult<OxVal> {
+	pub fn get(&self, mut query: VecDeque<String>) -> AshResult<AshVal> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
-			"success" => Ok(OxVal::String(self.success.clone())),
-			"failure" => Ok(OxVal::String(self.failure.clone())),
+			"success" => Ok(AshVal::String(self.success.clone())),
+			"failure" => Ok(AshVal::String(self.failure.clone())),
 			_ => Err(ShError::from_execf(format!("Invalid key for prompt exit status opts: {}",key).as_str(), 1, Span::new()))
 		}
 	}
 
-	pub fn set(&mut self, mut query: VecDeque<String>, value: OxVal) -> OxResult<()> {
+	pub fn set(&mut self, mut query: VecDeque<String>, value: AshVal) -> AshResult<()> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
 			"success" => {
-				self.success = if let OxVal::String(val) = value { val } else {
+				self.success = if let AshVal::String(val) = value { val } else {
 					return Err(ShError::from_execf(
 						format!("Invalid value for core.success: {:?}", value).as_str(),
 						1,
@@ -429,7 +429,7 @@ impl PromptStatus {
 				};
 			}
 			"failure" => {
-				self.failure = if let OxVal::String(val) = value { val } else {
+				self.failure = if let AshVal::String(val) = value { val } else {
 					return Err(ShError::from_execf(
 						format!("Invalid value for core.failure: {:?}", value).as_str(),
 						1,
@@ -455,10 +455,10 @@ pub struct ShOptsExec {
 }
 
 impl ShOptsExec {
-	pub fn get(&self, query: VecDeque<String>) -> OxResult<OxVal> {
+	pub fn get(&self, query: VecDeque<String>) -> AshResult<AshVal> {
 		todo!()
 	}
-	pub fn set(&self, mut query: VecDeque<String>, value: OxVal) -> OxResult<()> {
+	pub fn set(&self, mut query: VecDeque<String>, value: AshVal) -> AshResult<()> {
 		todo!()
 	}
 }

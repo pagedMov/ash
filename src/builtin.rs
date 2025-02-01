@@ -13,14 +13,14 @@ use nix::sys::stat::Mode;
 use nix::unistd::{access, fork, isatty, setpgid, AccessFlags, ForkResult, Pid};
 use regex::Regex;
 
-use crate::execute::{ProcIO, OxWait, RustFd};
+use crate::execute::{ProcIO, AshWait, RustFd};
 use crate::interp::helper::{self, StrExtension, VecDequeExtension};
 use crate::interp::parse::{NdFlags, NdType, Node, Span};
 use crate::interp::{expand, token};
 use crate::interp::token::{Redir, RedirType, Tk, TkType, WdFlags};
-use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, HashFloat, JobBuilder, JobCmdFlags, JobID, OxVal};
+use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, HashFloat, JobBuilder, JobCmdFlags, JobID, AshVal};
 use crate::event::ShError;
-use crate::{deconstruct, node_operation, OxResult};
+use crate::{deconstruct, node_operation, AshResult};
 
 pub const BUILTINS: [&str; 37] = [
 	"command", "pushd", "popd", "setopt", "getopt", "type", "string", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
@@ -42,7 +42,7 @@ bitflags! {
 	}
 }
 
-fn open_file_descriptors(redirs: VecDeque<Node>) -> OxResult<Vec<RustFd>> {
+fn open_file_descriptors(redirs: VecDeque<Node>) -> AshResult<Vec<RustFd>> {
 	let mut fd_stack: Vec<RustFd> = Vec::new();
 	let mut fd_dupes: Vec<(i32,i32)> = Vec::new();
 
@@ -105,7 +105,7 @@ pub fn catstr(mut c_strings: VecDeque<CString>,newline: bool) -> CString {
 	CString::from_vec_with_nul(cat).unwrap()
 }
 
-pub fn r#type(node: Node) -> OxResult<OxWait> {
+pub fn r#type(node: Node) -> AshResult<AshWait> {
 	let index_re = Regex::new(r"(\w+)\[(\d+)\]").unwrap();
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `int`
@@ -116,9 +116,9 @@ pub fn r#type(node: Node) -> OxResult<OxWait> {
 			let var_name = caps.get(1).map_or("", |m| m.as_str());
 			let index = caps.get(2).map_or("", |m| m.as_str()).parse::<usize>().unwrap();
 
-			if let Some(OxVal::Array(_)) = read_vars(|v| v.get_var(var_name))? {
+			if let Some(AshVal::Array(_)) = read_vars(|v| v.get_var(var_name))? {
 				if let Ok(arr_element) = read_vars(|v| v.index_arr(var_name, index))? {
-					use crate::shellenv::OxVal::*;
+					use crate::shellenv::AshVal::*;
 					match arr_element {
 						String(_) => println!("string"),
 						Int(_) => println!("int"),
@@ -130,7 +130,7 @@ pub fn r#type(node: Node) -> OxResult<OxWait> {
 				}
 			}
 		} else if let Some(var) = read_vars(|v| v.get_var(text))? {
-			use crate::shellenv::OxVal::*;
+			use crate::shellenv::AshVal::*;
 			match var {
 				String(_) => println!("string"),
 				Int(_) => println!("int"),
@@ -141,10 +141,10 @@ pub fn r#type(node: Node) -> OxResult<OxWait> {
 			}
 		}
 	}
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-pub fn read_func(node: Node, io: ProcIO) -> OxResult<OxWait> {
+pub fn read_func(node: Node, io: ProcIO) -> AshResult<AshWait> {
 	let span = node.span();
 	let functions = read_logic(|l| l.borrow_functions().clone())?;
 	let mut argv = deconstruct!(NdType::Builtin { argv }, node.nd_type, { argv });
@@ -158,10 +158,10 @@ pub fn read_func(node: Node, io: ProcIO) -> OxResult<OxWait> {
 			return Err(ShError::from_execf(format!("Failed to find function: `{}`",text).as_str(), 1, span))
 		}
 	}
-	Ok(OxWait::new())
+	Ok(AshWait::new())
 }
 
-pub fn shift(node: Node) -> OxResult<OxWait> {
+pub fn shift(node: Node) -> AshResult<AshWait> {
 	let span = node.span();
 	let mut var_table = read_vars(|v| v.clone())?; // Clone the var table here, so that we can avoid repetitive lock acquisition
 	let mut argv = VecDeque::from(node.get_argv()?);
@@ -189,31 +189,31 @@ pub fn shift(node: Node) -> OxResult<OxWait> {
 
 	write_vars(|v| *v = var_table)?; // Overwrite the variable table
 
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-pub fn string(node: Node) -> OxResult<OxWait> {
+pub fn string(node: Node) -> AshResult<AshWait> {
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `string`
 	while let Some(arg) = argv.pop_front() {
 		if let Some((key,val)) = arg.text().split_once('=') {
 			helper::unset_var_conflicts(key)?;
-			write_vars(|v| v.set_var(key, OxVal::String(val.to_string())))?
+			write_vars(|v| v.set_var(key, AshVal::String(val.to_string())))?
 		} else {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
 		}
 	}
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-pub fn int(node: Node) -> OxResult<OxWait> {
+pub fn int(node: Node) -> AshResult<AshWait> {
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `int`
 	while let Some(arg) = argv.pop_front() {
 		if let Some((k,v)) = arg.text().split_once('=') {
 			helper::unset_var_conflicts(k)?;
 			if let Ok(int) = v.parse::<i32>() {
-				write_vars(|v| v.set_var(k, OxVal::Int(int)))?
+				write_vars(|v| v.set_var(k, AshVal::Int(int)))?
 			} else {
 				return Err(ShError::from_syntax(format!("Expected an integer in int definition, got `{}`",v).as_str(), node.span()))
 			}
@@ -221,55 +221,55 @@ pub fn int(node: Node) -> OxResult<OxWait> {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
 		}
 	}
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-pub fn bool(node: Node) -> OxResult<OxWait> {
+pub fn bool(node: Node) -> AshResult<AshWait> {
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `int`
 	while let Some(arg) = argv.pop_front() {
 		if let Some((k,val)) = arg.text().split_once('=') {
 			helper::unset_var_conflicts(k)?;
 			if let Ok(bool) = val.parse::<bool>() {
-				write_vars(|v| v.set_var(k, OxVal::Bool(bool)))?
+				write_vars(|v| v.set_var(k, AshVal::Bool(bool)))?
 			}
 		} else {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
 		}
 	}
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-pub fn float(node: Node) -> OxResult<OxWait> {
+pub fn float(node: Node) -> AshResult<AshWait> {
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `int`
 	while let Some(arg) = argv.pop_front() {
 		if let Some((k,val)) = arg.text().split_once('=') {
 			helper::unset_var_conflicts(k)?;
 			if let Ok(float) = val.parse::<f64>() {
-				write_vars(|v| v.set_var(k, OxVal::Float(HashFloat(float))))?
+				write_vars(|v| v.set_var(k, AshVal::Float(HashFloat(float))))?
 			}
 		} else {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
 		}
 	}
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-pub fn array(node: Node) -> OxResult<OxWait> {
+pub fn array(node: Node) -> AshResult<AshWait> {
 	let mut argv = VecDeque::from(node.get_argv()?);
 	argv.pop_front(); // Ignore `int`
 	while let Some(arg) = argv.pop_front() {
 		if let Some((k,val)) = arg.text().split_once('=') {
 			helper::unset_var_conflicts(k)?;
 			if let Ok(array) = helper::parse_vec(val) {
-				write_vars(|v| v.set_var(k, OxVal::Array(array)))?
+				write_vars(|v| v.set_var(k, AshVal::Array(array)))?
 			}
 		} else {
 			return Err(ShError::from_syntax(format!("Expected assignment syntax like `key=value`, got `{}`",arg.text()).as_str(), node.span()))
 		}
 	}
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
 /// Performs a test on a single argument by transforming it and then applying a property check.
@@ -294,7 +294,7 @@ pub fn array(node: Node) -> OxResult<OxWait> {
 /// ```
 /// let mut args = VecDeque::new();
 /// args.push_back("42".to_string());
-/// let transform = |s: String| -> OxResult<i32> { Ok(s.parse::<i32>().unwrap()) };
+/// let transform = |s: String| -> AshResult<i32> { Ok(s.parse::<i32>().unwrap()) };
 /// let property = |x: &i32| -> bool { *x > 0 };
 /// let result = do_test(&mut args, transform, property);
 /// assert!(result.unwrap());
@@ -304,9 +304,9 @@ fn do_test<T, F1, F2>(
 	transform: F1,
 	property: F2,
 	span: Span
-) -> OxResult<bool>
+) -> AshResult<bool>
 where
-		F1: FnOnce(Tk) -> OxResult<T>,
+		F1: FnOnce(Tk) -> AshResult<T>,
 		F2: FnOnce(&T) -> bool
 {
 	let st = args.pop_front().unwrap_or_default();
@@ -341,7 +341,7 @@ where
 /// ```
 /// let mut args = VecDeque::new();
 /// args.push_back("42".to_string());
-/// let transform = |s: String| -> OxResult<i32> { Ok(s.parse::<i32>().unwrap()) };
+/// let transform = |s: String| -> AshResult<i32> { Ok(s.parse::<i32>().unwrap()) };
 /// let comparison = |x: &i32, y: &i32| -> bool { x == y };
 /// let result = do_cmp("42".to_string(), &mut args, transform, comparison);
 /// assert!(result.unwrap());
@@ -351,9 +351,9 @@ fn do_cmp<T, F1, F2>(
 	args: &mut VecDeque<Tk>,
 	transform: F1,
 	comparison: F2
-) -> OxResult<bool>
+) -> AshResult<bool>
 where
-		F1: Fn(Tk) -> OxResult<T>,
+		F1: Fn(Tk) -> AshResult<T>,
 		F2: FnOnce(&T, &T) -> bool
 {
 	let st = args.pop_front().unwrap_or_default();
@@ -390,9 +390,9 @@ fn do_logical_op(
 	command: Tk,
 	result1: bool,
 	operator: Tk
-) -> OxResult<bool> {
+) -> AshResult<bool> {
 	args.push_front(command);
-	let result2 = test(std::mem::take(args)).map(|res| matches!(res,OxWait::Success ))?;
+	let result2 = test(std::mem::take(args)).map(|res| matches!(res,AshWait::Success ))?;
 	match operator.text() {
 		"!" => { Ok(!result2) },
 		"-a" => { Ok(result1 && result2) },
@@ -412,7 +412,7 @@ fn do_logical_op(
 ///
 /// # Returns
 ///
-/// * `Ok(OxWait)` - Returns a success or failure status based on the evaluation of the conditional expression.
+/// * `Ok(AshWait)` - Returns a success or failure status based on the evaluation of the conditional expression.
 /// * `Err(ShError)` - Returns an appropriate `ShError` if there is a syntax error or other issues with the arguments.
 ///
 /// # Examples
@@ -496,19 +496,19 @@ fn do_logical_op(
 /// # Panics
 ///
 /// This function does not panic.
-pub fn test(mut argv: VecDeque<Tk>) -> OxResult<OxWait> {
+pub fn test(mut argv: VecDeque<Tk>) -> AshResult<AshWait> {
 	let span = Span::from(argv.front().unwrap().span().start,argv.back().unwrap().span().end);
-	let is_false = || -> OxResult<OxWait> { Ok(OxWait::Fail { code: 1, cmd: Some("test".into()), }) };
-	let is_true = || -> OxResult<OxWait> { Ok(OxWait::Success ) };
+	let is_false = || -> AshResult<AshWait> { Ok(AshWait::Fail { code: 1, cmd: Some("test".into()), }) };
+	let is_true = || -> AshResult<AshWait> { Ok(AshWait::Success ) };
 	let is_int = |tk: &Tk| -> bool { tk.text().parse::<i32>().is_ok() };
-	let to_int = |tk: Tk| -> OxResult<i32> {
+	let to_int = |tk: Tk| -> AshResult<i32> {
 		tk.text().parse::<i32>().map_err(|_| ShError::from_syntax("Expected an integer in test", tk.span()))
 	};
 	let is_path = |tk: &Tk| -> bool { PathBuf::from(tk.text()).exists() };
-	let to_meta = |tk: Tk| -> OxResult<fs::Metadata> {
+	let to_meta = |tk: Tk| -> AshResult<fs::Metadata> {
 		fs::metadata(tk.text()).map_err(|_| ShError::from_syntax(&format!("Test: Path '{}' does not exist", tk.text()), tk.span()))
 	};
-	let string_noop = |tk: Tk| -> OxResult<String> { Ok(tk.text().into()) };
+	let string_noop = |tk: Tk| -> AshResult<String> { Ok(tk.text().into()) };
 	let command = argv.pop_front().unwrap();
 	let is_bracket = match command.text() {
 		"[" => true,
@@ -813,7 +813,7 @@ fn float_to_string(value: f64) -> String {
 	}
 }
 
-pub fn expr(node: Node, io: ProcIO) -> OxResult<OxWait> {
+pub fn expr(node: Node, io: ProcIO) -> AshResult<AshWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front(); // Ignore `expr`
 
@@ -885,7 +885,7 @@ pub fn expr(node: Node, io: ProcIO) -> OxResult<OxWait> {
 	)
 }
 
-pub fn setopt(node: Node) -> OxResult<OxWait> {
+pub fn setopt(node: Node) -> AshResult<AshWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front();
 	while let Some(arg) = argv.pop_front() {
@@ -895,10 +895,10 @@ pub fn setopt(node: Node) -> OxResult<OxWait> {
 			return Err(ShError::from_syntax(format!("Expected an assignment in setopt args, found this: {}", arg.text()).as_str(), node.span()))
 		}
 	}
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-pub fn getopt(node: Node, io: ProcIO) -> OxResult<OxWait> {
+pub fn getopt(node: Node, io: ProcIO) -> AshResult<AshWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front();
 	while let Some(arg) = argv.pop_front() {
@@ -915,10 +915,10 @@ pub fn getopt(node: Node, io: ProcIO) -> OxResult<OxWait> {
 			}
 		}
 	}
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-pub fn alias(node: Node) -> OxResult<OxWait> {
+pub fn alias(node: Node) -> AshResult<AshWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front();
 	while let Some(arg) = argv.pop_front() {
@@ -929,10 +929,10 @@ pub fn alias(node: Node) -> OxResult<OxWait> {
 		let value = value.trim_quotes();
 		write_logic(|l| l.new_alias(alias, value.to_string()))?;
 	}
-	Ok(OxWait::Success )
+	Ok(AshWait::Success )
 }
 
-pub fn unalias(node: Node) -> OxResult<OxWait> {
+pub fn unalias(node: Node) -> AshResult<AshWait> {
 	let mut argv: VecDeque<Tk> = node.get_argv()?.into();
 	argv.pop_front();
 	while let Some(arg) = argv.pop_front() {
@@ -943,10 +943,10 @@ pub fn unalias(node: Node) -> OxResult<OxWait> {
 			eprintln!("Alias not found for `{}`",alias)
 		}
 	}
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-pub fn cd(node: Node, flags: CdFlags) -> OxResult<OxWait> {
+pub fn cd(node: Node, flags: CdFlags) -> AshResult<AshWait> {
 	let mut argv = VecDeque::from(node.get_argv()?);
 		argv.pop_front();
 		let new_pwd;
@@ -974,10 +974,10 @@ pub fn cd(node: Node, flags: CdFlags) -> OxResult<OxWait> {
 		let path = Path::new(&new_pwd);
 		std::env::set_current_dir(path).map_err(|_| ShError::from_io())?;
 		write_vars(|v| v.export_var("PWD", std::env::current_dir().unwrap().to_str().unwrap()))?;
-		Ok(OxWait::Success)
+		Ok(AshWait::Success)
 }
 
-pub fn cd_internal(path: String, span: Span, flags: CdFlags) -> OxResult<OxWait> {
+pub fn cd_internal(path: String, span: Span, flags: CdFlags) -> AshResult<AshWait> {
 	let mut tokens = vec![
 		Tk {
 			tk_type: TkType::Ident,
@@ -1009,7 +1009,7 @@ pub fn cd_internal(path: String, span: Span, flags: CdFlags) -> OxResult<OxWait>
 	cd(cd_call, flags)
 }
 
-pub fn fg(node: Node) -> OxResult<OxWait> {
+pub fn fg(node: Node) -> AshResult<AshWait> {
 	let argv = node.get_argv()?;
 	let mut argv = VecDeque::from(argv);
 	argv.pop_front(); // Ignore 'fg'
@@ -1037,10 +1037,10 @@ pub fn fg(node: Node) -> OxResult<OxWait> {
 	})??;
 	job.killpg(Signal::SIGCONT).map_err(|_| ShError::from_io())?;
 	helper::handle_fg(job)?;
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-pub fn bg(node: Node) -> OxResult<OxWait> {
+pub fn bg(node: Node) -> AshResult<AshWait> {
 	let argv = node.get_argv()?;
 	let mut argv = VecDeque::from(argv);
 	argv.pop_front(); // Ignore 'bg'
@@ -1071,10 +1071,10 @@ pub fn bg(node: Node) -> OxResult<OxWait> {
 
 	write_jobs(|j| j.insert_job(job,true))??;
 
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-pub fn pushd(node: Node) -> OxResult<OxWait> {
+pub fn pushd(node: Node) -> AshResult<AshWait> {
 	let tk_to_str = |tk: Tk| -> String { tk.text().to_string() };
 	node_operation!(NdType::Builtin { mut argv }, node, {
 
@@ -1088,12 +1088,12 @@ pub fn pushd(node: Node) -> OxResult<OxWait> {
 		if let Some(path) = args.last() {
 			cd_internal(path.to_string(), node.span(), CdFlags::PUSH)
 		} else {
-			Ok(OxWait::Fail { code: 1, cmd: Some("pushd".into()) })
+			Ok(AshWait::Fail { code: 1, cmd: Some("pushd".into()) })
 		}
 	})
 }
 
-pub fn popd(node: Node) -> OxResult<OxWait> {
+pub fn popd(node: Node) -> AshResult<AshWait> {
 	let argv = deconstruct!(NdType::Builtin { argv }, node.nd_type.clone(), {
 		argv
 	});
@@ -1105,14 +1105,14 @@ pub fn popd(node: Node) -> OxResult<OxWait> {
 		if let Some(string) = path.to_str() {
 			cd_internal(string.to_string(), node.span(), CdFlags::POP)
 		} else {
-			Ok(OxWait::Fail { code: 1, cmd: Some("popd".into()) })
+			Ok(AshWait::Fail { code: 1, cmd: Some("popd".into()) })
 		}
 	} else {
-		Ok(OxWait::Fail { code: 1, cmd: Some("popd".into()) })
+		Ok(AshWait::Fail { code: 1, cmd: Some("popd".into()) })
 	}
 }
 
-fn parse_job_id(arg: &str, span: Span) -> OxResult<usize> {
+fn parse_job_id(arg: &str, span: Span) -> AshResult<usize> {
 	if arg.starts_with('%') {
 		let arg = arg.strip_prefix('%').unwrap();
 		if arg.chars().all(|ch| ch.is_ascii_digit()) {
@@ -1151,7 +1151,7 @@ fn parse_job_id(arg: &str, span: Span) -> OxResult<usize> {
 	}
 }
 
-pub fn source(node: Node) -> OxResult<OxWait> {
+pub fn source(node: Node) -> AshResult<AshWait> {
 	let mut argv = node
 		.get_argv()?
 		.iter()
@@ -1162,7 +1162,7 @@ pub fn source(node: Node) -> OxResult<OxWait> {
 			let file_path = Path::new(OsStr::from_bytes(path.as_bytes()));
 			shellenv::source_file(file_path.to_path_buf()).unwrap()
 		}
-		Ok(OxWait::Success )
+		Ok(AshWait::Success )
 }
 
 fn flags_from_chars(chars: &str) -> EnvFlags {
@@ -1195,7 +1195,7 @@ fn flags_from_chars(chars: &str) -> EnvFlags {
 	env_flags
 }
 
-pub fn set_or_unset(node: Node, set: bool) -> OxResult<OxWait> {
+pub fn set_or_unset(node: Node, set: bool) -> AshResult<AshWait> {
 	let span = node.span();
 	if let NdType::Builtin { mut argv } = node.nd_type {
 		argv.pop_front(); // Ignore 'set'
@@ -1210,22 +1210,22 @@ pub fn set_or_unset(node: Node, set: bool) -> OxResult<OxWait> {
 			true => write_meta(|m| m.mod_flags(|f| *f |= env_flags))?,
 			false => write_meta(|m| m.mod_flags(|f| *f &= !env_flags))?,
 		}
-		Ok(OxWait::new())
+		Ok(AshWait::new())
 	} else { unreachable!() }
 }
 
-pub fn pwd(span: Span) -> OxResult<OxWait> {
+pub fn pwd(span: Span) -> AshResult<AshWait> {
 	if let Some(pwd) = read_vars(|v| v.get_evar("PWD"))? {
 		let stdout = RustFd::from_stdout()?;
 		stdout.write(pwd.as_bytes())?;
-		Ok(OxWait::Success )
+		Ok(AshWait::Success )
 	} else {
 		Err(ShError::from_execf("PWD environment variable is unset", 1, span))
 	}
 }
 
-pub fn export(node: Node) -> OxResult<OxWait> {
-	let last_status = OxWait::Success ;
+pub fn export(node: Node) -> AshResult<AshWait> {
+	let last_status = AshWait::Success ;
 	if let NdType::Builtin { mut argv } = node.nd_type {
 		argv.pop_front(); // Ignore "export"
 		while let Some(ass) = argv.pop_front() {
@@ -1239,7 +1239,7 @@ pub fn export(node: Node) -> OxResult<OxWait> {
 	} else { unreachable!() }
 }
 
-pub fn jobs(node: Node, mut io: ProcIO,) -> OxResult<OxWait> {
+pub fn jobs(node: Node, mut io: ProcIO,) -> AshResult<AshWait> {
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
 	argv.pop_front();
 	let mut flags = JobCmdFlags::empty();
@@ -1286,11 +1286,11 @@ pub fn jobs(node: Node, mut io: ProcIO,) -> OxResult<OxWait> {
 		}
 		Err(_) => return Err(ShError::from_internal("Failed to fork in print_jobs()"))
 	}
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
 /// Used to call echo internally by passing a vector of strings. Makes it very simple to re-use the I/O logic present in echo elsewhere in the codebase.
-pub fn echo_internal(argv: Vec<String>, io: ProcIO, span: Span, flags: NdFlags, redirs: VecDeque<Node>) -> OxResult<OxWait> {
+pub fn echo_internal(argv: Vec<String>, io: ProcIO, span: Span, flags: NdFlags, redirs: VecDeque<Node>) -> AshResult<AshWait> {
 	let mut tokens = vec![
 		Tk {
 			tk_type: TkType::Ident,
@@ -1324,7 +1324,7 @@ pub fn echo_internal(argv: Vec<String>, io: ProcIO, span: Span, flags: NdFlags, 
 	echo(echo_call, io)
 }
 
-pub fn echo(node: Node, mut io: ProcIO,) -> OxResult<OxWait> {
+pub fn echo(node: Node, mut io: ProcIO,) -> AshResult<AshWait> {
 	let mut flags = EchoFlags::empty();
 	let mut argv = node.get_argv()?.into_iter().collect::<VecDeque<Tk>>();
 	argv.pop_front(); // Remove 'echo' from argv
@@ -1433,5 +1433,5 @@ pub fn echo(node: Node, mut io: ProcIO,) -> OxResult<OxWait> {
 	}
 
 	io.restore_fildescs()?;
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }

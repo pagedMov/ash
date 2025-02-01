@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::{fs::File, sync::RwLock};
 
 
-use crate::{event::{self, ShError}, interp::{helper::{self, VecDequeExtension}, parse::{NdFlags, Span}}, shopt::{PromptCustom, ShOpts}, OxResult};
+use crate::{event::{self, ShError}, interp::{helper::{self, VecDequeExtension}, parse::{NdFlags, Span}}, shopt::{PromptCustom, ShOpts}, AshResult};
 
 #[derive(Debug)]
 pub struct DisplayWaitStatus(pub WaitStatus);
@@ -144,7 +144,7 @@ pub struct ChildProc {
 }
 
 impl ChildProc {
-	pub fn new(pid: Pid, command: Option<&str>, pgid: Option<Pid>) -> OxResult<Self> {
+	pub fn new(pid: Pid, command: Option<&str>, pgid: Option<Pid>) -> AshResult<Self> {
 		let command = command.map(|str| str.to_string());
     let status = if kill(pid, None).is_ok() {
         WaitStatus::StillAlive // The process is still running
@@ -185,7 +185,7 @@ impl ChildProc {
 	pub fn set_status(&mut self, status: WaitStatus) {
 		self.status = status;
 	}
-	pub fn kill(&self, signal: Signal) -> OxResult<()> {
+	pub fn kill(&self, signal: Signal) -> AshResult<()> {
 		kill(self.pid, Some(signal))
 			.map_err(|_| ShError::from_io())
 	}
@@ -281,7 +281,7 @@ impl Job {
 	pub fn get_pids(&self) -> Vec<Pid> {
 		self.children.iter().map(|chld| chld.pid()).collect::<Vec<Pid>>()
 	}
-	pub fn update_by_id(&mut self, id: JobID, status: WaitStatus) -> OxResult<()> {
+	pub fn update_by_id(&mut self, id: JobID, status: WaitStatus) -> AshResult<()> {
 		match id {
     JobID::Pid(pid) => {
 			let query_result = self.children.iter_mut().find(|chld| chld.pid() == pid);
@@ -314,7 +314,7 @@ impl Job {
 }
 		Ok(())
 	}
-	pub fn poll_children(&mut self) -> OxResult<()> {
+	pub fn poll_children(&mut self) -> AshResult<()> {
 		for child in self.children.iter_mut() {
 			let pid = child.pid();
 			match waitpid(pid, Some(WaitPidFlag::WNOHANG | WaitPidFlag::WUNTRACED | WaitPidFlag::WCONTINUED)) {
@@ -344,10 +344,10 @@ impl Job {
 	pub fn new_child(&mut self, child: ChildProc) {
 		self.children.push(child);
 	}
-	pub fn to_fg(&self) -> OxResult<()> {
+	pub fn to_fg(&self) -> AshResult<()> {
 		attach_tty(self.pgid)
 	}
-	pub fn killpg(&mut self, signal: Signal) -> OxResult<()> {
+	pub fn killpg(&mut self, signal: Signal) -> AshResult<()> {
 		let status = match signal {
 			Signal::SIGTSTP => WaitStatus::Stopped(self.pgid, Signal::SIGTSTP),
 			Signal::SIGCONT => WaitStatus::Continued(self.pgid),
@@ -357,7 +357,7 @@ impl Job {
 		killpg(self.pgid, Some(signal)).map_err(|_| ShError::from_io())?;
 		Ok(())
 	}
-	pub fn wait_pgrp(&mut self) -> OxResult<Vec<WaitStatus>> {
+	pub fn wait_pgrp(&mut self) -> AshResult<Vec<WaitStatus>> {
 		let mut statuses = Vec::new();
 
 		for child in self.children.iter_mut() {
@@ -446,7 +446,7 @@ impl JobTable {
 			None
 		}
 	}
-	pub fn insert_job(&mut self, mut job: Job, silent: bool) -> OxResult<usize> {
+	pub fn insert_job(&mut self, mut job: Job, silent: bool) -> AshResult<usize> {
 		self.prune_jobs();
 		let table_position = if let Some(id) = job.table_id() { id } else { self.next_open_pos() };
 		job.set_table_id(table_position);
@@ -465,7 +465,7 @@ impl JobTable {
 	pub fn job_order(&self) -> &[usize] {
 		&self.order
 	}
-	pub fn new_fg(&mut self, job: Job) -> OxResult<Vec<WaitStatus>> {
+	pub fn new_fg(&mut self, job: Job) -> AshResult<Vec<WaitStatus>> {
 		let pgid = job.pgid();
 		self.fg = Some(job);
 		attach_tty(pgid)?;
@@ -474,7 +474,7 @@ impl JobTable {
 		Ok(statuses)
 	}
 
-	pub fn fg_to_bg(&mut self, status: WaitStatus) -> OxResult<()> {
+	pub fn fg_to_bg(&mut self, status: WaitStatus) -> AshResult<()> {
 		attach_tty(getpgrp())?;
 		if self.fg.is_none() {
 			return Ok(())
@@ -495,7 +495,7 @@ impl JobTable {
 			None
 		}
 	}
-	pub fn bg_to_fg(&mut self, id: JobID) -> OxResult<()> {
+	pub fn bg_to_fg(&mut self, id: JobID) -> AshResult<()> {
 		let job = self.remove_job(id);
 		if let Some(job) = job {
 			helper::handle_fg(job)?;
@@ -655,7 +655,7 @@ impl JobTable {
 			println!("{}", job.display(&self.order,*flags));
 		}
 	}
-	pub fn update_job_statuses(&mut self) -> OxResult<()> {
+	pub fn update_job_statuses(&mut self) -> AshResult<()> {
 		for job in self.jobs.iter_mut().flatten() {
 			//job.poll_children()?;
 		}
@@ -696,54 +696,54 @@ impl HashFloat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum OxVal {
+pub enum AshVal {
 	String(String),
 	Int(i32),
 	Float(HashFloat),
 	Bool(bool),
-	Array(Vec<OxVal>),
-	Dict(BTreeMap<String, OxVal>),
+	Array(Vec<AshVal>),
+	Dict(BTreeMap<String, AshVal>),
 }
 
-impl OxVal {
+impl AshVal {
 	pub fn parse(mut s: &str) -> Result<Self, String> {
 		if let Ok(int) = s.parse::<i32>() {
-			return Ok(OxVal::Int(int));
+			return Ok(AshVal::Int(int));
 		}
 		if let Ok(float) = s.parse::<f64>() {
-			return Ok(OxVal::Float(HashFloat(float)));
+			return Ok(AshVal::Float(HashFloat(float)));
 		}
 		if let Ok(boolean) = s.parse::<bool>() {
-			return Ok(OxVal::Bool(boolean));
+			return Ok(AshVal::Bool(boolean));
 		}
 		if s.starts_with('"') && s.ends_with('"') {
 			s = s.trim_matches('"');
 		} else if s.starts_with('\'') && s.ends_with('\'') {
 			s = s.trim_matches('\'');
 		}
-		Ok(OxVal::String(s.to_string()))
+		Ok(AshVal::String(s.to_string()))
 	}
 
 	pub fn as_os_str(&self) -> Option<&OsStr> {
 		match self {
-			OxVal::String(s) => Some(OsStr::new(s)),
+			AshVal::String(s) => Some(OsStr::new(s)),
 			_ => None, // Only strings can be converted to OsStr
 		}
 	}
 
 	pub fn fmt_type(&self) -> String {
 		match self {
-			OxVal::String(_) => String::from("string"),
-			OxVal::Int(_) => String::from("int"),
-			OxVal::Float(_) => String::from("float"),
-			OxVal::Bool(_) => String::from("bool"),
-			OxVal::Array(_) => String::from("array"),
-			OxVal::Dict(_) => String::from("dict"),
+			AshVal::String(_) => String::from("string"),
+			AshVal::Int(_) => String::from("int"),
+			AshVal::Float(_) => String::from("float"),
+			AshVal::Bool(_) => String::from("bool"),
+			AshVal::Array(_) => String::from("array"),
+			AshVal::Dict(_) => String::from("dict"),
 		}
 	}
 
 	pub fn as_string(&self) -> Option<&String> {
-		if let OxVal::String(s) = self {
+		if let AshVal::String(s) = self {
 			Some(s)
 		} else {
 			None
@@ -751,7 +751,7 @@ impl OxVal {
 	}
 
 	pub fn as_int(&self) -> Option<i32> {
-		if let OxVal::Int(i) = self {
+		if let AshVal::Int(i) = self {
 			Some(*i)
 		} else {
 			None
@@ -759,7 +759,7 @@ impl OxVal {
 	}
 
 	pub fn as_float(&self) -> Option<f64> {
-		if let OxVal::Float(f) = self {
+		if let AshVal::Float(f) = self {
 			Some(f.0)
 		} else {
 			None
@@ -767,81 +767,81 @@ impl OxVal {
 	}
 
 	pub fn as_bool(&self) -> Option<bool> {
-		if let OxVal::Bool(b) = self {
+		if let AshVal::Bool(b) = self {
 			Some(*b)
 		} else {
 			None
 		}
 	}
 
-	pub fn as_array(&self) -> Option<&Vec<OxVal>> {
-		if let OxVal::Array(arr) = self {
+	pub fn as_array(&self) -> Option<&Vec<AshVal>> {
+		if let AshVal::Array(arr) = self {
 			Some(arr)
 		} else {
 			None
 		}
 	}
 
-	pub fn as_dict(&self) -> Option<&BTreeMap<String, OxVal>> {
-		if let OxVal::Dict(dict) = self {
+	pub fn as_dict(&self) -> Option<&BTreeMap<String, AshVal>> {
+		if let AshVal::Dict(dict) = self {
 			Some(dict)
 		} else {
 			None
 		}
 	}
 
-	pub fn try_insert(&mut self, key: String, val: OxVal) -> OxResult<()> {
-		if let OxVal::Dict(map) = self {
+	pub fn try_insert(&mut self, key: String, val: AshVal) -> AshResult<()> {
+		if let AshVal::Dict(map) = self {
 			map.insert(key,val);
 			Ok(())
 		} else {
-			Err(ShError::from_internal("Called try_insert() on a non-dict OxVal"))
+			Err(ShError::from_internal("Called try_insert() on a non-dict AshVal"))
 		}
 	}
 
-	pub fn try_get(&mut self, key: &str) -> OxResult<Option<&OxVal>> {
-		if let OxVal::Dict(map) = self {
+	pub fn try_get(&mut self, key: &str) -> AshResult<Option<&AshVal>> {
+		if let AshVal::Dict(map) = self {
 			Ok(map.get(key))
 		} else {
-			Err(ShError::from_internal("Called try_get() on a non-dict OxVal"))
+			Err(ShError::from_internal("Called try_get() on a non-dict AshVal"))
 		}
 	}
 
-	pub fn try_get_mut(&mut self, key: &str) -> OxResult<Option<&mut OxVal>> {
-		if let OxVal::Dict(map) = self {
+	pub fn try_get_mut(&mut self, key: &str) -> AshResult<Option<&mut AshVal>> {
+		if let AshVal::Dict(map) = self {
 			Ok(map.get_mut(key))
 		} else {
-			Err(ShError::from_internal("Called try_get() on a non-dict OxVal"))
+			Err(ShError::from_internal("Called try_get() on a non-dict AshVal"))
 		}
 	}
 
-	pub fn try_remove(&mut self, key: &str) -> OxResult<Option<OxVal>> {
-		if let OxVal::Dict(map) = self {
+	pub fn try_remove(&mut self, key: &str) -> AshResult<Option<AshVal>> {
+		if let AshVal::Dict(map) = self {
 			Ok(map.remove(key))
 		} else {
-			Err(ShError::from_internal("Called try_get() on a non-dict OxVal"))
+			Err(ShError::from_internal("Called try_get() on a non-dict AshVal"))
 		}
 	}
 }
 
-impl Default for OxVal {
+impl Default for AshVal {
 	fn default() -> Self {
-		OxVal::String("".into())
+		AshVal::String("".into())
 	}
 }
 
-impl fmt::Display for OxVal {
+impl fmt::Display for AshVal {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			OxVal::Int(int) => write!(f, "{}", int),
-			OxVal::String(string) => write!(f, "{}", string),
-			OxVal::Float(float) => write!(f, "{}", float.0),
-			OxVal::Bool(bool) => write!(f, "{}", bool),
-			OxVal::Array(array) => {
+			AshVal::Int(int) => write!(f, "{}", int),
+			AshVal::String(string) => write!(f, "{}", string),
+			AshVal::Float(float) => write!(f, "{}", float.0),
+			AshVal::Bool(bool) => write!(f, "{}", bool),
+			AshVal::Array(array) => {
 				let formatted_array: Vec<String> = array.iter().map(|val| format!("{}", val)).collect();
 				write!(f, "{}", formatted_array.join(" "))
 			}
-			OxVal::Dict(dict) => {
+			AshVal::Dict(dict) => {
 				let formatted_dict: Vec<String> = dict
 					.iter()
 					.map(|(key, value)| format!("{}: {}", key, value))
@@ -861,7 +861,7 @@ pub struct VarTable {
 	env: HashMap<String,String>,
 	params: HashMap<String,String>,
 	pos_params: VecDeque<String>,
-	vars: HashMap<String,OxVal>
+	vars: HashMap<String,AshVal>
 }
 
 impl VarTable {
@@ -875,7 +875,7 @@ impl VarTable {
 		}
 	}
 
-	pub fn borrow_vars(&self) -> &HashMap<String, OxVal> {
+	pub fn borrow_vars(&self) -> &HashMap<String, AshVal> {
 		&self.vars
 	}
 
@@ -929,27 +929,27 @@ impl VarTable {
 		self.params.remove(key);
 	}
 
-	pub fn set_var(&mut self, key: &str, val: OxVal) {
+	pub fn set_var(&mut self, key: &str, val: AshVal) {
 		self.vars.insert(key.to_string(),val);
 	}
 	pub fn unset_var(&mut self, key: &str) {
 		self.vars.remove(key);
 	}
-	pub fn get_var(&self, key: &str) -> Option<OxVal> {
+	pub fn get_var(&self, key: &str) -> Option<AshVal> {
 		if let Some(var) = self.vars.get(key).cloned() {
 			Some(var)
 		} else if let Some(var) = self.params.get(key).cloned() {
-			let val = OxVal::String(var);
+			let val = AshVal::String(var);
 			Some(val)
 		} else {
-			let var = self.env.get(key).cloned().map(OxVal::String);
+			let var = self.env.get(key).cloned().map(AshVal::String);
 			var
 		}
 	}
 
-	pub fn index_arr(&self, key: &str, index: usize) -> OxResult<OxVal> {
+	pub fn index_arr(&self, key: &str, index: usize) -> AshResult<AshVal> {
 		if let Some(var) = self.vars.get(key) {
-			if let OxVal::Array(arr) = var {
+			if let AshVal::Array(arr) = var {
 				if let Some(value) = arr.get(index) {
 					Ok(value.clone())
 				} else {
@@ -1041,7 +1041,7 @@ impl EnvMeta {
 			in_prompt,
 		}
 	}
-	pub fn stop_timer(&mut self) -> OxResult<()> {
+	pub fn stop_timer(&mut self) -> AshResult<()> {
 		if let Some(start_time) = self.timer_start {
 			self.cmd_duration = Some(start_time.elapsed());
 			write_vars(|v| v.export_var("OX_CMD_TIME", &self.cmd_duration.unwrap().as_millis().to_string()))?;
@@ -1091,12 +1091,12 @@ impl EnvMeta {
 	pub fn borrow_shopts(&self) -> &ShOpts {
 		&self.shopts
 	}
-	pub fn set_shopt(&mut self, key: &str, val: &str) -> OxResult<()> {
-		let val = OxVal::parse(val).map_err(|e| ShError::from_internal(&e))?;
+	pub fn set_shopt(&mut self, key: &str, val: &str) -> AshResult<()> {
+		let val = AshVal::parse(val).map_err(|e| ShError::from_internal(&e))?;
 		let query = key.split('.').map(|str| str.to_string()).collect::<VecDeque<String>>();
 		self.shopts.set(query,val)
 	}
-	pub fn get_shopt(&self, key: &str) -> OxResult<String> {
+	pub fn get_shopt(&self, key: &str) -> AshResult<String> {
 		let result = &self.shopts.get(key)?;
 		Ok(result.to_string().trim().to_string())
 	}
@@ -1113,65 +1113,65 @@ pub fn disable_reaping() {
 	unsafe { signal(Signal::SIGCHLD, SigHandler::Handler(crate::signal::ignore_sigchld)) }.unwrap();
 }
 
-pub fn enable_reaping() -> OxResult<()> {
+pub fn enable_reaping() -> AshResult<()> {
 	write_jobs(|j| j.update_job_statuses())??;
 	unsafe { signal(Signal::SIGCHLD, SigHandler::Handler(crate::signal::handle_sigchld)) }.unwrap();
 	Ok(())
 }
 
-pub fn borrow_var_table() -> OxResult<VarTable> {
+pub fn borrow_var_table() -> AshResult<VarTable> {
 	Ok(VARS.read().map_err(|_| ShError::from_internal("Failed to clone VarTable"))?.clone())
 }
-pub fn borrow_job_table() -> OxResult<JobTable> {
+pub fn borrow_job_table() -> AshResult<JobTable> {
 	Ok(JOBS.read().map_err(|_| ShError::from_internal("Failed to clone VarTable"))?.clone())
 }
-pub fn borrow_env_meta() -> OxResult<EnvMeta> {
+pub fn borrow_env_meta() -> AshResult<EnvMeta> {
 	Ok(META.read().map_err(|_| ShError::from_internal("Failed to clone VarTable"))?.clone())
 }
 
-pub fn read_jobs<F,T>(f: F) -> OxResult<T>
+pub fn read_jobs<F,T>(f: F) -> AshResult<T>
 where F: FnOnce(&JobTable) -> T {
 	let lock = JOBS.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&lock))
 }
 
-pub fn write_jobs<F,T>(f: F) -> OxResult<T>
+pub fn write_jobs<F,T>(f: F) -> AshResult<T>
 where F: FnOnce(&mut JobTable) -> T {
 	let mut lock = JOBS.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
 }
 
-pub fn read_vars<F,T>(f: F) -> OxResult<T>
+pub fn read_vars<F,T>(f: F) -> AshResult<T>
 where F: FnOnce(&VarTable) -> T {
 	let lock = VARS.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&lock))
 }
-pub fn write_vars<F,T>(f: F) -> OxResult<T>
+pub fn write_vars<F,T>(f: F) -> AshResult<T>
 where F: FnOnce(&mut VarTable) -> T {
 	let mut lock = VARS.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
 }
-pub fn read_logic<F,T>(f: F) -> OxResult<T>
+pub fn read_logic<F,T>(f: F) -> AshResult<T>
 where F: FnOnce(&LogicTable) -> T {
 	let lock = LOGIC.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&lock))
 }
-pub fn write_logic<F,T>(f: F) -> OxResult<T>
+pub fn write_logic<F,T>(f: F) -> AshResult<T>
 where F: FnOnce(&mut LogicTable) -> T {
 	let mut lock = LOGIC.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
 }
-pub fn read_meta<F,T>(f: F) -> OxResult<T>
+pub fn read_meta<F,T>(f: F) -> AshResult<T>
 where F: FnOnce(&EnvMeta) -> T {
 	let lock = META.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&lock))
 }
-pub fn write_meta<F,T>(f: F) -> OxResult<T>
+pub fn write_meta<F,T>(f: F) -> AshResult<T>
 where F: FnOnce(&mut EnvMeta) -> T {
 	let mut lock = META.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
 }
-pub fn attach_tty(pgid: Pid) -> OxResult<()> {
+pub fn attach_tty(pgid: Pid) -> AshResult<()> {
 	// Ensure stdin (fd 0) is a tty before proceeding
 	if !isatty(0).unwrap_or(false) || !isatty(1).unwrap_or(false) || !isatty(2).unwrap_or(false) {
 		return Ok(())
@@ -1179,7 +1179,7 @@ pub fn attach_tty(pgid: Pid) -> OxResult<()> {
 
 	// TODO: this guard condition was put here because something about rustyline
 	// really hates it when terminal control is passed around in a tty environment.
-	// This seems to only occur when ox is run as a login shell, for some reason.
+	// This seems to only occur when ash is run as a login shell, for some reason.
 	// Figure out why that is instead of using this stupid workaround.
 	if let Ok(term) = std::env::var("TERM") {
 		if term == "linux" {
@@ -1222,13 +1222,13 @@ pub struct SavedEnv {
 }
 
 impl SavedEnv {
-	pub fn get_snapshot() -> OxResult<Self> {
+	pub fn get_snapshot() -> AshResult<Self> {
 		let vars = read_vars(|vars| vars.clone())?;
 		let logic = read_logic(|log| log.clone())?;
 		let meta = read_meta(|meta| meta.clone())?;
 		Ok(Self { vars, logic, meta })
 	}
-	pub fn restore_snapshot(self) -> OxResult<()> {
+	pub fn restore_snapshot(self) -> AshResult<()> {
 		write_vars(|vars| *vars = self.vars)?;
 		write_logic(|log| *log = self.logic)?;
 		write_meta(|meta| *meta = self.meta)?;
@@ -1291,19 +1291,19 @@ fn init_env_vars(clean: bool) -> HashMap<String,String> {
 	env::set_var("HOME", home.clone());
 	env_vars.insert("SHELL".into(), pathbuf_to_string(std::env::current_exe()));
 	env::set_var("SHELL", pathbuf_to_string(std::env::current_exe()));
-	env_vars.insert("HIST_FILE".into(),format!("{}/.ox_hist",home));
-	env::set_var("HIST_FILE",format!("{}/.ox_hist",home));
+	env_vars.insert("HIST_FILE".into(),format!("{}/.ash_hist",home));
+	env::set_var("HIST_FILE",format!("{}/.ash_hist",home));
 
 	env_vars
 }
 
-pub fn get_cstring_evars() -> OxResult<Vec<CString>> {
+pub fn get_cstring_evars() -> AshResult<Vec<CString>> {
 	let env = read_vars(|v| v.borrow_evars().clone())?;
 	let env = env.iter().map(|(k,v)| CString::new(format!("{}={}",k,v).as_str()).unwrap()).collect::<Vec<CString>>();
 	Ok(env)
 }
 
-pub fn source_file(path: PathBuf) -> OxResult<()> {
+pub fn source_file(path: PathBuf) -> AshResult<()> {
 	let mut file = File::open(&path).map_err(|_| ShError::from_io())?;
 	let mut buffer = String::new();
 	file.read_to_string(&mut buffer).map_err(|_| ShError::from_io())?;

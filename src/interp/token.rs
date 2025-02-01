@@ -18,7 +18,7 @@ use crate::shellenv::read_vars;
 use crate::shellenv::write_meta;
 use crate::shellenv::EnvFlags;
 use crate::shellenv::PARAMS;
-use crate::OxResult;
+use crate::AshResult;
 use crate::builtin::BUILTINS;
 
 use super::expand;
@@ -311,7 +311,7 @@ impl Tk {
 			}
 		}
 	}
-	pub fn from(wd: WordDesc, context: TkState) -> OxResult<Self> {
+	pub fn from(wd: WordDesc, context: TkState) -> AshResult<Self> {
 		use crate::interp::token::TkState::*;
 		use crate::interp::token::TkType as TkT;
 		match context {
@@ -502,7 +502,7 @@ pub enum TkState {
 }
 
 #[derive(Debug)]
-pub struct OxTokenizer {
+pub struct AshTokenizer {
 	input: String,
 	char_stream: VecDeque<char>,
 	context: Vec<TkState>,
@@ -511,7 +511,7 @@ pub struct OxTokenizer {
 	pub spans: VecDeque<Span>
 }
 
-impl OxTokenizer {
+impl AshTokenizer {
 	pub fn new(input: &str) -> Self {
 		let mut input = input.to_string();
 		let char_stream = input.chars().collect::<VecDeque<char>>();
@@ -634,7 +634,7 @@ impl OxTokenizer {
 		words
 	}
 
-	fn alias_pass(&mut self) -> OxResult<()> {
+	fn alias_pass(&mut self) -> AshResult<()> {
 		let aliases = read_logic(|m| m.borrow_aliases().clone())?;
 		let mut replaced = true;
 		let mut is_command = true;
@@ -667,7 +667,7 @@ impl OxTokenizer {
 
 		Ok(())
 	}
-	fn glob_pass(&mut self) -> OxResult<()> {
+	fn glob_pass(&mut self) -> AshResult<()> {
 		let words = self.split_input();
 		let mut new_input = String::new();
 		let mut is_command = true;
@@ -724,7 +724,7 @@ impl OxTokenizer {
 
 		Ok(())
 	}
-	fn var_pass(&mut self) -> OxResult<()> {
+	fn var_pass(&mut self) -> AshResult<()> {
 		let vartable = read_vars(|v| v.clone())?;
 		let mut is_command = true;
 		let mut replaced = true;
@@ -812,7 +812,7 @@ impl OxTokenizer {
 
 		Ok(())
 	}
-	fn cmd_sub_pass(&mut self) -> OxResult<()> {
+	fn cmd_sub_pass(&mut self) -> AshResult<()> {
 		let mut replaced = true;
 
 		while replaced {
@@ -891,7 +891,7 @@ impl OxTokenizer {
 
 		self.spans = VecDeque::from(spans);
 	}
-	pub fn expand_one(&mut self) -> OxResult<String> {
+	pub fn expand_one(&mut self) -> AshResult<String> {
 		/*
 		 * Here we use basically the same logic as tokenize_one for maintaining context
 		 * The idea is to localize expansion to just the section of the input being worked on
@@ -1121,7 +1121,7 @@ impl OxTokenizer {
 		// We return the remaining unexpanded input here
 		Ok(sliced_input)
 	}
-	pub fn tokenize_one(&mut self, expand: bool) -> OxResult<Vec<Tk>> {
+	pub fn tokenize_one(&mut self, expand: bool) -> AshResult<Vec<Tk>> {
 		/*
 		 * It's called `tokenize_one` because we are only tokenizing a single executable block of logic
 		 * Traditionally, shells parse line by line, but that doesn't really make sense when logic can span several lines
@@ -1278,7 +1278,7 @@ impl OxTokenizer {
 		//dbg!(&self.tokens.iter().map(|tk| (tk.class(),tk.text())).collect::<Vec<(TkType,&str)>>());
 		Ok(take(&mut self.tokens))
 	}
-	fn command_context(&mut self, mut wd: WordDesc, expand: bool) -> OxResult<()> {
+	fn command_context(&mut self, mut wd: WordDesc, expand: bool) -> AshResult<()> {
 		use crate::interp::token::TkState::*;
 		wd = self.complete_word(wd,None)?;
 		if wd.text.ends_with("()") {
@@ -1347,7 +1347,7 @@ impl OxTokenizer {
 				};
 				let mut val_wd = wd.clone();
 				val_wd.text = val.to_string();
-				let mut sub_tokenizer = OxTokenizer::new(&val_wd.text);
+				let mut sub_tokenizer = AshTokenizer::new(&val_wd.text);
 				let mut tokens = VecDeque::from(sub_tokenizer.tokenize_one(expand)?);
 				let mut new_val = String::new();
 				tokens.pop_front(); // Ignore SOI
@@ -1382,7 +1382,7 @@ impl OxTokenizer {
 		}
 		Ok(())
 	}
-	fn arg_context(&mut self, mut wd: WordDesc, expand: bool) -> OxResult<()> {
+	fn arg_context(&mut self, mut wd: WordDesc, expand: bool) -> AshResult<()> {
 		use crate::interp::token::TkState::*;
 		wd.flags |= WdFlags::IS_ARG;
 		if self.char_stream.front().is_some_and(|ch| matches!(ch, ';' | '\n')) {
@@ -1488,7 +1488,7 @@ impl OxTokenizer {
 		}
 		Ok(())
 	}
-	fn string_context(&mut self, mut wd: WordDesc, expand: bool) -> OxResult<()> {
+	fn string_context(&mut self, mut wd: WordDesc, expand: bool) -> AshResult<()> {
 		use crate::interp::token::TkState::*;
 		while let Some(ch) = self.advance() {
 			match ch {
@@ -1538,7 +1538,7 @@ impl OxTokenizer {
 		self.pop_ctx();
 		Ok(())
 	}
-	fn vardec_context(&mut self, mut wd: WordDesc) -> OxResult<()> {
+	fn vardec_context(&mut self, mut wd: WordDesc) -> AshResult<()> {
 		use crate::interp::token::TkState::*;
 		let mut found = false;
 		loop {
@@ -1576,7 +1576,7 @@ impl OxTokenizer {
 		self.push_ctx(ArrDec);
 		Ok(())
 	}
-	fn arrdec_context(&mut self, mut wd: WordDesc) -> OxResult<()> {
+	fn arrdec_context(&mut self, mut wd: WordDesc) -> AshResult<()> {
 		let mut found = false;
 		while self.char_stream.front().is_some_and(|ch| !matches!(ch, ';' | '\n')) {
 			found = true;
@@ -1594,7 +1594,7 @@ impl OxTokenizer {
 		self.pop_ctx();
 		Ok(())
 	}
-	fn subshell_context(&mut self, mut wd: WordDesc, expand: bool) -> OxResult<()> {
+	fn subshell_context(&mut self, mut wd: WordDesc, expand: bool) -> AshResult<()> {
 		use crate::interp::token::TkState::*;
 		self.advance();
 		if *self.ctx() == CommandSub { self.advance(); }
@@ -1644,7 +1644,7 @@ impl OxTokenizer {
 		self.tokens.push(tk);
 		Ok(())
 	}
-	fn func_context(&mut self, mut wd: WordDesc) -> OxResult<()> {
+	fn func_context(&mut self, mut wd: WordDesc) -> AshResult<()> {
 		use crate::interp::token::TkState::*;
 		self.advance();
 		if *self.ctx() == CommandSub { self.advance(); }
@@ -1755,7 +1755,7 @@ impl OxTokenizer {
 		}
 		self.pop_ctx();
 	}
-	fn case_context(&mut self, mut wd: WordDesc, expand: bool) -> OxResult<()> {
+	fn case_context(&mut self, mut wd: WordDesc, expand: bool) -> AshResult<()> {
 		use crate::interp::token::TkState::*;
 		let span = wd.span;
 		let mut closed = false;
@@ -1799,7 +1799,7 @@ impl OxTokenizer {
 					}
 				};
 				let mut body_tokens = vec![];
-				let mut body_tokenizer = OxTokenizer::new(body);
+				let mut body_tokenizer = AshTokenizer::new(body);
 				while let Ok(mut block) = body_tokenizer.tokenize_one(expand) {
 					if !block.is_empty() {
 						if block.first().is_some_and(|tk| tk.tk_type == TkType::SOI) {
@@ -1835,7 +1835,7 @@ impl OxTokenizer {
 		self.pop_ctx();
 		self.tokens.push(var_tk)
 	}
-	fn complete_word(&mut self, mut wd: WordDesc, brk_pattern: Option<char>) -> OxResult<WordDesc> {
+	fn complete_word(&mut self, mut wd: WordDesc, brk_pattern: Option<char>) -> AshResult<WordDesc> {
 		let mut dub_quote = false;
 		let mut sng_quote = false;
 		let mut paren_stack = vec![];

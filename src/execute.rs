@@ -4,10 +4,8 @@ use libc::{memfd_create, MFD_CLOEXEC};
 use nix::{errno::Errno, fcntl::{open, OFlag}, sys::{signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
 use std::sync::Mutex;
 
-use crate::{builtin::{self, CdFlags}, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{AssOp, OxTokenizer, Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, OxVal, SavedEnv}, OxResult};
+use crate::{builtin::{self, CdFlags}, event::{self, ShError}, interp::{expand, helper::{self, StrExtension, VecDequeExtension}, parse::{self, NdFlags, NdType, Node}, token::{AssOp, AshTokenizer, Redir, RedirType, Tk, TkType, WdFlags}}, shellenv::{self, read_logic, read_meta, read_vars, write_jobs, write_logic, write_meta, write_vars, ChildProc, EnvFlags, JobBuilder, AshVal, SavedEnv}, AshResult};
 
-/// This macro is used for deconstructing a Node into it's NdType
-/// This macro is not safe. Make sure that the node is *definitely* the type you think it is.
 #[macro_export]
 macro_rules! node_operation {
 	($node_type:path { $($field:tt)* }, $node:expr, $node_op:block) => {
@@ -25,17 +23,13 @@ bitflags::bitflags! {
 	}
 }
 
-/// A load-bearing struct. Used for basically everything involving i/o
-/// Managing file descriptor lifetimes is not necessary with these,
-/// The file descriptor will be closed automatically as soon as the variable
-/// falls out of scope.
 #[derive(Hash, Eq, PartialEq, Debug)]
 pub struct RustFd {
 	fd: RawFd,
 }
 
 impl RustFd {
-	pub fn new(fd: RawFd) -> OxResult<Self> {
+	pub fn new(fd: RawFd) -> AshResult<Self> {
 		if fd < 0 {
 			return Err(ShError::from_internal("Attempted to create a new RustFd from a negative FD"));
 		}
@@ -43,25 +37,25 @@ impl RustFd {
 	}
 
 	/// Create a `RustFd` from a duplicate of `stdin` (FD 0)
-	pub fn from_stdin() -> OxResult<Self> {
+	pub fn from_stdin() -> AshResult<Self> {
 		let fd = dup(0).map_err(|_| ShError::from_io())?;
 		Ok(Self { fd })
 	}
 
 	/// Create a `RustFd` from a duplicate of `stdout` (FD 1)
-	pub fn from_stdout() -> OxResult<Self> {
+	pub fn from_stdout() -> AshResult<Self> {
 		let fd = dup(1).map_err(|_| ShError::from_io())?;
 		Ok(Self { fd })
 	}
 
 	/// Create a `RustFd` from a duplicate of `stderr` (FD 2)
-	pub fn from_stderr() -> OxResult<Self> {
+	pub fn from_stderr() -> AshResult<Self> {
 		let fd = dup(2).map_err(|_| ShError::from_io())?;
 		Ok(Self { fd })
 	}
 
 	/// Create a `RustFd` from a type that provides an owned or borrowed FD
-	pub fn from_fd<T: AsFd>(fd: T) -> OxResult<Self> {
+	pub fn from_fd<T: AsFd>(fd: T) -> AshResult<Self> {
 		let raw_fd = fd.as_fd().as_raw_fd();
 		if raw_fd < 0 {
 			return Err(ShError::from_internal("Attempted to convert to RustFd from a negative FD"));
@@ -70,7 +64,7 @@ impl RustFd {
 	}
 
 	/// Create a `RustFd` by consuming ownership of an FD
-	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> OxResult<Self> {
+	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> AshResult<Self> {
 		let raw_fd = fd.into_raw_fd(); // Consumes ownership
 		if raw_fd < 0 {
 			return Err(ShError::from_internal("Attempted to convert to RustFd from a negative FD"));
@@ -79,7 +73,7 @@ impl RustFd {
 	}
 
 	/// Create a new `RustFd` that points to an in-memory file descriptor. In-memory file descriptors can be interacted with as though they were normal files.
-	pub fn new_memfd(name: &str, executable: bool) -> OxResult<Self> {
+	pub fn new_memfd(name: &str, executable: bool) -> AshResult<Self> {
 		let c_name = CString::new(name).map_err(|_| ShError::from_internal("Invalid name for memfd"))?;
 		let flags = if executable {
 			0
@@ -91,7 +85,7 @@ impl RustFd {
 	}
 
 	/// Write some bytes to the contained file descriptor
-	pub fn write(&self, buffer: &[u8]) -> OxResult<()> {
+	pub fn write(&self, buffer: &[u8]) -> AshResult<()> {
 		if !self.is_valid() {
 			return Err(ShError::from_internal("Attempted to write to an invalid RustFd"));
 		}
@@ -103,7 +97,7 @@ impl RustFd {
 		}
 	}
 
-	pub fn read(&self) -> OxResult<String> {
+	pub fn read(&self) -> AshResult<String> {
 		if !self.is_valid() {
 			return Err(ShError::from_internal("Attempted to read from an invalid RustFd"));
 		}
@@ -123,7 +117,7 @@ impl RustFd {
 	}
 
 	/// Wrapper for nix::unistd::pipe(), simply produces two `RustFds` that point to a read and write pipe respectfully
-	pub fn pipe() -> OxResult<(Self,Self)> {
+	pub fn pipe() -> AshResult<(Self,Self)> {
 		let (r_pipe,w_pipe) = pipe().map_err(|_| ShError::from_io())?;
 		let r_fd = RustFd::from_owned_fd(r_pipe)?;
 		let w_fd = RustFd::from_owned_fd(w_pipe)?;
@@ -131,7 +125,7 @@ impl RustFd {
 	}
 
 	/// Produce a `RustFd` that points to the same resource as the 'self' `RustFd`
-	pub fn dup(&self) -> OxResult<Self> {
+	pub fn dup(&self) -> AshResult<Self> {
 		if !self.is_valid() {
 			return Err(ShError::from_internal("Attempted to dup an invalid fd"));
 		}
@@ -141,7 +135,7 @@ impl RustFd {
 
 	/// A wrapper for nix::unistd::dup2(), 'self' is duplicated to the given target file descriptor.
 	#[track_caller]
-	pub fn dup2<T: AsRawFd>(&self, target: &T) -> OxResult<()> {
+	pub fn dup2<T: AsRawFd>(&self, target: &T) -> AshResult<()> {
 		let target_fd = target.as_raw_fd();
 		if self.fd == target_fd {
 			// Nothing to do here
@@ -156,13 +150,13 @@ impl RustFd {
 	}
 
 	/// Open a file using a file descriptor, with the given OFlags and Mode bits
-	pub fn open(path: &Path, flags: OFlag, mode: Mode) -> OxResult<Self> {
+	pub fn open(path: &Path, flags: OFlag, mode: Mode) -> AshResult<Self> {
 		let file_fd: RawFd = open(path, flags, mode).map_err(|_| ShError::from_io())?;
 		Ok(Self { fd: file_fd })
 	}
 
 	#[track_caller]
-	pub fn close(&mut self) -> OxResult<()> {
+	pub fn close(&mut self) -> AshResult<()> {
 		if !self.is_valid() {
 			return Ok(())
 		}
@@ -217,7 +211,7 @@ impl FromRawFd for RustFd {
 }
 
 #[derive(PartialEq,Debug,Clone)]
-pub enum OxWait {
+pub enum AshWait {
 	Success,
 	Fail { code: i32, cmd: Option<String> },
 	Signaled { sig: Signal },
@@ -235,14 +229,14 @@ pub enum OxWait {
 	SIGRSHEXIT // Internal call to exit early
 }
 
-impl OxWait {
+impl AshWait {
 	pub fn new() -> Self {
-		OxWait::Success
+		AshWait::Success
 	}
 	pub fn raw(&self) -> i32 {
 		match *self {
-			OxWait::Success => 0,
-			OxWait::Fail { code, cmd: _ } => code,
+			AshWait::Success => 0,
+			AshWait::Fail { code, cmd: _ } => code,
 			_ => unimplemented!("unimplemented signal type: {:?}", self)
 		}
 	}
@@ -250,49 +244,44 @@ impl OxWait {
 		match wait {
 			WaitStatus::Exited(_, code) => {
 				match code {
-					0 => OxWait::Success,
-					_ => OxWait::Fail { code, cmd }
+					0 => AshWait::Success,
+					_ => AshWait::Fail { code, cmd }
 				}
 			}
-			WaitStatus::Signaled(_, sig, _) => OxWait::Signaled { sig },
-			WaitStatus::Stopped(_, sig) => OxWait::Stopped { sig },
+			WaitStatus::Signaled(_, sig, _) => AshWait::Signaled { sig },
+			WaitStatus::Stopped(_, sig) => AshWait::Stopped { sig },
 			WaitStatus::PtraceEvent(_, _, _) => todo!(),
 			WaitStatus::PtraceSyscall(_) => todo!(),
-			WaitStatus::Continued(_) => OxWait::Continued,
-			WaitStatus::StillAlive => OxWait::Running
+			WaitStatus::Continued(_) => AshWait::Continued,
+			WaitStatus::StillAlive => AshWait::Running
 		}
 	}
 }
 
-impl Display for OxWait {
+impl Display for AshWait {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			OxWait::Success { .. } => write!(f, "done"),
-			OxWait::Fail { code, .. } => write!(f, "exit {}", code),
-			OxWait::Signaled { sig } => write!(f, "exit {}", sig),
-			OxWait::Stopped { .. } => write!(f, "stopped"),
-			OxWait::Terminated { signal } => write!(f, "terminated {}", signal),
-			OxWait::Continued => write!(f, "continued"),
-			OxWait::Running => write!(f, "running"),
-			OxWait::Killed { signal } => write!(f, "killed {}", signal),
-			OxWait::TimeOut => write!(f, "time out"),
+			AshWait::Success { .. } => write!(f, "done"),
+			AshWait::Fail { code, .. } => write!(f, "exit {}", code),
+			AshWait::Signaled { sig } => write!(f, "exit {}", sig),
+			AshWait::Stopped { .. } => write!(f, "stopped"),
+			AshWait::Terminated { signal } => write!(f, "terminated {}", signal),
+			AshWait::Continued => write!(f, "continued"),
+			AshWait::Running => write!(f, "running"),
+			AshWait::Killed { signal } => write!(f, "killed {}", signal),
+			AshWait::TimeOut => write!(f, "time out"),
 			_ => write!(f, "{:?}",self)
 		}
 	}
 }
 
 
-impl Default for OxWait {
+impl Default for AshWait {
 	fn default() -> Self {
-		OxWait::new()
+		AshWait::new()
 	}
 }
 
-/// Another extremely important struct for this program
-///
-/// This struct trivializes managing input and output.
-/// route_input() and route_output() are used to actually wire the contained RustFds to the process' stdin or stdout/stderr
-/// backup_fildescs allows for easy saving of i/o state in a process.
 #[derive(Debug)]
 pub struct ProcIO {
 	pub stdin: Option<Arc<Mutex<RustFd>>>,
@@ -313,7 +302,7 @@ impl ProcIO {
 			backup: HashMap::new(),
 		}
 	}
-	pub fn close_all(&mut self) -> OxResult<()> {
+	pub fn close_all(&mut self) -> AshResult<()> {
 		if let Some(fd) = &self.stdin {
 			fd.lock().unwrap().close()?;
 		}
@@ -325,7 +314,7 @@ impl ProcIO {
 		}
 		Ok(())
 	}
-	pub fn backup_fildescs(&mut self) -> OxResult<()> {
+	pub fn backup_fildescs(&mut self) -> AshResult<()> {
 		let mut backup = HashMap::new();
 		// Get duped file descriptors
 		let dup_in = RustFd::from_stdin()?;
@@ -338,7 +327,7 @@ impl ProcIO {
 		self.backup = backup;
 		Ok(())
 	}
-	pub fn restore_fildescs(&mut self) -> OxResult<()> {
+	pub fn restore_fildescs(&mut self) -> AshResult<()> {
 		// Get duped file descriptors from hashmap
 		if !self.backup.is_empty() {
 			// Dup2 to restore file descriptors
@@ -357,7 +346,7 @@ impl ProcIO {
 		}
 		Ok(())
 	}
-	pub fn route_input(&mut self) -> OxResult<()> {
+	pub fn route_input(&mut self) -> AshResult<()> {
 		if let Some(ref mut stdin_fd) = self.stdin {
 			let mut fd = stdin_fd.lock().unwrap();
 			fd.dup2(&0)?;
@@ -365,7 +354,7 @@ impl ProcIO {
 		}
 		Ok(())
 	}
-	pub fn route_output(&mut self) -> OxResult<()> {
+	pub fn route_output(&mut self) -> AshResult<()> {
 		if let Some(ref mut stdout_fd) = self.stdout {
 			let mut fd = stdout_fd.lock().unwrap();
 			fd.dup2(&1)?;
@@ -378,7 +367,7 @@ impl ProcIO {
 		}
 		Ok(())
 	}
-	pub fn route_io(&mut self) -> OxResult<()> {
+	pub fn route_io(&mut self) -> AshResult<()> {
 		self.route_input()?;
 		self.route_output()
 	}
@@ -389,7 +378,7 @@ impl Clone for ProcIO {
 	/// but for all intents and purposes the ProcIO struct is meant to be a unique identifier for an open file descriptor.
 	/// Use this if you have to, but know that it may cause unintended side effects.
 	///
-	/// Since ProcIO uses Arc<Mutex<RustFd>>, these clones will refer to the same data as the original. That means modifications will effect both instances. It also means that a cloned ProcIO can keep a RustFd alive longer than it's supposed to be. Keep that in mind.
+	/// Since ProcIO uses Arc<Mutex<RustFd>>, these clones will refer to the same data as the original. That means modifications will effect both instances.
 	fn clone(&self) -> Self {
 		ProcIO::from(self.stdin.clone(),self.stdout.clone(),self.stderr.clone())
 	}
@@ -401,14 +390,11 @@ impl Default for ProcIO {
 	}
 }
 
-/// This function traverses a Root node.
-///
-/// If given a ProcIO, it will use that in the traverse() call, otherwise it creates a new one.
-pub fn traverse_ast(ast: Node, io: Option<ProcIO>) -> OxResult<OxWait> {
+pub fn traverse_ast(ast: Node, io: Option<ProcIO>) -> AshResult<AshWait> {
 	let saved_in = RustFd::from_stdin()?;
 	let saved_out = RustFd::from_stdout()?;
 	let saved_err = RustFd::from_stderr()?;
-	let io = io.unwrap_or_default();
+	let io = if let Some(proc_io) = io { proc_io } else { ProcIO::new() };
 	let status = traverse(ast, io)?;
 	saved_in.dup2(&0)?;
 	saved_out.dup2(&1)?;
@@ -416,10 +402,8 @@ pub fn traverse_ast(ast: Node, io: Option<ProcIO>) -> OxResult<OxWait> {
 	Ok(status)
 }
 
-/// The core of the execution logic.
-///
-/// This directs traffic for nodes by matching the NdType of the node to the corresponding function.
-fn traverse(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
+
+fn traverse(mut node: Node, io: ProcIO) -> AshResult<AshWait> {
 	let last_status;
 
 	// We delay expanding variables in for loop bodies until now; this is done to give the variables time to be properly assigned before execution of the for loop body
@@ -471,7 +455,7 @@ fn traverse(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 			last_status = handle_assignment(node, io)?;
 		}
 		NdType::Cmdsep => {
-			last_status = OxWait::new();
+			last_status = AshWait::new();
 		}
 		NdType::Root {..} => {
 			last_status = traverse_root(node, None, io)?;
@@ -481,12 +465,8 @@ fn traverse(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 	Ok(last_status)
 }
 
-/// This function traverses a Root node.
-///
-/// It's behavior is different from traverse_ast(), it deconstructs the Root node and iterates over the deque directly.
-/// You can specify a break condition. True means that if an execution is successful, the loop breaks. False does the opposite.
-fn traverse_root(mut root_node: Node, break_condition: Option<bool>, io: ProcIO) -> OxResult<OxWait> {
-	let mut last_status = OxWait::new();
+fn traverse_root(mut root_node: Node, break_condition: Option<bool>, io: ProcIO) -> AshResult<AshWait> {
+	let mut last_status = AshWait::new();
 	if !root_node.redirs.is_empty() {
 		root_node = parse::propagate_redirections(root_node)?;
 	}
@@ -506,12 +486,12 @@ fn traverse_root(mut root_node: Node, break_condition: Option<bool>, io: ProcIO)
 			if let Some(condition) = break_condition {
 				match condition {
 					true => {
-						if let OxWait::Fail {..} = last_status {
+						if let AshWait::Fail {..} = last_status {
 							break
 						}
 					}
 					false => {
-						if let OxWait::Success  = last_status {
+						if let AshWait::Success  = last_status {
 							break
 						}
 					}
@@ -522,15 +502,15 @@ fn traverse_root(mut root_node: Node, break_condition: Option<bool>, io: ProcIO)
 	Ok(last_status)
 }
 
-fn handle_func_def(node: Node) -> OxResult<OxWait> {
-	let last_status = OxWait::new();
+fn handle_func_def(node: Node) -> AshResult<AshWait> {
+	let last_status = AshWait::new();
 	node_operation!(NdType::FuncDef { name, body }, node, {
 		write_logic(|l| l.new_func(&name, &body))?;
 	});
 	Ok(last_status)
 }
 
-pub fn handle_cmd_sub(node: Node, io: ProcIO) -> OxResult<OxWait> {
+pub fn handle_cmd_sub(node: Node, io: ProcIO) -> AshResult<AshWait> {
 	let last_status;
 	let snapshot = SavedEnv::get_snapshot()?;
 	node_operation!(NdType::CommandSub { body }, node, {
@@ -540,7 +520,7 @@ pub fn handle_cmd_sub(node: Node, io: ProcIO) -> OxResult<OxWait> {
 	last_status
 }
 
-fn handle_case(node: Node, io: ProcIO) -> OxResult<OxWait> {
+fn handle_case(node: Node, io: ProcIO) -> AshResult<AshWait> {
 	node_operation!(NdType::Case { input_var, cases }, node, {
 		for case in cases {
 			let (pat, body) = case;
@@ -548,12 +528,12 @@ fn handle_case(node: Node, io: ProcIO) -> OxResult<OxWait> {
 				return traverse_root(body.clone(), None, io)
 			}
 		}
-		Ok(OxWait::Fail { code: 1, cmd: Some("case".into()) })
+		Ok(AshWait::Fail { code: 1, cmd: Some("case".into()) })
 	})
 }
 
-fn handle_for(node: Node,io: ProcIO) -> OxResult<OxWait> {
-	let mut last_status = OxWait::new();
+fn handle_for(node: Node,io: ProcIO) -> AshResult<AshWait> {
+	let mut last_status = AshWait::new();
 
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
@@ -583,13 +563,13 @@ fn handle_for(node: Node,io: ProcIO) -> OxResult<OxWait> {
 					let current_val = loop_arr.pop_front().unwrap().text().to_string();
 
 					let current_var = loop_vars[var_index].text().to_string();
-					write_vars(|v| v.set_var(&current_var, OxVal::parse(&current_val).unwrap_or_default()))?;
+					write_vars(|v| v.set_var(&current_var, AshVal::parse(&current_val).unwrap_or_default()))?;
 
 					iteration_count += 1;
-					// TODO: modulo is probably too expensive for a loop; find a better way to do this
+					// TODO: modulo is expensive; find a better way to do this
 					var_index = iteration_count % var_count;
 
-					event::execute(&loop_body, NdFlags::empty(), None, Some(body_io.clone()))?;
+					event::execute(&loop_body, NdFlags::empty(), None, Some(body_io.clone()));
 				}
 			});
 			std::process::exit(0);
@@ -619,8 +599,8 @@ fn handle_for(node: Node,io: ProcIO) -> OxResult<OxWait> {
 	Ok(last_status)
 }
 
-fn handle_loop(node: Node, io: ProcIO) -> OxResult<OxWait> {
-	let mut last_status = OxWait::new();
+fn handle_loop(node: Node, io: ProcIO) -> AshResult<AshWait> {
+	let mut last_status = AshWait::new();
 	let cond_io = ProcIO::from(io.stdin, None, None);
 	let body_io = ProcIO::from(None, io.stdout, io.stderr);
 
@@ -663,8 +643,8 @@ fn handle_loop(node: Node, io: ProcIO) -> OxResult<OxWait> {
 }
 
 
-fn handle_if(node: Node, io: ProcIO) -> OxResult<OxWait> {
-	let last_status = OxWait::new();
+fn handle_if(node: Node, io: ProcIO) -> AshResult<AshWait> {
+	let last_status = AshWait::new();
 	let cond_io = ProcIO::from(io.stdin,None,None);
 	let body_io = ProcIO::from(None,io.stdout,io.stderr);
 
@@ -675,6 +655,7 @@ fn handle_if(node: Node, io: ProcIO) -> OxResult<OxWait> {
 
 			traverse(cond, cond_io.clone())?;
 			let code = read_vars(|v| v.get_param("?"))?;
+			let cmd = read_meta(|m| m.get_last_command())?;
 			let is_success = code.clone().unwrap_or("0".to_string()) == "0";
 			if is_success {
 				traverse(body, body_io.clone())?;
@@ -688,11 +669,19 @@ fn handle_if(node: Node, io: ProcIO) -> OxResult<OxWait> {
 	Ok(last_status)
 }
 
-fn handle_chain(node: Node) -> OxResult<OxWait> {
+fn handle_chain(node: Node) -> AshResult<AshWait> {
 	node_operation!(NdType::Chain { commands, op }, node, {
 		let mut commands = commands;
 		while let Some(cmd) = commands.pop_front() {
 			traverse(cmd, ProcIO::new())?;
+
+			let statuses = write_jobs(|j| {
+				if let Some(job) = j.get_fg_mut() {
+					job.get_statuses()
+				} else {
+					vec![]
+				}
+			})?;
 
 			let is_success = read_vars(|v| v.get_param("?").is_some_and(|val| val == "0"))?;
 
@@ -708,10 +697,10 @@ fn handle_chain(node: Node) -> OxResult<OxWait> {
 		}
 	});
 
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-fn handle_assignment(node: Node, io: ProcIO) -> OxResult<OxWait> {
+fn handle_assignment(node: Node, io: ProcIO) -> AshResult<AshWait> {
 	node_operation!(NdType::Assignment { name, value, op, command }, node, {
 		match op {
 			AssOp::Equals => {
@@ -728,7 +717,7 @@ fn handle_assignment(node: Node, io: ProcIO) -> OxResult<OxWait> {
 					let expanded = expand::expand_cmd_sub(dummy_tk)?;
 					value = expanded.text().to_string();
 				}
-				let value = OxVal::parse(&value).unwrap_or_default();
+				let value = AshVal::parse(&value).unwrap_or_default();
 				if let Some(cmd_node) = command {
 					let snapshot = SavedEnv::get_snapshot()?;
 					write_vars(|v| v.export_var(&name, &value.to_string()))?;
@@ -740,7 +729,7 @@ fn handle_assignment(node: Node, io: ProcIO) -> OxResult<OxWait> {
 			}
 			AssOp::PlusEquals => {
 				if let Some(left_val) = read_vars(|v| v.get_var(&name))? {
-					let right_val = OxVal::parse(&value.unwrap_or_default()).map_err(|e| ShError::from_parse(&e, node.span()))?;
+					let right_val = AshVal::parse(&value.unwrap_or_default()).map_err(|e| ShError::from_parse(&e, node.span()))?;
 					let result = helper::add_vars(left_val, right_val, node.span())?;
 
 					if let Some(cmd_node) = command {
@@ -755,7 +744,7 @@ fn handle_assignment(node: Node, io: ProcIO) -> OxResult<OxWait> {
 			}
 			AssOp::MinusEquals => {
 				if let Some(left_val) = read_vars(|v| v.get_var(&name))? {
-					let right_val = OxVal::parse(&value.unwrap_or_default()).map_err(|e| ShError::from_parse(&e, node.span()))?;
+					let right_val = AshVal::parse(&value.unwrap_or_default()).map_err(|e| ShError::from_parse(&e, node.span()))?;
 					let result = helper::subtract_vars(left_val, right_val, node.span())?;
 
 					if let Some(cmd_node) = command {
@@ -770,10 +759,10 @@ fn handle_assignment(node: Node, io: ProcIO) -> OxResult<OxWait> {
 			}
 		}
 	});
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-fn handle_builtin(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
+fn handle_builtin(mut node: Node, io: ProcIO) -> AshResult<AshWait> {
 	let argv = node.get_argv()?;
 	write_meta(|m| m.set_last_command(argv.first().unwrap().text()))?;
 	let result = match argv.first().unwrap().text() {
@@ -825,16 +814,16 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 		_ => unimplemented!("found this builtin: {}", argv[0].text()),
 	};
 	match result {
-		OxWait::Success => write_vars(|v| v.set_param("?".into(), "0".into()))?,
-		OxWait::Fail { code, cmd: _ } => write_vars(|v| v.set_param("?".into(), code.to_string()))?,
-		OxWait::Signaled { sig } | OxWait::Stopped { sig } => write_vars(|v| v.set_param("?".into(), (sig as i32).to_string()))?,
+		AshWait::Success => write_vars(|v| v.set_param("?".into(), "0".into()))?,
+		AshWait::Fail { code, cmd: _ } => write_vars(|v| v.set_param("?".into(), code.to_string()))?,
+		AshWait::Signaled { sig } | AshWait::Stopped { sig } => write_vars(|v| v.set_param("?".into(), (sig as i32).to_string()))?,
 		_ => unimplemented!()
 	}
 
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> OxResult<OxWait> {
+pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> AshResult<AshWait> {
 	/*
 	 * rsh subshells work differently than subshells in standard shells like bash and zsh.
 	 *
@@ -868,7 +857,7 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 	// Perform subshell node operation
 	node_operation!(NdType::Subshell { mut body, mut argv }, node, {
 		if body.is_empty() {
-			return Ok(OxWait::Success);
+			return Ok(AshWait::Success);
 		}
 
 		let mut c_argv = vec![CString::new("anonymous_subshell").unwrap()];
@@ -927,12 +916,12 @@ pub fn handle_subshell(mut node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 		}
 
 		io.restore_fildescs()?;
-		Ok(OxWait::Success)
+		Ok(AshWait::Success)
 	})
 }
 
 
-fn handle_function(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
+fn handle_function(mut node: Node, io: ProcIO) -> AshResult<AshWait> {
 	let span = node.span();
 	if let NdType::Function { body, mut argv } = node.nd_type {
 		let mut func = body; // Unbox the root node for the function
@@ -956,11 +945,11 @@ fn handle_function(mut node: Node, io: ProcIO) -> OxResult<OxWait> {
 		event::execute(&func, node.flags, Some(node.redirs.clone()), Some(io))?;
 
 		snapshot.restore_snapshot()?;
-		Ok(OxWait::Success)
+		Ok(AshWait::Success)
 	} else { unreachable!() }
 }
 
-pub fn handle_pipeline(node: Node, mut io: ProcIO) -> OxResult<OxWait> {
+pub fn handle_pipeline(node: Node, mut io: ProcIO) -> AshResult<AshWait> {
 	/*
 	 * This one is pretty complex, but it can't really be helped. File descriptors complicate everything they touch.
 	 *
@@ -1028,8 +1017,8 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 					command.flags |= NdFlags::IN_PIPE;
 					let result = traverse(command, current_io)?;
 					match result {
-						OxWait::Success => std::process::exit(0),
-						OxWait::Fail { code, cmd: _ } => std::process::exit(code),
+						AshWait::Success => std::process::exit(0),
+						AshWait::Fail { code, cmd: _ } => std::process::exit(code),
 						_ => todo!(),
 					}
 				}
@@ -1077,13 +1066,13 @@ pub fn handle_pipeline(node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 			}
 			count += 1;
 		}
-		OxWait::new()
+		AshWait::new()
 	});
 
 	Ok(last_status)
 }
 
-fn handle_command(node: Node, mut io: ProcIO) -> OxResult<OxWait> {
+fn handle_command(node: Node, mut io: ProcIO) -> AshResult<AshWait> {
 	/*
 	 * In this function, we first get the arg vector of the command as CStrings, so as to be compatible with execvpe().
 	 *
@@ -1155,10 +1144,10 @@ fn handle_command(node: Node, mut io: ProcIO) -> OxResult<OxWait> {
 
 	// Restore I/O descriptors
 	io.restore_fildescs()?;
-	Ok(OxWait::Success)
+	Ok(AshWait::Success)
 }
 
-fn handle_parent_process(child: Pid, command: CString, node: &Node) -> OxResult<()> {
+fn handle_parent_process(child: Pid, command: CString, node: &Node) -> AshResult<()> {
 	let children = vec![
 		ChildProc::new(child, Some(command.to_str().unwrap()), None)?
 	];
@@ -1175,7 +1164,7 @@ fn handle_parent_process(child: Pid, command: CString, node: &Node) -> OxResult<
 	Ok(())
 }
 
-fn handle_redirs(mut redirs: VecDeque<Node>) -> OxResult<VecDeque<RustFd>> {
+fn handle_redirs(mut redirs: VecDeque<Node>) -> AshResult<VecDeque<RustFd>> {
 	let mut fd_queue: VecDeque<RustFd> = VecDeque::new();
 	let mut fd_dupes: VecDeque<Redir> = VecDeque::new();
 
@@ -1212,7 +1201,7 @@ fn handle_redirs(mut redirs: VecDeque<Node>) -> OxResult<VecDeque<RustFd>> {
 	Ok(fd_queue)
 }
 
-fn prepare_execvpe(argv: &[CString]) -> OxResult<(CString, Vec<CString>)> {
+fn prepare_execvpe(argv: &[CString]) -> AshResult<(CString, Vec<CString>)> {
 	let command = argv[0].clone();
 
 	// Clone the environment variables into a temporary structure
@@ -1235,7 +1224,7 @@ fn prepare_execvpe(argv: &[CString]) -> OxResult<(CString, Vec<CString>)> {
 		Ok((command, envp))
 }
 
-fn handle_autocd(node: Node, argv: Vec<Tk>,flags: WdFlags,io: ProcIO) -> OxResult<OxWait> {
+fn handle_autocd(node: Node, argv: Vec<Tk>,flags: WdFlags,io: ProcIO) -> AshResult<AshWait> {
 	let cd_token = Tk::new("cd".into(), node.span(), flags);
 	let mut autocd_argv = VecDeque::from(argv);
 	autocd_argv.push_front(cd_token.clone());
