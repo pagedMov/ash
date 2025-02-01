@@ -15,6 +15,12 @@ pub enum ShError {
 	IoError(String, u32, String),
 	InternalError(String),
 	Generic(String, Span),
+
+	// These aren't really errors, these are propagated by certain builtins
+	CleanExit(i32), // Thrown by the 'exit' command and SIGQUIT
+	FuncReturn(i32), // Thrown by the 'return' builtin, exits a function early
+	LoopBreak, // Breaks a loop
+	LoopCont // Continues a loop
 }
 
 impl ShError {
@@ -52,17 +58,25 @@ impl ShError {
 			ShError::ExecFailed(msg,code,_) => ShError::ExecFailed(msg.to_string(),*code,new_span),
 			ShError::Generic(msg,_) => ShError::Generic(msg.to_string(),new_span),
 			ShError::InternalError(msg) => ShError::InternalError(msg.to_string()),
+			ShError::CleanExit(_) |
+			ShError::FuncReturn(_) |
+			ShError::LoopBreak |
+			ShError::LoopCont => self.clone()
 		}
 	}
 	pub fn is_fatal(&self) -> bool {
 		match self {
 			ShError::IoError(..) => true,
-			ShError::CommandNotFound(..) => false,
-			ShError::ExecFailed(..) => false,
-			ShError::ParsingError(..) => false,
-			ShError::InvalidSyntax(..) => false,
-			ShError::InternalError(..) => false,
-			ShError::Generic(..) => false,
+			ShError::CommandNotFound(..) |
+			ShError::ExecFailed(..) |
+			ShError::ParsingError(..) |
+			ShError::InvalidSyntax(..) |
+			ShError::InternalError(..) |
+			ShError::Generic(..) |
+			ShError::CleanExit(..) |
+			ShError::FuncReturn(..) |
+			ShError::LoopBreak |
+			ShError::LoopCont => false,
 		}
 	}
 }
@@ -90,6 +104,12 @@ impl Display for ShError {
 			}
 			ShError::Generic(msg, _) => {
 				write!(f, "{}", msg)
+			}
+			ShError::LoopCont |
+			ShError::LoopBreak |
+			ShError::FuncReturn(_) |
+			ShError::CleanExit(_) => {
+				write!(f, "")
 			}
 		}
 	}
@@ -153,14 +173,18 @@ impl ShErrorFull {
 	pub fn from(err: ShError, input: &str) -> Self {
 		match &err {
 			ShError::CommandNotFound(_, span) |
-				ShError::InvalidSyntax(_, span) |
-				ShError::ParsingError(_, span) |
-				ShError::Generic(_, span) |
-				ShError::ExecFailed(_, _, span) => {
-					let window = Some(ShErrorWindow::new(input, *span));
-					Self { window, err }
-				}
-			ShError::IoError(_, _, _) => Self { window: None, err },
+			ShError::InvalidSyntax(_, span) |
+			ShError::ParsingError(_, span) |
+			ShError::Generic(_, span) |
+			ShError::ExecFailed(_, _, span) => {
+				let window = Some(ShErrorWindow::new(input, *span));
+				Self { window, err }
+			}
+			ShError::LoopCont |
+			ShError::LoopBreak |
+			ShError::FuncReturn(_) |
+			ShError::CleanExit(_) |
+			ShError::IoError(_, _, _) |
 			ShError::InternalError(_) => Self { window: None, err }
 		}
 	}
@@ -173,7 +197,11 @@ impl ShErrorFull {
 				ShError::ExecFailed(msg, _, _) |
 				ShError::IoError(msg, _, _) |
 				ShError::InternalError(msg) |
-				ShError::Generic(msg, _) => msg.to_string()
+				ShError::Generic(msg, _) => msg.to_string(),
+				ShError::LoopBreak |
+				ShError::LoopCont |
+				ShError::FuncReturn(_) |
+				ShError::CleanExit(_) => String::new()
 		}
 	}
 
@@ -236,7 +264,13 @@ pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: 
 						// Send each deck immediately for execution
 						let result = execute::traverse_ast(state.ast, io.clone());
 						if let Err(e) = result {
-							throw(e)?;
+							match e {
+								ShError::CleanExit(_) |
+								ShError::LoopCont |
+								ShError::LoopBreak |
+								ShError::FuncReturn(_) => return Err(e),
+								_ => throw(e)?
+							}
 						} else {
 							last_status = result.unwrap();
 						}
@@ -266,6 +300,14 @@ pub fn main_loop() -> LashResult<()> {
 		let input = prompt::run()?;
 		write_meta(|m| m.leave_prompt())?;
 		write_meta(|m| m.start_timer())?;
-		execute(&input, NdFlags::empty(), None, None)?;
+		let result = execute(&input, NdFlags::empty(), None, None);
+		match result {
+			Ok(_) => { /* Do nothing */ },
+			Err(ShError::CleanExit(code)) => return Err(ShError::CleanExit(code)),
+			Err(ShError::LoopBreak) => eprintln!("Found `break` outside of a loop"),
+			Err(ShError::LoopCont) => eprintln!("Found `continue` outside of a loop"),
+			Err(ShError::FuncReturn(_)) => eprintln!("Found `return` outside of a function"),
+			_ => unreachable!() // No other errors break out of the loop in execute()
+		}
 	}
 }

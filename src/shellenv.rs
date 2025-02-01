@@ -613,6 +613,13 @@ impl JobTable {
 			}
 		}
 	}
+	pub fn hang_up(&mut self) {
+		for job in self.jobs.iter_mut() {
+			if let Some(ref mut job) = job {
+				job.killpg(Signal::SIGHUP).ok();
+			}
+		}
+	}
 	pub fn prune_jobs(&mut self) {
 		while let Some(job) = self.jobs.last() {
 			if job.is_none() {
@@ -920,6 +927,8 @@ impl VarTable {
 	}
 	pub fn set_param(&mut self, key: String, value: String) {
 		// Set the individual parameter as well
+		if &key == "?" {
+		}
 		self.params.insert(key, value);
 	}
 	pub fn reset_params(&mut self) {

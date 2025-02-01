@@ -98,34 +98,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
-name = "lash"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "bitflags 2.8.0",
- "chrono",
- "crossterm",
- "env_logger",
- "glob",
- "insta",
- "lazy_static",
- "libc",
- "log 0.4.25",
- "logger",
- "nix 0.29.0",
- "once_cell",
- "rayon",
- "regex",
- "rustyline",
- "serde",
- "serde_json",
- "signal-hook",
- "skim",
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
 name = "autocfg"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -825,6 +797,34 @@ name = "language-tags"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a91d884b6667cd606bb5a69aa0c99ba811a115fc68915e7056ec08a46e93199a"
+
+[[package]]
+name = "lash"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "bitflags 2.8.0",
+ "chrono",
+ "crossterm",
+ "env_logger",
+ "glob",
+ "insta",
+ "lazy_static",
+ "libc",
+ "log 0.4.25",
+ "logger",
+ "nix 0.29.0",
+ "once_cell",
+ "rayon",
+ "regex",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "skim",
+ "tokio",
+ "tokio-stream",
+]
 
 [[package]]
 name = "lazy_static"

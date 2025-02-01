@@ -22,8 +22,8 @@ use crate::shellenv::{self, disable_reaping, enable_reaping, read_jobs, read_log
 use crate::event::ShError;
 use crate::{deconstruct, node_operation, LashResult};
 
-pub const BUILTINS: [&str; 37] = [
-	"command", "pushd", "popd", "setopt", "getopt", "type", "string", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
+pub const BUILTINS: [&str; 41] = [
+	"return", "break", "contine", "exit", "command", "pushd", "popd", "setopt", "getopt", "type", "string", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
 ];
 
 bitflags! {
@@ -103,6 +103,36 @@ pub fn catstr(mut c_strings: VecDeque<CString>,newline: bool) -> CString {
 	}
 
 	CString::from_vec_with_nul(cat).unwrap()
+}
+
+/// This function handles the `exit` command.
+///
+/// It works by returning an error of type `ShError::CleanExit()`, which propagates back to the main loop and is handled there
+/// The main loop will be broken, the code will return to main(), and then handle cleanup and exit
+pub fn lash_exit(node: Node) -> LashResult<LashWait> {
+	let mut argv = VecDeque::from(node.get_argv()?);
+	argv.pop_front();
+	let mut status = 0;
+	if let Some(arg) = argv.pop_front() {
+		let text = arg.text();
+		if let Ok(code) = text.parse::<i32>() {
+			status = code;
+		}
+	}
+	Err(ShError::CleanExit(status))
+}
+
+pub fn lash_return(node: Node) -> LashResult<LashWait> {
+	let mut argv = VecDeque::from(node.get_argv()?);
+	argv.pop_front();
+	let mut status = 0;
+	if let Some(arg) = argv.pop_front() {
+		let text = arg.text();
+		if let Ok(code) = text.parse::<i32>() {
+			status = code;
+		}
+	}
+	Err(ShError::FuncReturn(status))
 }
 
 pub fn r#type(node: Node) -> LashResult<LashWait> {

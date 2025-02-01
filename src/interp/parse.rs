@@ -35,7 +35,6 @@ pub static EXPECT: Lazy<HashMap<TkType, Vec<TkType>>> = Lazy::new(|| {
 	m.insert(TkType::Else,   vec![TkType::Fi]);
 	m.insert(TkType::Then,   vec![TkType::Fi, TkType::Elif, TkType::Else]);
 	m.insert(TkType::Do,     vec![TkType::Done]); // `Do` expects `Done`
-	m.insert(TkType::Case,   vec![TkType::Esac]); // `Case` expects `Esac`
 	m.insert(TkType::Select, vec![TkType::Do]); // `Select` expects `Do`
 	m.insert(TkType::While,  vec![TkType::Do]); // `While` expects `Do`
 	m.insert(TkType::Until,  vec![TkType::Do]); // `Until` expects `Do`
@@ -48,8 +47,8 @@ pub const OPENERS: [TkType;6] = [
 	TkType::For,
 	TkType::Until,
 	TkType::While,
-	TkType::Case,
 	TkType::Select,
+	TkType::Match
 ];
 
 #[derive(PartialEq,Debug,Clone)]
@@ -211,7 +210,7 @@ pub enum NdType {
 	Loop { condition: bool, logic: Conditional },
 	LoopCond { cond: String },
 	LoopBody { body: String },
-	Case { input_var: Tk, cases: HashMap<String,Node> },
+	Match { in_var: Tk, arms: VecDeque<Tk> },
 	Select { select_var: Tk, opts: VecDeque<Tk>, body: Box<Node> },
 	PipelineBranch { left: Box<Node>, right: Box<Node>, both: bool }, // Intermediate value
 	Pipeline { commands: VecDeque<Node>, both: bool }, // After being flattened
@@ -409,8 +408,8 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> LashResult<DescentCo
 					continue
 				}
 			}
-			Case => {
-				ctx = build_case(ctx)?;
+			Match => {
+				ctx = build_match(ctx)?;
 				if once {
 					break
 				} else {
@@ -526,7 +525,7 @@ pub fn parse_linear(mut ctx: DescentContext, once: bool) -> LashResult<DescentCo
 
 pub fn check_valid_operand(node: &Node) -> bool {
 	use crate::interp::parse::NdType::*;
-	matches!(node.nd_type, PipelineBranch {..} | Pipeline {..} | Subshell {..} | Chain {..} | If {..} | For {..} | Loop {..} | Case {..} | Select {..} | Function {..} | Command {..} | Builtin {..})
+	matches!(node.nd_type, PipelineBranch {..} | Pipeline {..} | Subshell {..} | Chain {..} | If {..} | For {..} | Loop {..} | Select {..} | Function {..} | Command {..} | Builtin {..})
 }
 
 pub fn join_at_operators(mut ctx: DescentContext) -> LashResult<DescentContext> {
@@ -745,33 +744,6 @@ pub fn propagate_redirections(mut node: Node) -> LashResult<Node> {
 				redirs: VecDeque::new(),
 				span: node.span
 			}
-		}
-		NdType::Case { input_var, mut cases } => {
-			// This one gets a little bit messy
-			// Iterate through keys and map redirections to each case body
-			// And then iterate through the keys again and call propagate_redirections() on each
-			let keys = cases.keys().cloned().collect::<Vec<String>>();
-			let mut new_cases = HashMap::new();
-			for redir in &node.redirs {
-				for key in keys.iter() {
-					cases.get_mut(key).unwrap().redirs.push_back(redir.clone())
-				}
-			}
-			for key in keys.iter() {
-				if let Some(mut case_node) = cases.remove(key) {
-					case_node = propagate_redirections(case_node)?;
-					new_cases.insert(key.clone(),case_node);
-				}
-			}
-			let cases = new_cases;
-			node = Node {
-				command: None,
-				nd_type: NdType::Case { input_var, cases },
-				flags: node.flags,
-				redirs: VecDeque::new(),
-				span: node.span
-			}
-
 		}
 		NdType::Select { select_var, opts, mut body } => {
 			// Same as For node logic
@@ -1197,124 +1169,44 @@ pub fn build_loop(condition: bool, mut ctx: DescentContext) -> LashResult<Descen
 	Ok(ctx)
 }
 
-pub fn build_case(mut ctx: DescentContext) -> LashResult<DescentContext> {
-	let mut cases = HashMap::new();
-	let mut block_string = String::new();
-	let mut block_tokens = VecDeque::new();
-	let mut block_root = VecDeque::new();
-	let mut input_var: Option<Tk> = None;
-	let mut phase = Phase::Vars;
+pub fn build_match(mut ctx: DescentContext) -> LashResult<DescentContext> {
+	let input_var;
 	let mut closed = false;
-	if ctx.front_tk().is_some_and(|tk| tk.tk_type == TkType::Ident) {
-		input_var = Some(ctx.next_tk().unwrap());
+	let mut arms = VecDeque::new();
+	let mut span = Span::new();
+	if ctx.front_tk().is_some_and(|tk| matches!(tk.class(), TkType::Ident | TkType::String)) {
+		input_var = ctx.next_tk().unwrap();
+		span.start = input_var.span().start;
+	} else {
+		return Err(ShError::from_parse("Did not find an input pattern for this match statement", Span::new()));
 	}
-
-	let span_start = ctx.mark_start();
-
 	while let Some(tk) = ctx.next_tk() {
+		span.end = tk.span().end;
 		match tk.class() {
-			TkType::In => {
-				if input_var.is_some() {
-					if ctx.front_tk().is_some_and(|tk| tk.class() == TkType::Cmdsep) {
-						ctx.next_tk();
-					}
-					phase = Phase::Condition;
-				} else {
-					return Err(ShError::from_parse(
-							"Did not find a variable for this case statement",
-							tk.span(),
-					));
-				}
-			}
-			TkType::Esac => {
-				// Final block handling
-				if !block_string.is_empty() {
-					let block_span = compute_span(&block_tokens);
-					block_root = parse_and_attach(take(&mut block_tokens), block_root)?;
-					let block_node = Node::from(take(&mut block_root), block_span);
-					cases.insert(block_string.clone(), block_node);
-				}
-				if cases.is_empty() {
-					return Err(ShError::from_parse(
-							"Did not find any cases for this case statement",
-							tk.span(),
-					));
-				}
+			TkType::In => continue,
+			TkType::Done => {
 				closed = true;
-				break;
+				break
 			}
-			TkType::CasePat if phase == Phase::Condition => {
-				phase = Phase::Body;
-				if block_string.is_empty() {
-					block_string = tk.text().trim().to_string();
-				} else {
-					return Err(ShError::from_parse(
-							"Expected only one variable in case statement",
-							tk.span(),
-					));
-				}
-			}
-			_ if phase == Phase::Body && ctx.front_tk().is_some_and(|f_tk| f_tk.tk_type == TkType::CasePat) => {
-				block_tokens.push_back(tk);
-				let block_span = compute_span(&block_tokens);
-				block_root = parse_and_attach(take(&mut block_tokens), block_root)?;
-				let block_node = Node::from(take(&mut block_root), block_span);
-				cases.insert(take(&mut block_string), block_node);
-				phase = Phase::Condition;
-			}
-			_ if phase == Phase::Body => {
-				if block_string.is_empty() {
-					return Err(ShError::from_parse(
-							format!("Did not find a pattern for this case block: {}",tk.text()).as_str(),
-							tk.span(),
-					));
-				}
-				match tk.class() {
-					_ if OPENERS.contains(&tk.class()) => {
-						ctx.tokens.push_front(tk);
-						if !block_tokens.is_empty() {
-							block_root = parse_and_attach(take(&mut block_tokens), block_root)?;
-						}
-						ctx = parse_linear(ctx, true)?;
-						if let Some(node) = ctx.root.pop_back() {
-							block_root.push_back(node);
-						}
-					},
-					_ => {
-						block_tokens.push_back(tk);
-					}
-				}
+			TkType::MatchArm {..} => {
+				arms.push_back(tk);
 			}
 			_ => {
-				return Err(ShError::from_parse("Something weird happened in this case statement", tk.span()))
+				return Err(ShError::from_parse(format!("Expected a match arm here, found this: {:?}", tk).as_str(), tk.span()))
 			}
 		}
 	}
 
-	let span_end = ctx.mark_end();
-	let span = Span::from(span_start, span_end);
-
 	if !closed {
-		return Err(ShError::from_parse(
-				"This case statement is missing an `esac`",
-				span)
-		)
+		return Err(ShError::from_parse("This match statement did not get a `done`", span))
 	}
 
-	if input_var.is_none() {
-		return Err(ShError::from_parse(
-				"Did not find a variable for this case statement",
-				span,
-		));
-	}
-
-	let input_var = input_var.unwrap();
 	let node = Node {
 		command: None,
-		nd_type: NdType::Case { input_var, cases },
-		span,
+		nd_type: NdType::Match { in_var: input_var, arms },
+		redirs: VecDeque::new(),
 		flags: NdFlags::empty(),
-		redirs: VecDeque::new()
+		span
 	};
 	ctx.attach_node(node);
 	Ok(ctx)

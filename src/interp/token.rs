@@ -49,13 +49,13 @@ pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
 	regex
 });
 
-pub const KEYWORDS: [&str;14] = [
-	"if", "while", "until", "for", "case", "select",
+pub const KEYWORDS: [&str;15] = [
+	"match", "if", "while", "until", "for", "case", "select",
 	"then", "elif", "else", "in",
 	"do", "done", "fi", "esac"
 ];
-pub const OPENERS: [&str;6] = [
-	"if", "while", "until", "for", "case", "select",
+pub const OPENERS: [&str;7] = [
+	"if", "while", "until", "for", "case", "select", "match"
 ];
 pub const CMDSEP: [char;2] = [
 	';', '\n'
@@ -239,8 +239,8 @@ pub enum TkType {
 	Until,
 	Do,
 	Done,
-	Case,
-	Esac,
+	Match,
+	MatchArm { pat: String, body: String },
 	Select,
 	In,
 	FuncBody,
@@ -329,17 +329,14 @@ impl Tk {
 					Tk { tk_type: TkT::Until, wd: wd.add_flag(WdFlags::KEYWORD) }
 				} else { unreachable!("reached loop context with this: {}",wd.text) }
 			}),
-			Case => Ok(Tk { tk_type: TkT::Case, wd: wd.add_flag(WdFlags::KEYWORD) }),
 			Select => Ok(Tk { tk_type: TkT::Select, wd: wd.add_flag(WdFlags::KEYWORD) }),
-			In | CaseIn => Ok(Tk { tk_type: TkT::In, wd: wd.add_flag(WdFlags::KEYWORD) }),
-			CasePat => Ok(Tk { tk_type: TkT::Ident, wd }),
+			In => Ok(Tk { tk_type: TkT::In, wd: wd.add_flag(WdFlags::KEYWORD) }),
 			Elif => Ok(Tk { tk_type: TkT::Elif, wd: wd.add_flag(WdFlags::KEYWORD) }),
 			Else => Ok(Tk { tk_type: TkT::Else, wd: wd.add_flag(WdFlags::KEYWORD) }),
 			Do => Ok(Tk { tk_type: TkT::Do, wd: wd.add_flag(WdFlags::KEYWORD) }),
 			Then => Ok(Tk { tk_type: TkT::Then, wd: wd.add_flag(WdFlags::KEYWORD) }),
 			Done => Ok(Tk { tk_type: TkT::Done, wd: wd.add_flag(WdFlags::KEYWORD) }),
 			Fi => Ok(Tk { tk_type: TkT::Fi, wd: wd.add_flag(WdFlags::KEYWORD) }),
-			Esac => Ok(Tk { tk_type: TkT::Esac, wd: wd.add_flag(WdFlags::KEYWORD) }),
 			Subshell => Ok(Tk { tk_type: TkT::Subshell, wd }),
 			SQuote => Ok(Tk { tk_type: TkT::String, wd }),
 			DQuote => Ok(Tk { tk_type: TkT::String, wd }),
@@ -473,20 +470,15 @@ pub enum TkState {
 	If, // If statement opener
 	For, // For loop opener
 	Loop, // While/Until opener
-	Case, // Case opener
+	Match, // Match opener
 	Select, // Select opener
 	In, // Used in for, case, and select statements
-	CaseBlock, // this)kind of thing;;
-	CaseIn, // 'In' context used for case statements, signaling the tokenizer to look for stuff 'like)this;;esac'
-	CasePat, // the left side of this)kind of thing
-	CaseBody, // the right side of this)kind of thing
 	Elif, // Secondary if/then blocks
 	Else, // Else statements
 	Do, // Select, for, and while/until condition/body separator
 	Then, // If statement condition/body separator
 	Done, // Select, for, and while/until closer
 	Fi, // If statement closer
-	Esac, // Case statement closer
 	Subshell, // Subshells, look (like this)
 	SQuote, // 'Single quoted strings'
 	DQuote, // "Double quoted strings"
@@ -668,16 +660,23 @@ impl LashTokenizer {
 		Ok(())
 	}
 	fn glob_pass(&mut self) -> LashResult<()> {
-		let words = self.split_input();
+		let mut words = VecDeque::from(self.split_input());
 		let mut new_input = String::new();
 		let mut is_command = true;
 		let mut separator = None;
 
-		for mut word in words {
+		while let Some(mut word) = words.pop_front() {
 			if is_command { // Do not expand globs in a command name
 				is_command = false;
 				new_input.push_str(&word);
 				continue
+			}
+			if word.trim() == "match" {
+				while let Some(word) = words.pop_front() {
+					if word.trim() == "done" {
+						break
+					}
+				}
 			}
 			if word.ends_with(['\n',';']) { // Detach the separator and save it
 				if word.len() == 1 { // Unless it's the only character
@@ -1043,6 +1042,12 @@ impl LashTokenizer {
 					pushed = true;
 				}
 			}
+			if working_buffer.split_whitespace().last() == Some("match") {
+				if !pushed {
+					local_ctx.push(Match);
+					pushed = true;
+				}
+			}
 			if working_buffer.split_whitespace().last() == Some("while") {
 				if !pushed {
 					local_ctx.push(Loop);
@@ -1061,19 +1066,13 @@ impl LashTokenizer {
 					pushed = true;
 				}
 			}
-			if working_buffer.split_whitespace().last() == Some("case") {
-				if !pushed {
-					local_ctx.push(Case);
-					pushed = true;
-				}
-			}
 			match local_ctx.last().unwrap() {
 				Command => {
 					if working_buffer.ends_with(';') || working_buffer.ends_with('\n') {
 						break
 					}
 				}
-				For | Select | Loop => {
+				For | Select | Loop | Match => {
 					if working_buffer.split_whitespace().last() == Some("done") {
 						if matches!(chars.peek(), Some(';') | Some('\n')) {
 							working_buffer.push(chars.next().unwrap())
@@ -1158,7 +1157,7 @@ impl LashTokenizer {
 					if *self.ctx() == Arg { self.pop_ctx(); }
 					if *self.ctx() == DeadEnd {
 						while self.context.len() != 1 {
-							if !matches!(*self.ctx(), For | FuncDef | Loop | If | Case | Select) {
+							if !matches!(*self.ctx(), For | FuncDef | Loop | If | Select) {
 								self.pop_ctx();
 							} else {
 								self.pop_ctx();
@@ -1255,7 +1254,7 @@ impl LashTokenizer {
 				ArrDec => self.arrdec_context(take(&mut wd))?,
 				Subshell | CommandSub => self.subshell_context(take(&mut wd), expand)?,
 				FuncBody => self.func_context(take(&mut wd))?,
-				Case => self.case_context(take(&mut wd), expand)?,
+				Match => self.match_context(take(&mut wd), expand)?,
 				Loop => self.loop_context(take(&mut wd)),
 				For => self.loop_context(take(&mut wd)),
 				VarSub => self.varsub_context(take(&mut wd)),
@@ -1291,7 +1290,7 @@ impl LashTokenizer {
 				"if" => { self.push_ctx(If); self.push_ctx(Command); }
 				"while" | "until" => { self.push_ctx(Loop); self.push_ctx(Command); }
 				"for" => { self.push_ctx(For); self.push_ctx(VarDec); }
-				"case" => self.push_ctx(Case),
+				"match" => self.push_ctx(Match),
 				"select" => self.push_ctx(Select),
 				_ => self.push_ctx(DeadEnd)
 			}
@@ -1305,20 +1304,10 @@ impl LashTokenizer {
 				"do" => self.tokens.push(Tk { tk_type: TkType::Do, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				"in" => self.tokens.push(Tk { tk_type: TkType::In, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				"done" => self.tokens.push(Tk { tk_type: TkType::Done, wd: wd.add_flag(WdFlags::KEYWORD) }),
-				"while" => {
-					self.push_ctx(Loop);
-					self.tokens.push(Tk { tk_type: TkType::While, wd: wd.add_flag(WdFlags::KEYWORD) })
-				},
-				"until" => {
-					self.push_ctx(Loop);
-					self.tokens.push(Tk { tk_type: TkType::Until, wd: wd.add_flag(WdFlags::KEYWORD) })
-				},
-				"case" => {
-					self.push_ctx(TkState::Case);
-					self.tokens.push(Tk { tk_type: TkType::Case, wd: wd.add_flag(WdFlags::KEYWORD) })
-				},
+				"while" => self.tokens.push(Tk { tk_type: TkType::While, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"until" => self.tokens.push(Tk { tk_type: TkType::Until, wd: wd.add_flag(WdFlags::KEYWORD) }),
+				"match" => self.tokens.push(Tk { tk_type: TkType::Match, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				"select" => self.tokens.push(Tk { tk_type: TkType::Select, wd: wd.add_flag(WdFlags::KEYWORD) }),
-				"esac" => self.tokens.push(Tk { tk_type: TkType::Esac, wd: wd.add_flag(WdFlags::KEYWORD) }),
 				_ => unreachable!("text: {}", wd.text)
 			}
 		} else if matches!(wd.text.as_str(), ";" | "\n") {
@@ -1474,7 +1463,7 @@ impl LashTokenizer {
 					token.wd.text = token.text().trim_matches('"').to_string();
 				}
 				// We will expand variables later for these contexts
-				if !self.context.contains(&For) && !self.context.contains(&Case) && !self.context.contains(&Select) {
+				if !self.context.contains(&For) && !self.context.contains(&Select) {
 					let mut expanded = if expand { expand::expand_token(token.clone(), true)? } else { VecDeque::from([token.clone()]) };
 					if !expanded.is_empty() {
 						self.tokens.extend(expanded.drain(..));
@@ -1568,6 +1557,7 @@ impl LashTokenizer {
 					}
 					found = true;
 					self.tokens.push(Tk { tk_type: TkType::Ident, wd: take(&mut wd) });
+					self.pop_ctx();
 					wd = wd.set_span(span);
 				}
 			}
@@ -1755,69 +1745,165 @@ impl LashTokenizer {
 		}
 		self.pop_ctx();
 	}
-	fn case_context(&mut self, mut wd: WordDesc, expand: bool) -> LashResult<()> {
+	fn match_context(&mut self, mut wd: WordDesc, expand: bool) -> LashResult<()> {
 		use crate::interp::token::TkState::*;
-		let span = wd.span;
-		let mut closed = false;
+		let mut reading_pattern = true;
+		let mut arm: [String;2] = [String::new(),String::new()];
 		self.push_ctx(SingleVarDec);
 		self.vardec_context(take(&mut wd))?;
-		self.pop_ctx();
+		if self.char_stream.front().is_some_and(|ch| matches!(*ch, ' ' | '\t')) {
+			wd = self.complete_word(wd, None)?;
+			self.tokens.push(Tk::space(&take(&mut wd)));
+		}
 		if self.char_stream.front().is_some_and(|ch| matches!(*ch, ';' | '\n')) {
-			self.advance();
-			self.tokens.push(Tk::cmdsep(&wd,span.end + 1));
+			wd = self.complete_word(wd, None)?;
+			self.tokens.push(Tk::cmdsep(&take(&mut wd), wd.span.start));
 		}
-		let mut arms = vec![];
-		while !self.char_stream.is_empty() {
-			let mut arm = String::new();
-			while !arm.ends_with(";;") && !arm.ends_with("esac") {
-				if let Some(ch) = self.advance() {
-					arm.push(ch);
-				}
-			}
-			if let Some(arm) = arm.strip_suffix(";;") {
-				arms.push(arm.to_string())
-			} else if arm.trim().starts_with("esac") {
-				closed = true;
-				break
-			} else {
-				return Err(ShError::from_syntax("Did not find a `;;` for this case arm", span))
-			}
-		}
-
-		if !closed {
-			return Err(ShError::from_syntax("This case statement is missing a closing `esac`", span))
-		}
-
-		for arm in arms {
-			if let Some((pat, body)) = arm.split_once(')') {
-				let pat_tk = Tk {
-					tk_type: TkType::CasePat,
-					wd: WordDesc {
-						text: pat.to_string(),
-						flags: WdFlags::empty(),
-						span: wd.span
-					}
-				};
-				let mut body_tokens = vec![];
-				let mut body_tokenizer = LashTokenizer::new(body);
-				while let Ok(mut block) = body_tokenizer.tokenize_one(expand) {
-					if !block.is_empty() {
-						if block.first().is_some_and(|tk| tk.tk_type == TkType::SOI) {
-							block = block[1..].to_vec();
+		while let Some(ch) = self.char_stream.pop_front() {
+			wd = wd.add_char(ch);
+			match ch {
+				'\\' => {
+					let esc_char = self.char_stream.pop_front();
+					if reading_pattern {
+						arm[0].push(ch);
+						if let Some(esc_ch) = esc_char {
+							wd = wd.add_char(ch);
+							arm[0].push(ch);
 						}
-						body_tokens.append(&mut block);
 					} else {
-						break
+						arm[1].push(ch);
+						if let Some(esc_ch) = esc_char {
+							wd = wd.add_char(esc_ch);
+							arm[1].push(esc_ch);
+						}
 					}
 				}
-				self.tokens.push(pat_tk);
-				self.tokens.append(&mut body_tokens)
-			} else {
-				return Err(ShError::from_syntax("This case arm doesn't have a separating ')'", span))
+				_ if reading_pattern && wd.text.trim() == "done" => {
+					let done_tk = Tk {
+						tk_type: TkType::Done,
+						wd: take(&mut wd)
+					};
+					self.tokens.push(done_tk);
+					break
+				}
+				'=' if reading_pattern && self.char_stream.front().is_some_and(|ch| *ch == '>') => {
+					let pointy = self.char_stream.pop_front().unwrap();
+					wd = wd.add_char(pointy);
+					reading_pattern = false;
+				}
+				'(' if !reading_pattern => {
+					let mut paren_stack = vec!['('];
+					while let Some(par_ch) = self.char_stream.pop_front() {
+						wd = wd.add_char(par_ch);
+						arm[1].push(par_ch);
+						match par_ch {
+							'\\' => {
+								if let Some(esc_ch) = self.char_stream.pop_front() {
+									wd = wd.add_char(par_ch);
+									arm[1].push(esc_ch);
+								}
+							}
+							'(' => paren_stack.push(par_ch),
+							')' => {
+								paren_stack.pop();
+								if paren_stack.is_empty() { break }
+							}
+							_ => continue
+						}
+
+					}
+				}
+				'"' | '\'' => {
+					while let Some(qt_ch) = self.char_stream.pop_front() {
+						wd = wd.add_char(qt_ch);
+						if reading_pattern {
+							arm[0].push(qt_ch)
+						} else {
+							arm[1].push(qt_ch);
+						}
+						match qt_ch {
+							'\\' => {
+								if let Some(esc_ch) = self.char_stream.pop_front() {
+									wd = wd.add_char(ch);
+									if reading_pattern {
+										arm[0].push(esc_ch)
+									} else {
+										arm[1].push(esc_ch);
+									}
+								}
+							}
+							_ if qt_ch == ch => break,
+							_ => continue
+						}
+
+					}
+				}
+				'{' if !reading_pattern && arm[1].trim().is_empty() => {
+					let mut brace_stack = vec!['{'];
+					while let Some(blk_ch) = self.char_stream.pop_front() {
+						wd = wd.add_char(blk_ch);
+						match blk_ch {
+							'\\' => {
+								arm[1].push(blk_ch);
+								if let Some(esc_ch) = self.char_stream.pop_front() {
+									wd = wd.add_char(esc_ch);
+									arm[1].push(esc_ch);
+								}
+							}
+							'{' => brace_stack.push(blk_ch),
+							'}' => {
+								brace_stack.pop();
+								if brace_stack.is_empty() {
+									while self.char_stream.front().is_some_and(|ch| matches!(ch, ',')) {
+										let comma = self.char_stream.pop_front().unwrap();
+										wd = wd.add_char(comma);
+									}
+									let arm_tk = Tk {
+										tk_type: TkType::MatchArm {
+											pat: take(&mut arm[0]).trim().to_string(),
+											body: take(&mut arm[1]).trim().to_string()
+										},
+										wd: take(&mut wd)
+									};
+									self.tokens.push(arm_tk);
+									reading_pattern = true;
+									break
+								}
+							}
+							_ => {
+								arm[1].push(blk_ch)
+							}
+						}
+					}
+				}
+				',' if !reading_pattern => {
+					let arm_tk = Tk {
+						tk_type: TkType::MatchArm {
+							pat: take(&mut arm[0]).trim().to_string(),
+							body: take(&mut arm[1]).trim().to_string()
+						},
+						wd: take(&mut wd)
+					};
+					self.tokens.push(arm_tk);
+					reading_pattern = true;
+				}
+				_ => {
+					if reading_pattern {
+						arm[0].push(ch)
+					} else {
+						arm[1].push(ch)
+					}
+				}
 			}
 		}
-		self.tokens.push(Tk { tk_type: TkType::Esac, wd });
-		self.push_ctx(DeadEnd);
+		if !wd.text.is_empty() {
+			if wd.text.trim() == "done" {
+				self.tokens.push(Tk { tk_type: TkType::Done, wd: take(&mut wd) });
+			}
+			// Unfinished match arm, just push whatever is left
+			// Necessary for syntax highlighting
+			self.tokens.push(Tk { tk_type: TkType::String, wd: take(&mut wd) });
+		}
 		Ok(())
 	}
 	fn varsub_context(&mut self, mut wd: WordDesc) {

@@ -40,7 +40,7 @@ use execute::{traverse_ast, LashWait, RustFd};
 use interp::{parse::{descend, NdType}, token::LashTokenizer};
 use log::LevelFilter;
 use nix::{fcntl::OFlag, sys::{stat::Mode, termios::{self, LocalFlags}}, unistd::{Pid,isatty}};
-use shellenv::{read_vars, write_meta, write_vars, EnvFlags, RSH_PATH};
+use shellenv::{read_vars, write_jobs, write_meta, write_vars, EnvFlags, RSH_PATH};
 use termios::Termios;
 
 //use crate::event::EventLoop;
@@ -159,9 +159,19 @@ async fn main() {
 			let termios = set_termios();
 			write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::INTERACTIVE)).unwrap();
 
-			event::main_loop().unwrap();
+			let status = event::main_loop();
 
-			restore_termios(&termios);
+			if let Err(e) = status {
+				match e {
+					ShError::CleanExit(code) => {
+						write_jobs(|j| j.hang_up()).ok();
+						restore_termios(&termios);
+						std::process::exit(code);
+					}
+					_ => unreachable!() // Only CleanExit will break the loop
+				}
+			}
+
 		},
 		false => {
 			main_noninteractive(args,script_path).unwrap();

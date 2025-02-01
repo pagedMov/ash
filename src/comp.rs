@@ -212,32 +212,53 @@ pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 					keyword.push(next);
 				}
 
-				if is_command && matches!(keyword.as_str(),"if" | "while" | "for" | "until" | "select" | "case") {
-					keyword_stack.push(keyword.clone())
+				if is_command && KEYWORDS.contains(&keyword.trim()) {
+					keyword_stack.push(keyword.trim().to_string())
 				} else {
-					match keyword.as_str() {
+					match keyword.trim() {
 						"fi" | "done" | "esac" => {
-							let expectation = match keyword.as_str() {
+							let expectation = match keyword.trim() {
 								"fi" => vec!["if", "else"],
-								"done" => vec!["do", "while", "until", "for", "in", "select"],
+								"done" => vec!["do", "while", "until", "for", "match", "in", "select"],
 								"esac" => vec!["in"],
 								_ => unreachable!()
 							};
-							if keyword_stack.last().is_some_and(|kw| expectation.contains(&kw.as_str())) {
+							if keyword_stack.last().is_some_and(|kw| expectation.contains(&kw.trim())) {
 								keyword_stack.pop();
 							}
 						}
 						"then" | "do" | "in" => {
-							let expectation = match keyword.as_str() {
+							let expectation = match keyword.trim() {
 								"then" => vec!["if", "elif"],
 								"do" => vec!["in", "while", "until"],
-								"in" => vec!["case","for","select"],
+								"in" => vec!["case","for","select","match"],
 								_ => unreachable!()
 							};
-							if keyword_stack.last().is_some_and(|kw| expectation.contains(&kw.as_str())) {
+							if keyword_stack.last().is_some_and(|kw| expectation.contains(&kw.trim())) {
 								if keyword != "then" && keyword != "do" {
 									keyword_stack.pop();
-									keyword_stack.push(keyword.clone());
+									keyword_stack.push(keyword.trim().to_string());
+								}
+							}
+						}
+						_ => { /* Do nothing */ }
+					}
+				}
+				if !keyword_stack.is_empty() {
+					match keyword_stack.last().unwrap().as_str() {
+						"done" => {
+							keyword_stack.pop();
+							if let Some(kw) = keyword_stack.last() {
+								if matches!(kw.as_str(), "in") {
+									keyword_stack.pop();
+								}
+							}
+						}
+						"fi" => {
+							keyword_stack.pop();
+							if let Some(kw) = keyword_stack.last() {
+								if matches!(kw.as_str(), "then" | "else" | "elif" | "if") {
+									keyword_stack.pop();
 								}
 							}
 						}
@@ -252,10 +273,10 @@ pub fn check_balanced_delims(input: &str) -> Result<bool, ShError> {
 
 	// Check if any delimiters or keywords remain unclosed
 	if !delim_stack.is_empty() {
-		return Ok(false);
+		return Ok(false)
 	}
 	if !keyword_stack.is_empty() {
-		return Ok(false);
+		return Ok(false)
 	}
 
 	Ok(true)
@@ -330,11 +351,24 @@ pub fn highlight_token(tk: Tk, path: &str) -> String {
     TkT::Until |
     TkT::Do |
     TkT::Done |
-    TkT::Case |
-    TkT::Esac |
+		TkT::Match |
     TkT::Select |
     TkT::In => {
 			return style_text(KEYWORD,tk.text());
+		}
+		TkT::MatchArm {..} => {
+			let (pat,body) = tk.text().split_once("=>").unwrap();
+			let pat = style_text(STRING,pat);
+			let body = if body.trim().starts_with('{') && body.trim().trim_end_matches(',').ends_with('}') {
+				let (left,middle,right) = body.split_twice("{","}").unwrap();
+				let middle = style_text(STRING,&middle);
+				format!("{}{}{}{}{}",left,'{',middle,'}',right)
+			} else {
+				style_text(STRING,body)
+			};
+			let sep = style_text(KEYWORD,"=>");
+			let formatted = format!("{pat}{sep}{body}");
+			return style_text(STRING,&formatted);
 		}
     TkT::FuncBody => {
 			let body = tk.text().trim_matches(['{','}']);
@@ -537,14 +571,15 @@ impl LashHelper {
 
 	fn hist_substr_search(&self, term: &str, hist: &dyn History) -> Option<String> {
 		let limit = hist.len();
+		let mut latest_match = None;
 		for i in 0..limit {
-			if let Some(hist_entry) = hist.get(i, rustyline::history::SearchDirection::Forward).ok()? {
+			if let Some(hist_entry) = hist.get(i, rustyline::history::SearchDirection::Reverse).ok()? {
 				if hist_entry.entry.starts_with(term) {
-					return Some(hist_entry.entry.into_owned());
+					latest_match = Some(hist_entry.entry.into_owned());
 				}
 			}
 		}
-		None
+		latest_match
 	}
 
 	// Dynamically add commands (if needed, e.g., external binaries in $PATH)

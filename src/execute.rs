@@ -223,10 +223,10 @@ pub enum LashWait {
 	TimeOut,
 
 	// These wait statuses are returned by builtins like `return` and `break`
-	SIGRETURN, // Return from a function
-	SIGCONT, // Restart a loop from the beginning
-	SIGBREAK, // Break a loop
-	SIGRSHEXIT // Internal call to exit early
+	RETURN { code: i32 }, // Return from a function
+	CONTINUE, // Restart a loop from the beginning
+	BREAK, // Break a loop
+	EXIT { code: i32 }
 }
 
 impl LashWait {
@@ -436,8 +436,8 @@ fn traverse(mut node: Node, io: ProcIO) -> LashResult<LashWait> {
 		NdType::Loop {..} => {
 			last_status = handle_loop(node,io)?;
 		}
-		NdType::Case {..} => {
-			last_status = handle_case(node,io)?;
+		NdType::Match {..} => {
+			last_status = handle_match(node,io)?;
 		}
 		NdType::Select {..} => {
 			todo!("handle select")
@@ -520,18 +520,6 @@ pub fn handle_cmd_sub(node: Node, io: ProcIO) -> LashResult<LashWait> {
 	last_status
 }
 
-fn handle_case(node: Node, io: ProcIO) -> LashResult<LashWait> {
-	node_operation!(NdType::Case { input_var, cases }, node, {
-		for case in cases {
-			let (pat, body) = case;
-			if pat == input_var.text() {
-				return traverse_root(body.clone(), None, io)
-			}
-		}
-		Ok(LashWait::Fail { code: 1, cmd: Some("case".into()) })
-	})
-}
-
 fn handle_for(node: Node,io: ProcIO) -> LashResult<LashWait> {
 	let mut last_status = LashWait::new();
 
@@ -569,7 +557,13 @@ fn handle_for(node: Node,io: ProcIO) -> LashResult<LashWait> {
 					// TODO: modulo is expensive; find a better way to do this
 					var_index = iteration_count % var_count;
 
-					event::execute(&loop_body, NdFlags::empty(), None, Some(body_io.clone()));
+					let result = event::execute(&loop_body, NdFlags::empty(), None, Some(body_io.clone()));
+					match result {
+						Err(ShError::LoopBreak) => break,
+						Ok(_) |
+							Err(ShError::LoopCont) => continue,
+						Err(_) => break
+					}
 				}
 			});
 			std::process::exit(0);
@@ -615,7 +609,7 @@ fn handle_loop(node: Node, io: ProcIO) -> LashResult<LashWait> {
 			body
 		});
 		loop {
-			event::execute(&cond, NdFlags::empty(), None, Some(cond_io.clone()))?;
+			let result = event::execute(&cond, NdFlags::empty(), None, Some(cond_io.clone()));
 			let is_success = read_vars(|v| v.get_param("?").is_some_and(|val| val == "0"))?;
 
 			match condition {
@@ -635,7 +629,13 @@ fn handle_loop(node: Node, io: ProcIO) -> LashResult<LashWait> {
 				}
 			}
 
-			event::execute(&body, NdFlags::empty(), None, Some(body_io.clone()))?;
+			let result = event::execute(&body, NdFlags::empty(), None, Some(body_io.clone()));
+			match result {
+				Err(ShError::LoopBreak) => break,
+				Ok(_) |
+				Err(ShError::LoopCont) => continue,
+				Err(e) => return Err(e),
+			}
 		}
 	});
 
@@ -667,6 +667,23 @@ fn handle_if(node: Node, io: ProcIO) -> LashResult<LashWait> {
 		}
 	});
 	Ok(last_status)
+}
+
+fn handle_match(node: Node, io: ProcIO) -> LashResult<LashWait> {
+	let mut last_status = LashWait::new();
+
+	node_operation!(NdType::Match { in_var, arms }, node, {
+		let mut match_arms = arms;
+		while let Some(arm) = match_arms.pop_front() {
+			if let TkType::MatchArm { pat, body } = arm.class() {
+				if pat.trim() == in_var.text().trim() {
+					event::execute(&body, NdFlags::empty(), Some(node.redirs.clone()), Some(io))?;
+					break
+				}
+			} else { unreachable!() }
+		}
+		Ok(last_status)
+	})
 }
 
 fn handle_chain(node: Node) -> LashResult<LashWait> {
@@ -766,12 +783,16 @@ fn handle_builtin(mut node: Node, io: ProcIO) -> LashResult<LashWait> {
 	let argv = node.get_argv()?;
 	write_meta(|m| m.set_last_command(argv.first().unwrap().text()))?;
 	let result = match argv.first().unwrap().text() {
+		"continue" => return Err(ShError::LoopCont), // These will propagate back to the loop function and be handled there
+		"break" => return Err(ShError::LoopBreak),
 		"echo" => builtin::echo(node, io)?,
 		"expr" => builtin::expr(node, io)?,
 		"set" => builtin::set_or_unset(node, true)?,
 		"jobs" => builtin::jobs(node, io)?,
 		"fg" => builtin::fg(node)?,
 		"bg" => builtin::bg(node)?,
+		"exit" => builtin::lash_exit(node)?,
+		"return" => builtin::lash_return(node)?,
 		"pushd" => builtin::pushd(node)?,
 		"popd" => builtin::popd(node)?,
 		"setopt" => builtin::setopt(node)?,
@@ -942,9 +963,14 @@ fn handle_function(mut node: Node, io: ProcIO) -> LashResult<LashWait> {
 			var_table.pos_param_pushback(&param);
 		}
 		write_vars(|v| *v = var_table)?;
-		event::execute(&func, node.flags, Some(node.redirs.clone()), Some(io))?;
-
+		let result = event::execute(&func, node.flags, Some(node.redirs.clone()), Some(io));
 		snapshot.restore_snapshot()?;
+		match result {
+			Ok(_) => { /* Do nothing */ }
+			Err(ShError::FuncReturn(code)) => write_vars(|v| v.set_param("?".into(), code.to_string()))?,
+			Err(e) => return Err(e)
+		}
+
 		Ok(LashWait::Success)
 	} else { unreachable!() }
 }
