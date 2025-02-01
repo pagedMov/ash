@@ -1,5 +1,5 @@
 use crossterm::{
-	cursor::{self, MoveTo, RestorePosition, Show}, execute, style::{style, Color, Print, Stylize}, terminal::{disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen}
+	cursor::{self, MoveTo, RestorePosition, Show}, execute, style::{style, Color, Print, Stylize}, terminal::{self, disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen}
 };
 use log::debug;
 use once_cell::sync::Lazy;
@@ -7,7 +7,7 @@ use rustyline::{completion::{Candidate, Completer, FilenameCompleter}, error::Re
 use skim::{prelude::{Key, SkimItemReader, SkimOptionsBuilder}, Skim};
 use std::{borrow::Cow, collections::{HashMap, HashSet, VecDeque}, env, io::stdout, mem, path::{Path, PathBuf}};
 
-use crate::{builtin::BUILTINS, event::ShError, interp::{helper::{self, StrExtension}, parse::Span, token::{AssOp, OxTokenizer, Tk, WdFlags, KEYWORDS}}, shellenv::{read_logic, read_vars}};
+use crate::{builtin::BUILTINS, event::ShError, interp::{expand, helper::{self, StrExtension}, parse::Span, token::{AssOp, OxTokenizer, Tk, WdFlags, KEYWORDS}}, shellenv::{read_logic, read_vars}};
 
 pub const RESET: &str = "\x1b[0m";
 pub const BLACK: &str = "\x1b[30m";
@@ -918,10 +918,9 @@ impl Completer for OxHelper {
 
 pub fn skim_comp(options: Vec<String>) -> Option<String> {
 	let mut stdout = stdout();
-	enable_raw_mode().unwrap();
 
-	// Get the current cursor position
-	let (prompt_col, prompt_row) = cursor::position().unwrap();
+	let (init_col, init_row) = cursor::position().unwrap();
+	let (_,rows) = terminal::size().unwrap();
 
 	// Get terminal dimensions
 	let height = options.len().min(10) as u16; // Set maximum number of options to display
@@ -931,42 +930,32 @@ pub fn skim_comp(options: Vec<String>) -> Option<String> {
 	let input = SkimItemReader::default().of_bufread(std::io::Cursor::new(options_join));
 
 	let skim_options = SkimOptionsBuilder::default()
-		.prompt("Select > ".to_string())
+		.prompt(String::new())
 		.height(format!("{height}")) // Adjust height based on the options
+		.reverse(true)
 		.multi(false)
 		.build()
 		.unwrap();
 
-				// Run skim and detect if Escape was pressed
-				let selected = Skim::run_with(&skim_options, Some(input))
-					.and_then(|out| {
-						if out.final_key == Key::ESC {
-							None // Return None if Escape is pressed
-						} else {
-							out.selected_items.first().cloned()
-						}
-					})
-				.map(|item| item.output().to_string());
+		// Run skim and detect if Escape was pressed
+		let selected = Skim::run_with(&skim_options, Some(input))
+			.and_then(|out| {
+				if out.final_key == Key::ESC {
+					None // Return None if Escape is pressed
+				} else {
+					out.selected_items.first().cloned()
+				}
+			})
+		.map(|item| item.output().to_string());
 
-				// Clear the rendered options after selection or cancellation
-				for i in 0..height {
-					execute!(
-						stdout,
-						MoveTo(0, prompt_row + 1 + i), // Clear each rendered line
-						Clear(ClearType::CurrentLine)
-					)
-						.unwrap();
-						}
+		let (_, new_row) = cursor::position().unwrap();
 
-				// Restore cursor position to where the prompt was
-				execute!(
-					stdout,
-					MoveTo(prompt_col, prompt_row), // Restore original cursor position
-					Clear(ClearType::FromCursorDown) // Clear anything below the prompt
-				)
-					.unwrap();
+		// Restore cursor position to where the prompt was before completion
+		execute!(
+			stdout,
+			MoveTo(init_col, new_row - 1),
+			Clear(ClearType::FromCursorDown),
+		).unwrap();
 
-				disable_raw_mode().unwrap();
-
-				selected
+		selected
 }
