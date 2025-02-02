@@ -1063,7 +1063,7 @@ pub fn build_for(mut ctx: DescentContext) -> LashResult<DescentContext> {
 								redirs: VecDeque::new()
 							}
 						}
-						_ => return Err(ShError::from_parse(format!("Expected a loop body token, found this: {}",tk.text()).as_str(), tk.span()))
+						_ => return Err(ShError::from_parse(format!("Expected a loop body token, found this: {:?}",tk).as_str(), tk.span()))
 					}
 				}
 				_ => unreachable!()

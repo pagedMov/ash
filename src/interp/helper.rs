@@ -331,6 +331,40 @@ impl StrExtension for str {
 
 }
 
+pub fn handle_nested(open: &str, close: &str, haystack: &mut VecDeque<char>) -> String {
+	let mut count = 1;
+	let mut result = String::new();
+	let mut cur_word = String::new();
+	while let Some(ch) = haystack.pop_front() {
+		result.push(ch);
+		match ch {
+			'\\' => {
+				cur_word.push(ch);
+				if let Some(esc_ch) = haystack.pop_front() {
+					cur_word.push(esc_ch)
+				}
+			}
+			' ' | '\t' | ';' | '\n' => {
+				if !cur_word.is_empty() {
+					if &cur_word == open {
+						count += 1;
+					} else if &cur_word == close{
+						count -= 1;
+						if count == 0 {
+							haystack.push_front(ch);
+							result = result[..result.len() - 1].to_string();
+							break
+						}
+					}
+					cur_word.clear()
+				}
+			}
+			_ => cur_word.push(ch),
+		}
+	}
+	result
+}
+
 pub fn split_at_varsub(word: &str) -> (String,String) {
 	let mut left = String::new();
 	let mut right = String::new();

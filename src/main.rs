@@ -30,6 +30,7 @@ pub mod builtin;
 pub mod comp;
 pub mod signal;
 pub mod shopt;
+pub mod tests;
 
 use std::{collections::VecDeque, env, io::Write, fs::OpenOptions, os::fd::AsRawFd, path::PathBuf};
 

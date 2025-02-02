@@ -1251,7 +1251,7 @@ impl LashTokenizer {
 					// TODO: clean this up
 					let ctx = self.context.pop().unwrap(); // Context always has at least one element. Hopefully.
 					if *self.ctx() == Loop {
-						self.loop_context(take(&mut wd));
+						self.loop_context(take(&mut wd))?;
 					} else {
 						self.context.push(ctx);
 						self.command_context(take(&mut wd), expand)?
@@ -1264,8 +1264,8 @@ impl LashTokenizer {
 				Subshell | CommandSub => self.subshell_context(take(&mut wd), expand)?,
 				FuncBody => self.func_context(take(&mut wd))?,
 				Match => self.match_context(take(&mut wd), expand)?,
-				Loop => self.loop_context(take(&mut wd)),
-				For => self.loop_context(take(&mut wd)),
+				Loop => self.loop_context(take(&mut wd))?,
+				For => self.loop_context(take(&mut wd))?,
 				VarSub => self.varsub_context(take(&mut wd)),
 				Comment => {
 					while self.char_stream.front().is_some_and(|ch| *ch != '\n') {
@@ -1566,7 +1566,6 @@ impl LashTokenizer {
 					}
 					found = true;
 					self.tokens.push(Tk { tk_type: TkType::Ident, wd: take(&mut wd) });
-					self.pop_ctx();
 					wd = wd.set_span(span);
 				}
 			}
@@ -1675,84 +1674,82 @@ impl LashTokenizer {
 		self.push_ctx(DeadEnd);
 		Ok(())
 	}
-	fn loop_context(&mut self, mut wd: WordDesc) {
-		let span = self.spans.pop_front().unwrap();
-		let span_start = span.start;
-		let mut span_end = span.end;
-		let mut got_span = false;
-		let mut cond_done = false;
-		let mut body_done = false;
-		let mut target = if !cond_done { &REGEX["find_do"] } else { &REGEX["find_done"] };
-		while let Some(ch) = self.advance() {
-			if cond_done && body_done {
-				self.char_stream.push_front(ch);
-				break
-			}
-			if !ch.is_whitespace() && !matches!(ch, ';' | '\n') {
-				got_span = false;
-			}
-			if !cond_done || !body_done {
-				wd = wd.add_char(ch);
-				if let Some(caps) = target.captures(&wd.text.clone()) {
-					wd.text = if !cond_done {
-						caps.name("loop_cond").map(|c| c.as_str().to_string()).unwrap_or_default()
-					} else {
-						caps.name("loop_body").map(|c| c.as_str().to_string()).unwrap_or_default()
-					};
-					let mut keyword = caps.name("kw").map(|c| c.as_str().to_string()).unwrap_or_default();
-					wd = wd.set_span(Span::from(span_start,span_end));
-					let kw_tk = Tk {
-						tk_type: match cond_done {
-							false => TkType::Do,
-							true => TkType::Done,
-						},
-						wd: WordDesc {
-							text: keyword,
-							span: self.spans.pop_front().unwrap_or_default(),
-							flags: WdFlags::KEYWORD
-						}
-					};
-					let logic_tk = Tk {
-						tk_type: match cond_done {
-							false => TkType::LoopCond,
-							true => TkType::LoopBody,
-						},
-						wd: take(&mut wd)
-					};
-					self.tokens.push(logic_tk);
-					self.tokens.push(kw_tk);
-					if !cond_done {
-						cond_done = true;
-						target = &REGEX["find_done"];
-					} else {
-						body_done = true;
-					}
+	// FIXME: This is probably the least maintainable garbage I have ever written in my life
+	// Unfortunately, it works
+	fn loop_context(&mut self, mut wd: WordDesc) -> LashResult<()>{
+		use crate::interp::token::TkState::*;
+		let mut chk_tokens = self.tokens.clone();
+		assert!(!chk_tokens.is_empty());
+		let mut ctx = Loop;
+		let mut opener = "";
+		let mut closer = "";
+		while let Some(tk) = chk_tokens.pop() {
+			match tk.class() {
+				TkType::For => {
+					opener = "do";
+					closer = "done";
+					ctx = For;
+					break
 				}
-				if ch.is_whitespace() || matches!(ch, ';' | '\n') && !got_span {
-					span_end = self.spans.pop_front().unwrap_or_default().end;
-					got_span = true;
+				TkType::While => {
+					opener = "while";
+					closer = "do";
+					break
 				}
-			} else {
-				wd = WordDesc::empty();
-				break
+				TkType::Until => {
+					opener = "until";
+					closer = "do";
+					break
+				}
+				_ => continue
 			}
+		};
+		wd.text = helper::handle_nested(opener, closer, &mut self.char_stream);
+		if ctx == For && wd.text.trim().starts_with("do") {
+			wd.text = wd.text.trim().strip_prefix("do").unwrap().to_string();
+			self.tokens.push(Tk { tk_type: TkType::Do, wd: WordDesc { text: "do".into(), span: Span::new(), flags: WdFlags::KEYWORD } });
 		}
-		if !wd.text.is_empty() {
-			if !cond_done {
-				let logic_tk = Tk {
-					tk_type: TkType::LoopCond,
-					wd: take(&mut wd)
-				};
-				self.tokens.push(logic_tk);
-			} else if !body_done {
-				let logic_tk = Tk {
-					tk_type: TkType::LoopBody,
-					wd: take(&mut wd)
-				};
-				self.tokens.push(logic_tk);
-			}
+		wd.text = if let Some(text) = wd.text.strip_suffix(closer) {
+			text.to_string()
+		} else {
+			return Err(ShError::from_parse(format!("This loop is missing a 'do': {:?}",wd.text).as_str(), Span::new()))
+		};
+		let tk_type = match ctx {
+			TkState::For => TkType::LoopBody,
+			TkState::Loop => TkType::LoopCond,
+			_ => unreachable!()
+		};
+		let cond_tk = Tk {
+			tk_type,
+			wd: take(&mut wd)
+		};
+		self.tokens.push(cond_tk);
+		let tk_type = match closer {
+			"do" => TkType::Do,
+			"done" => TkType::Done,
+			_ => unreachable!()
+		};
+		self.tokens.push(Tk { tk_type, wd: WordDesc { text: closer.into(), span: Span::new(), flags: WdFlags::KEYWORD } });
+		let body_tk = if ctx != For {
+			wd.text = helper::handle_nested("do", "done", &mut self.char_stream);
+			wd.text = if let Some(text) = wd.text.strip_suffix("done") {
+				text.to_string()
+			} else {
+				return Err(ShError::from_parse(format!("This loop is missing a 'done': {:?}",wd.text).as_str(), Span::new()))
+			};
+			Some(Tk {
+				tk_type: TkType::LoopBody,
+				wd: take(&mut wd)
+			})
+		} else {
+			None
+		};
+		if let Some(tk) = body_tk {
+			self.tokens.push(tk);
+			self.tokens.push(Tk { tk_type: TkType::Done, wd: WordDesc { text: "done".into(), span: Span::new(), flags: WdFlags::KEYWORD } });
 		}
 		self.pop_ctx();
+		Ok(())
 	}
 	fn match_context(&mut self, mut wd: WordDesc, expand: bool) -> LashResult<()> {
 		use crate::interp::token::TkState::*;
