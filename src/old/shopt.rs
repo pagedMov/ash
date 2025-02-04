@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::{error::{LashErr, LashErrLow}, shellenv::LashVal, LashResult};
+use crate::{event::ShError, interp::parse::Span, shellenv::LashVal, LashResult};
+
 
 #[derive(Clone, Debug)]
 pub struct ShOpts {
@@ -40,14 +41,14 @@ impl ShOpts {
 		Self { core, prompt, exec }
 	}
 
-	pub fn get<'a>(&self, query: &str) -> LashResult<LashVal> {
+	pub fn get(&self, query: &str) -> LashResult<LashVal> {
 		let mut query = query.split('.').map(|seg| seg.to_string()).collect::<VecDeque<String>>();
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
 			"core" => Ok(self.core.get(query)?),
 			"prompt" => Ok(self.prompt.get(query)?),
 			"exec" => Ok(self.exec.get(query)?),
-			_ => Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid shopt key: {}",key))))
+			_ => Err(ShError::from_execf(format!("Invalid shopt key: {}",key).as_str(), 1, Span::new()))
 		}
 	}
 	pub fn set(&mut self, mut query: VecDeque<String>, value: LashVal) -> LashResult<()> {
@@ -56,7 +57,11 @@ impl ShOpts {
 			"core" => self.core.set(query, value),
 			"prompt" => self.prompt.set(query, value),
 			"exec" => self.exec.set(query, value),
-			_ => Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid shopt key: {}", key))))
+			_ => Err(ShError::from_execf(
+					format!("Invalid shopt key: {}", key).as_str(),
+					1,
+					Span::new(),
+			)),
 		}
 	}
 }
@@ -79,7 +84,7 @@ pub struct ShOptsCore {
 }
 
 impl ShOptsCore {
-	pub fn get<'a>(&self, mut query: VecDeque<String>) -> LashResult<LashVal> {
+	pub fn get(&self, mut query: VecDeque<String>) -> LashResult<LashVal> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
 			"dotglob" => Ok(LashVal::Bool(self.dotglob)),
@@ -89,7 +94,7 @@ impl ShOptsCore {
 			"int_comments" => Ok(LashVal::Bool(self.int_comments)),
 			"auto_hist" => Ok(LashVal::Bool(self.auto_hist)),
 			"bell_style" => Ok(LashVal::Int(self.bell_style as i32)),
-			_ => Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid core opts key: {}",key))))
+			_ => Err(ShError::from_execf(format!("Invalid core opts key: {}",key).as_str(), 1, Span::new()))
 		}
 	}
 	pub fn set(&mut self, mut query: VecDeque<String>, value: LashVal) -> LashResult<()> {
@@ -97,41 +102,73 @@ impl ShOptsCore {
 		match key.as_str() {
 			"dotglob" => {
 				self.dotglob = if let LashVal::Bool(val) = value { val } else {
-					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core"))))
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.dotglob: {:?}", value).as_str(),
+						1,
+						Span::new(),
+					))
 				};
 			}
 			"autocd" => {
 				self.autocd = if let LashVal::Bool(val) = value { val } else {
-					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.autocd: {:?}", value))))
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.autocd: {:?}", value).as_str(),
+						1,
+						Span::new(),
+					))
 				};
 			}
 			"hist_ignore_dupes" => {
 				self.hist_ignore_dupes = if let LashVal::Bool(val) = value { val } else {
-					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.hist_ignore_dupes: {:?}", value))))
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.hist_ignore_dupes: {:?}", value).as_str(),
+						1,
+						Span::new(),
+					))
 				};
 			}
 			"max_hist" => {
 				self.max_hist = if let LashVal::Int(val) = value { val as usize } else {
-					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.max_hist: {:?}", value))))
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.max_hist: {:?}", value).as_str(),
+						1,
+						Span::new(),
+					))
 				};
 			}
 			"int_comments" => {
 				self.int_comments = if let LashVal::Bool(val) = value { val } else {
-					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.int_comments: {:?}", value))))
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.int_comments: {:?}", value).as_str(),
+						1,
+						Span::new(),
+					))
 				};
 			}
 			"auto_hist" => {
 				self.auto_hist = if let LashVal::Bool(val) = value { val } else {
-					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.auto_hist: {:?}", value))))
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.auto_hist: {:?}", value).as_str(),
+						1,
+						Span::new(),
+					))
 				};
 			}
 			"bell_style" => {
 				self.bell_style = if let LashVal::Int(val) = value { val as usize } else {
-					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.bell_style: {:?}", value))))
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.bell_style: {:?}", value).as_str(),
+						1,
+						Span::new(),
+					))
 				};
 			}
 			_ => {
-				return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid core opts key: {}", key))))
+				return Err(ShError::from_execf(
+						format!("Invalid core opts key: {}", key).as_str(),
+						1,
+						Span::new(),
+				))
 			}
 		}
 		Ok(())
@@ -150,7 +187,7 @@ pub struct ShOptsPrompt {
 }
 
 impl ShOptsPrompt {
-	pub fn get<'a>(&self, mut query: VecDeque<String>) -> LashResult<LashVal> {
+	pub fn get(&self, mut query: VecDeque<String>) -> LashResult<LashVal> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
 			"trunc_prompt_path" => Ok(LashVal::Int(self.trunc_prompt_path as i32)),
@@ -160,7 +197,7 @@ impl ShOptsPrompt {
 			"tab_stop" => Ok(LashVal::Int(self.tab_stop as i32)),
 			"exit_status" => Ok(self.exit_status.get(query)?),
 			"custom" => Ok(self.custom.get(query)?),
-			_ => Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid key for prompt opts: {}",key))))
+			_ => Err(ShError::from_execf(format!("Invalid key for prompt opts: {}",key).as_str(), 1, Span::new()))
 		}
 	}
 
@@ -169,33 +206,57 @@ impl ShOptsPrompt {
 		match key.as_str() {
 			"trunc_prompt_path" => {
 				self.trunc_prompt_path = if let LashVal::Int(val) = value { val as usize } else {
-					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.trunc_prompt_path: {:?}", value))))
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.trunc_prompt_path: {:?}", value).as_str(),
+						1,
+						Span::new(),
+					))
 				};
 			}
 			"edit_mode" => {
 				self.edit_mode = if let LashVal::String(val) = value { val } else {
-					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.edit_mode: {:?}", value))))
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.edit_mode: {:?}", value).as_str(),
+						1,
+						Span::new(),
+					))
 				};
 			}
 			"comp_limit" => {
 				self.comp_limit = if let LashVal::Int(val) = value { val as usize } else {
-					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.comp_limit: {:?}", value))))
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.comp_limit: {:?}", value).as_str(),
+						1,
+						Span::new(),
+					))
 				};
 			}
 			"prompt_highlight" => {
 				self.prompt_highlight = if let LashVal::Bool(val) = value { val } else {
-					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.prompt_highlight: {:?}", value))))
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.prompt_highlight: {:?}", value).as_str(),
+						1,
+						Span::new(),
+					))
 				};
 			}
 			"tab_stop" => {
 				self.tab_stop = if let LashVal::Int(val) = value { val as usize } else {
-					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.tab_stop: {:?}", value))))
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.tab_stop: {:?}", value).as_str(),
+						1,
+						Span::new(),
+					))
 				};
 			}
 			"exit_status" => self.exit_status.set(query, value)?,
 			"custom" => self.custom.set(query,value)?,
 			_ => {
-				return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid key for prompt opts: {}", key))))
+				return Err(ShError::from_execf(
+						format!("Invalid key for prompt opts: {}", key).as_str(),
+						1,
+						Span::new(),
+				))
 			}
 		}
 		Ok(())
@@ -211,7 +272,7 @@ impl PromptCustom {
 	pub fn new() -> Self {
 		Self { opts: LashVal::Dict(BTreeMap::new()) }
 	}
-	pub fn get<'a>(&self, mut query: VecDeque<String>) -> LashResult<LashVal> {
+	pub fn get(&self, mut query: VecDeque<String>) -> LashResult<LashVal> {
 		// Start traversal at the root map
 		if let LashVal::Dict(map) = &self.opts {
 			let mut current_map = map.clone();
@@ -227,18 +288,34 @@ impl PromptCustom {
 						if query.is_empty() {
 							return Ok(value.clone());
 						} else {
-							return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Key '{}' does not lead to an object, cannot continue traversal", key))));
+							return Err(ShError::from_execf(
+									format!(
+										"Key '{}' does not lead to an object, cannot continue traversal",
+										key
+									)
+									.as_str(),
+									1,
+									Span::new(),
+							));
 						}
 					}
 					None => {
 						// Key not found
-						return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Failed to find a value for key: {}", key))));
+						return Err(ShError::from_execf(
+								format!("Failed to find a value for key: {}", key).as_str(),
+								1,
+								Span::new(),
+						));
 					}
 				}
 			}
 
 			// If we reach here, the final key was an object, not a value
-			Err(LashErr::Low(LashErrLow::ExecFailed("Expected a value but found a nested object".into())))
+			Err(ShError::from_execf(
+					"Expected a value but found a nested object",
+					1,
+					Span::new(),
+			))
 		} else { unreachable!() }
 	}
 	pub fn traverse_namespace(&mut self, map: &mut BTreeMap<String,LashVal>, mut query: VecDeque<String>, value: LashVal) -> LashResult<()> {
@@ -259,7 +336,7 @@ impl PromptCustom {
 							self.traverse_namespace(inner_map, query, value)?;
 						}
 						_ => {
-							return Err(LashErr::Low(LashErrLow::InternalErr(format!("Expected to find a map in prompt.custom, found this: {}", val.to_string()))))
+							return Err(ShError::from_internal(format!("Expected to find a map in prompt.custom, found this: {}", val.to_string()).as_str()))
 						}
 					}
 				}
@@ -272,48 +349,51 @@ impl PromptCustom {
 			map.insert(key,val);
 		} else { unreachable!() }
 	}
-
-	pub fn set<'a>(&mut self, mut query: VecDeque<String>, value: LashVal) -> LashResult< ()> {
-		if query.is_empty() {
-			return Ok(());
-		}
+	pub fn set(&mut self, mut query: VecDeque<String>, value: LashVal) -> LashResult<()> {
 		if query.len() == 1 {
 			let key = query.pop_front().unwrap();
 			self.insert_top_level(key, value);
 			return Ok(());
 		}
 
-		// Start with the first key and initialize the map stack
-		let mut prev_key = query.pop_front().unwrap();
-		let mut map_stack: Vec<(String, LashVal)> = vec![];
-		let mut cur_map = LashVal::Dict(BTreeMap::new());
+		let mut current_map = &mut self.opts;
 
-		// Build the map stack by iterating through the query
 		while let Some(key) = query.pop_front() {
-			if query.is_empty() {
-				// If it's the last key, insert the value
-				cur_map.try_insert(key, value.clone());
-				// Push the final map onto the stack
-				map_stack.push((prev_key.clone(), cur_map));
-				break;
-			} else {
-				// Create a new map for the next level and push it to the stack
-				let new_map = LashVal::Dict(BTreeMap::new());
-				map_stack.push((key.clone(), new_map));
-			}
-			// Update the prev_key for the next iteration
-			prev_key = key;
-		}
+			// Remove the current map to allow mutation
+			let existing_value = current_map.try_remove(&key)?;
 
-		// Now we need to traverse the stack and insert each map into its parent map
-		while let Some((key, mut map)) = map_stack.pop() {
-			if let Some(LashVal::Dict(ref mut parent_map)) = self.opts.try_get_mut(&prev_key)? {
-				parent_map.insert(key.clone(), map);
-			} else {
-				return Err(LashErr::Low(LashErrLow::InternalErr("Parent map not found".into())));
+			match existing_value {
+				Some(LashVal::Dict(mut map)) => {
+					// Navigate into the existing map
+					if query.is_empty() {
+						map.insert(key.clone(), value.clone());
+					}
+					// Re-insert the modified map
+					current_map.try_insert(key.clone(), LashVal::Dict(map))?;
+					let new_map = current_map.try_get_mut(&key)?.unwrap();
+					current_map = match new_map {
+						LashVal::Dict(_) => new_map,
+						_ => break
+					};
+				}
+				Some(_) => {
+					current_map.try_insert(key.clone(), value.clone())?;
+				}
+				None => {
+					// If the key doesn't exist, create a new map for the remaining keys
+					let new_map = LashVal::Dict(BTreeMap::new());
+					if query.is_empty() {
+						current_map.try_insert(key.clone(), value.clone())?; // Placeholder object
+					} else {
+						current_map.try_insert(key.clone(), new_map)?; // Placeholder object
+					}
+					let new_map = current_map.try_get_mut(&key)?.unwrap();
+					current_map = match new_map {
+						LashVal::Dict(_) => new_map,
+						_ => break
+					};
+				}
 			}
-
-			prev_key = key; // Update prev_key to the current key for the next insertion
 		}
 
 		Ok(())
@@ -327,12 +407,12 @@ pub struct PromptStatus {
 }
 
 impl PromptStatus {
-	pub fn get<'a>(&self, mut query: VecDeque<String>) -> LashResult<LashVal> {
+	pub fn get(&self, mut query: VecDeque<String>) -> LashResult<LashVal> {
 		let key = query.pop_front().unwrap();
 		match key.as_str() {
 			"success" => Ok(LashVal::String(self.success.clone())),
 			"failure" => Ok(LashVal::String(self.failure.clone())),
-			_ => Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid key for prompt exit status opts: {}",key))))
+			_ => Err(ShError::from_execf(format!("Invalid key for prompt exit status opts: {}",key).as_str(), 1, Span::new()))
 		}
 	}
 
@@ -341,16 +421,28 @@ impl PromptStatus {
 		match key.as_str() {
 			"success" => {
 				self.success = if let LashVal::String(val) = value { val } else {
-					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.success: {:?}", value))))
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.success: {:?}", value).as_str(),
+						1,
+						Span::new(),
+					))
 				};
 			}
 			"failure" => {
 				self.failure = if let LashVal::String(val) = value { val } else {
-					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.failure: {:?}", value))))
+					return Err(ShError::from_execf(
+						format!("Invalid value for core.failure: {:?}", value).as_str(),
+						1,
+						Span::new(),
+					))
 				};
 			}
 			_ => {
-				return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid key for prompt_status: {:?}", value))))
+				return Err(ShError::from_execf(
+						format!("Invalid key for prompt_status: {}", key).as_str(),
+						1,
+						Span::new(),
+				))
 			}
 		}
 		Ok(())
@@ -363,7 +455,7 @@ pub struct ShOptsExec {
 }
 
 impl ShOptsExec {
-	pub fn get<'a>(&self, query: VecDeque<String>) -> LashResult<LashVal> {
+	pub fn get(&self, query: VecDeque<String>) -> LashResult<LashVal> {
 		todo!()
 	}
 	pub fn set(&self, mut query: VecDeque<String>, value: LashVal) -> LashResult<()> {

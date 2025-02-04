@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, VecDeque}, env, ffi::{CString, OsStr}, fmt, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, sync::{Arc, LazyLock}, time::{Duration, Instant}};
+use std::{collections::{BTreeMap, VecDeque}, env, ffi::{CString, OsStr}, fmt, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, str::FromStr, sync::{Arc, LazyLock}, time::{Duration, Instant}};
 use std::collections::HashMap;
 
 use bitflags::bitflags;
@@ -7,8 +7,8 @@ use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::{fs::File, sync::RwLock};
 
-use crate::{error::{LashErr, LashErrLow}, exec_list, helper::{self, VecDequeExtension}, shopt::ShOpts, LashResult, Rule};
 
+use crate::{event::{self, ShError}, interp::{helper::{self, VecDequeExtension}, parse::{NdFlags, Span}}, shopt::{PromptCustom, ShOpts}, LashResult};
 
 #[derive(Debug)]
 pub struct DisplayWaitStatus(pub WaitStatus);
@@ -143,7 +143,7 @@ pub struct ChildProc {
 	status: WaitStatus
 }
 
-impl<'a> ChildProc {
+impl ChildProc {
 	pub fn new(pid: Pid, command: Option<&str>, pgid: Option<Pid>) -> LashResult<Self> {
 		let command = command.map(|str| str.to_string());
     let status = if kill(pid, None).is_ok() {
@@ -187,7 +187,7 @@ impl<'a> ChildProc {
 	}
 	pub fn kill(&self, signal: Signal) -> LashResult<()> {
 		kill(self.pid, Some(signal))
-			.map_err(|_| LashErr::Low(LashErrLow::from_io()))
+			.map_err(|_| ShError::from_io())
 	}
 	pub fn is_alive(&self) -> bool {
 		matches!(self.status, WaitStatus::StillAlive)
@@ -354,10 +354,10 @@ impl Job {
 			_ => unimplemented!()
 		};
 		self.set_statuses(status);
-		killpg(self.pgid, Some(signal)).map_err(|_| LashErr::Low(LashErrLow::from_io()))?;
+		killpg(self.pgid, Some(signal)).map_err(|_| ShError::from_io())?;
 		Ok(())
 	}
-	pub fn wait_pgrp<'a>(&mut self) -> LashResult<Vec<WaitStatus>> {
+	pub fn wait_pgrp(&mut self) -> LashResult<Vec<WaitStatus>> {
 		let mut statuses = Vec::new();
 
 		for child in self.children.iter_mut() {
@@ -371,7 +371,7 @@ impl Job {
 					break;
 				}
 				Err(_) => {
-					return Err(LashErr::Low(LashErrLow::from_io()));
+					return Err(ShError::from_io());
 				}
 			}
 		}
@@ -465,7 +465,7 @@ impl JobTable {
 	pub fn job_order(&self) -> &[usize] {
 		&self.order
 	}
-	pub fn new_fg<'a>(&mut self, job: Job) -> LashResult<Vec<WaitStatus>> {
+	pub fn new_fg(&mut self, job: Job) -> LashResult<Vec<WaitStatus>> {
 		let pgid = job.pgid();
 		self.fg = Some(job);
 		attach_tty(pgid)?;
@@ -662,7 +662,7 @@ impl JobTable {
 			println!("{}", job.display(&self.order,*flags));
 		}
 	}
-	pub fn update_job_statuses<'a>(&mut self) -> LashResult<()> {
+	pub fn update_job_statuses(&mut self) -> LashResult<()> {
 		for job in self.jobs.iter_mut().flatten() {
 			//job.poll_children()?;
 		}
@@ -802,7 +802,7 @@ impl LashVal {
 			map.insert(key,val);
 			Ok(())
 		} else {
-			Err(LashErr::Low(LashErrLow::InternalErr("Called try_insert() on a non-dict LashVal".into())))
+			Err(ShError::from_internal("Called try_insert() on a non-dict LashVal"))
 		}
 	}
 
@@ -810,15 +810,15 @@ impl LashVal {
 		if let LashVal::Dict(map) = self {
 			Ok(map.get(key))
 		} else {
-			Err(LashErr::Low(LashErrLow::InternalErr("Called try_get() on a non-dict LashVal".into())))
+			Err(ShError::from_internal("Called try_get() on a non-dict LashVal"))
 		}
 	}
 
-	pub fn try_get_mut<'a>(&mut self, key: &str) -> LashResult<Option<&mut LashVal>> {
+	pub fn try_get_mut(&mut self, key: &str) -> LashResult<Option<&mut LashVal>> {
 		if let LashVal::Dict(map) = self {
 			Ok(map.get_mut(key))
 		} else {
-			Err(LashErr::Low(LashErrLow::InternalErr("Called try_get_mut() on a non-dict LashVal".into())))
+			Err(ShError::from_internal("Called try_get() on a non-dict LashVal"))
 		}
 	}
 
@@ -826,7 +826,7 @@ impl LashVal {
 		if let LashVal::Dict(map) = self {
 			Ok(map.remove(key))
 		} else {
-			Err(LashErr::Low(LashErrLow::InternalErr("Called try_remove() on a non-dict LashVal".into())))
+			Err(ShError::from_internal("Called try_get() on a non-dict LashVal"))
 		}
 	}
 }
@@ -962,13 +962,13 @@ impl VarTable {
 				if let Some(value) = arr.get(index) {
 					Ok(value.clone())
 				} else {
-					Err(LashErr::Low(LashErrLow::ExecFailed(format!("Index `{}` out of range for array `{}`",index,key))))
+					Err(ShError::from_execf(format!("Index `{}` out of range for array `{}`",index,key).as_str(), 1, Span::new()))
 				}
 			} else {
-				Err(LashErr::Low(LashErrLow::ExecFailed(format!("{} is not an array",key))))
+				Err(ShError::from_execf(format!("{} is not an array",key).as_str(), 1, Span::new()))
 			}
 		} else {
-			Err(LashErr::Low(LashErrLow::ExecFailed(format!("{} is not a variable",key))))
+			Err(ShError::from_execf(format!("{} is not a variable",key).as_str(), 1, Span::new()))
 		}
 	}
 }
@@ -1101,11 +1101,11 @@ impl EnvMeta {
 		&self.shopts
 	}
 	pub fn set_shopt(&mut self, key: &str, val: &str) -> LashResult<()> {
-		let val = LashVal::parse(val).map_err(|e| LashErr::Low(LashErrLow::InternalErr(e)))?;
+		let val = LashVal::parse(val).map_err(|e| ShError::from_internal(&e))?;
 		let query = key.split('.').map(|str| str.to_string()).collect::<VecDeque<String>>();
 		self.shopts.set(query,val)
 	}
-	pub fn get_shopt<'a>(&self, key: &str) -> LashResult<String> {
+	pub fn get_shopt(&self, key: &str) -> LashResult<String> {
 		let result = &self.shopts.get(key)?;
 		Ok(result.to_string().trim().to_string())
 	}
@@ -1122,55 +1122,65 @@ pub fn disable_reaping() {
 	unsafe { signal(Signal::SIGCHLD, SigHandler::Handler(crate::signal::ignore_sigchld)) }.unwrap();
 }
 
-pub fn enable_reaping<'a>() -> LashResult<()> {
+pub fn enable_reaping() -> LashResult<()> {
 	write_jobs(|j| j.update_job_statuses())??;
 	unsafe { signal(Signal::SIGCHLD, SigHandler::Handler(crate::signal::handle_sigchld)) }.unwrap();
 	Ok(())
 }
 
-pub fn read_jobs<'a,F,T>(f: F) -> LashResult<T>
+pub fn borrow_var_table() -> LashResult<VarTable> {
+	Ok(VARS.read().map_err(|_| ShError::from_internal("Failed to clone VarTable"))?.clone())
+}
+pub fn borrow_job_table() -> LashResult<JobTable> {
+	Ok(JOBS.read().map_err(|_| ShError::from_internal("Failed to clone VarTable"))?.clone())
+}
+pub fn borrow_env_meta() -> LashResult<EnvMeta> {
+	Ok(META.read().map_err(|_| ShError::from_internal("Failed to clone VarTable"))?.clone())
+}
+
+pub fn read_jobs<F,T>(f: F) -> LashResult<T>
 where F: FnOnce(&JobTable) -> T {
-	let lock = JOBS.read().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
+	let lock = JOBS.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&lock))
 }
 
-pub fn write_jobs<'a,F,T>(f: F) -> LashResult<T>
+pub fn write_jobs<F,T>(f: F) -> LashResult<T>
 where F: FnOnce(&mut JobTable) -> T {
-	let mut lock = JOBS.write().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
+	let mut lock = JOBS.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
 }
 
-pub fn read_vars<'a,F,T>(f: F) -> LashResult<T>
+pub fn read_vars<F,T>(f: F) -> LashResult<T>
 where F: FnOnce(&VarTable) -> T {
-	let lock = VARS.read().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
+	let lock = VARS.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&lock))
 }
-pub fn write_vars<'a,F,T>(f: F) -> LashResult<T>
+pub fn write_vars<F,T>(f: F) -> LashResult<T>
 where F: FnOnce(&mut VarTable) -> T {
-	let mut lock = VARS.write().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
+	let mut lock = VARS.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
 }
-pub fn read_logic<'a,F,T>(f: F) -> LashResult<T>
+pub fn read_logic<F,T>(f: F) -> LashResult<T>
 where F: FnOnce(&LogicTable) -> T {
-	let lock = LOGIC.read().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
+	let lock = LOGIC.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&lock))
 }
-pub fn write_logic<'a,F,T>(f: F) -> LashResult<T>
+pub fn write_logic<F,T>(f: F) -> LashResult<T>
 where F: FnOnce(&mut LogicTable) -> T {
-	let mut lock = LOGIC.write().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
+	let mut lock = LOGIC.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
 }
-pub fn read_meta<'a,F,T>(f: F) -> LashResult<T>
+pub fn read_meta<F,T>(f: F) -> LashResult<T>
 where F: FnOnce(&EnvMeta) -> T {
-	let lock = META.read().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
+	let lock = META.read().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&lock))
 }
-pub fn write_meta<'a,F,T>(f: F) -> LashResult<T>
+pub fn write_meta<F,T>(f: F) -> LashResult<T>
 where F: FnOnce(&mut EnvMeta) -> T {
-	let mut lock = META.write().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
+	let mut lock = META.write().map_err(|_| ShError::from_internal("Failed to obtain write lock; lock might be poisoned"))?;
 	Ok(f(&mut lock))
 }
-pub fn attach_tty<'a>(pgid: Pid) -> LashResult<()> {
+pub fn attach_tty(pgid: Pid) -> LashResult<()> {
 	// Ensure stdin (fd 0) is a tty before proceeding
 	if !isatty(0).unwrap_or(false) || !isatty(1).unwrap_or(false) || !isatty(2).unwrap_or(false) {
 		return Ok(())
@@ -1221,13 +1231,13 @@ pub struct SavedEnv {
 }
 
 impl SavedEnv {
-	pub fn get_snapshot<'a>() -> LashResult<Self> {
+	pub fn get_snapshot() -> LashResult<Self> {
 		let vars = read_vars(|vars| vars.clone())?;
 		let logic = read_logic(|log| log.clone())?;
 		let meta = read_meta(|meta| meta.clone())?;
 		Ok(Self { vars, logic, meta })
 	}
-	pub fn restore_snapshot<'a>(self) -> LashResult<()> {
+	pub fn restore_snapshot(self) -> LashResult<()> {
 		write_vars(|vars| *vars = self.vars)?;
 		write_logic(|log| *log = self.logic)?;
 		write_meta(|meta| *meta = self.meta)?;
@@ -1296,24 +1306,20 @@ fn init_env_vars(clean: bool) -> HashMap<String,String> {
 	env_vars
 }
 
-pub fn check_status<'a>() -> LashResult<String> {
-	Ok(read_vars(|v| v.get_param("?"))?.unwrap_or("0".into()))
-}
-
-pub fn get_cstring_evars<'a>() -> LashResult<Vec<CString>> {
+pub fn get_cstring_evars() -> LashResult<Vec<CString>> {
 	let env = read_vars(|v| v.borrow_evars().clone())?;
 	let env = env.iter().map(|(k,v)| CString::new(format!("{}={}",k,v).as_str()).unwrap()).collect::<Vec<CString>>();
 	Ok(env)
 }
 
-pub fn source_file<'a>(path: PathBuf) -> LashResult<()> {
-	let mut file = File::open(&path).map_err(|_| LashErr::Low(LashErrLow::from_io()))?;
+pub fn source_file(path: PathBuf) -> LashResult<()> {
+	let mut file = File::open(&path).map_err(|_| ShError::from_io())?;
 	let mut buffer = String::new();
-	file.read_to_string(&mut buffer).map_err(|_| LashErr::Low(LashErrLow::from_io()))?;
+	file.read_to_string(&mut buffer).map_err(|_| ShError::from_io())?;
 	write_meta(|meta| meta.set_last_input(&buffer.clone()))?;
 	write_meta(|m| m.flags |= EnvFlags::SOURCING)?;
 
-	let result = exec_list(Rule::main, buffer, None).map(|_| ());
+	let result = event::execute(&buffer, NdFlags::empty(), None, None).map(|_| ());
 	write_meta(|m| m.flags &= !EnvFlags::SOURCING)?;
 	result
 }

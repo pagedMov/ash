@@ -3,8 +3,9 @@ use std::{collections::VecDeque, ffi::c_int, fmt::Display, io, panic::Location, 
 
 use bitflags::Flags;
 use nix::unistd::{getpgrp, isatty, Pid};
+use pest::{iterators::Pair, Parser};
 
-use crate::{execute::{self, LashWait, ProcIO}, interp::{helper, parse::{descend, NdFlags, Node, Span}, token::LashTokenizer}, prompt, shellenv::{self, read_meta, read_vars, write_meta, EnvFlags}, LashResult};
+use crate::{execute::{self, LashWait, ProcIO}, interp::{helper, parse::{descend, NdFlags, Node, Span}, token::{LashPest, LashTokenizer, Rule}}, prompt, shellenv::{self, read_meta, read_vars, write_meta, EnvFlags}, LashResult};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShError {
@@ -250,19 +251,15 @@ pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: 
 		let mut tokenizer = LashTokenizer::new(input);
 
 		loop {
-			let result = descend(&mut tokenizer);
+			let next_input = tokenizer.prepare_input(true)?;
+			let result = LashPest::parse(Rule::main, &next_input);
+			dbg!(&result);
+			/*
 			match result {
-				Ok(mut state) => {
-					if !flags.is_empty() {
-						state.ast.flags |= flags;
-					}
-					if let Some(ref redirs) = redirs {
-						state.ast.redirs = redirs.clone()
-					}
-					let deck = helper::extract_deck_from_root(&state.ast)?;
-					if !deck.is_empty() {
+				Ok(mut ast) => {
+					if !ast.clone().count() == 0 {
 						// Send each deck immediately for execution
-						let result = execute::traverse_ast(state.ast, io.clone());
+						let result = execute::traverse_ast(ast, io.clone());
 						if let Err(e) = result {
 							match e {
 								ShError::CleanExit(_) |
@@ -282,10 +279,11 @@ pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: 
 					}
 				}
 				Err(e) => {
-					throw(e)?;
+					throw(ShError::ParsingError(e.to_string(), Span::new()))?;
 					break
 				}
 			}
+			*/
 		}
 	}
 	Ok(last_status)
