@@ -238,7 +238,7 @@ impl StrExtension for str {
 				_ => result.push(ch),
 			}
 		}
-		result.trim().to_string()
+		result.to_string()
 	}
 
 	fn split_last(&self, pat: &str) -> Option<(String, String)> {
@@ -530,17 +530,19 @@ pub fn is_exec(path: &Path) -> bool {
 		.unwrap_or(false)
 }
 
-pub fn overwrite_func(alias: &str) -> LashResult<()> {
+pub fn write_alias(alias: &str, body: &str) -> LashResult<()> {
 	if read_logic(|l| l.get_func(alias))?.is_some() {
 		write_logic(|l| l.remove_func(alias))?;
 	}
+	write_logic(|l| l.new_alias(alias, body.into()))?;
 	Ok(())
 }
 
-pub fn overwrite_alias(func: &str) -> LashResult<()> {
+pub fn write_func(func: &str, body: &str) -> LashResult<()> {
 	if read_logic(|l| l.get_alias(func))?.is_some() {
 		write_logic(|l| l.remove_alias(func))?;
 	}
+	write_logic(|l| l.new_func(func, body))?;
 	Ok(())
 }
 

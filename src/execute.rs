@@ -5,7 +5,7 @@ use libc::MFD_CLOEXEC;
 use nix::{errno::Errno, fcntl::{fcntl, open, FcntlArg::F_GETFD, OFlag}, sys::{memfd::{memfd_create, MemFdCreateFlag}, signal::Signal, stat::{fstat, Mode}, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
 use pest::{iterators::Pair, Parser};
 
-use crate::{builtin::{self, BUILTINS}, error::LashErrHigh, exec_input, helper::{handle_fg, proc_res, StrExtension}, shellenv::{read_meta, EnvFlags, SavedEnv}};
+use crate::{builtin::{self, BUILTINS}, error::LashErrHigh, exec_input, helper::{handle_fg, proc_res, StrExtension}, shellenv::{read_logic, read_meta, EnvFlags, SavedEnv}, OptPairExt};
 use crate::error::LashErrLow::*;
 use crate::error::LashErr::*;
 use crate::{error::{LashErr, LashErrLow}, exec_list, expand, helper, shellenv::{self, read_vars, write_meta, write_vars, ChildProc, JobBuilder, LashVal}, LashParse, LashResult, PairExt, Rule};
@@ -530,16 +530,10 @@ impl Default for ProcIO {
 	}
 }
 
-pub fn descend(mut node_stack: Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult<()> {
-	ctx.descend()?; // Increment depth counter
-	while let Some(node) = node_stack.pop() {
+fn dispatch_exec<'a>(node: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 		match node.as_rule() {
-			Rule::main | Rule::cmd_list => {
-				let inner = node.to_vec_rev();
-				node_stack.extend(inner);
-			}
 			Rule::simple_cmd => {
-				let command_name = node.clone().into_inner().find(|pair| pair.as_rule() == Rule::cmd_name).unwrap().as_str();
+				let command_name = node.clone().into_inner().find(|pair| pair.as_rule() == Rule::cmd_name).unpack()?.as_str();
 				if BUILTINS.contains(&command_name) {
 					exec_builtin(node,command_name,ctx)?;
 				} else if shellenv::is_func(command_name)? {
@@ -550,9 +544,9 @@ pub fn descend(mut node_stack: Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult
 			}
 			Rule::shell_cmd => {
 				let mut shell_cmd_inner = node.to_vec_rev();
-				let shell_cmd = shell_cmd_inner.pop().unwrap();
+				let shell_cmd = shell_cmd_inner.pop().unpack()?;
 				while shell_cmd_inner.last().is_some_and(|pair| pair.as_rule() == Rule::redir) {
-					let redir = Redir::from_pair(shell_cmd_inner.pop().unwrap())?;
+					let redir = Redir::from_pair(shell_cmd_inner.pop().unpack()?)?;
 					ctx.push_redir(redir);
 				}
 				match shell_cmd.as_rule() {
@@ -563,12 +557,27 @@ pub fn descend(mut node_stack: Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult
 					Rule::subshell => exec_subshell(shell_cmd, ctx)?,
 					Rule::brace_grp => todo!(),
 					Rule::assignment => exec_assignment(shell_cmd, ctx)?,
-					Rule::func_def => todo!(),
+					Rule::func_def => exec_func_def(shell_cmd, ctx)?,
 					_ => unreachable!()
 				};
 			}
+			Rule::pipeline => { exec_pipeline(node, ctx)?; },
+			Rule::EOI => { /* Do nothing */ }
+			_ => todo!("Support for rule '{:?}' is unimplemented",node.as_rule())
+		}
+		Ok(())
+}
+
+pub fn descend(mut node_stack: Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult<()> {
+	ctx.descend()?; // Increment depth counter
+	while let Some(node) = node_stack.pop() {
+		match node.as_rule() {
+			Rule::main | Rule::cmd_list => {
+				let inner = node.to_vec_rev();
+				node_stack.extend(inner);
+			}
 			Rule::op => {
-				let option = node.unpack();
+				let option = node.into_inner().next();
 				if let Some(op) = option {
 					match op.as_rule() {
 						Rule::and => {
@@ -587,9 +596,14 @@ pub fn descend(mut node_stack: Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult
 					}
 				}
 			}
-			Rule::pipeline => { exec_pipeline(node, ctx)?; },
-			Rule::EOI => { /* Do nothing */ }
-			_ => todo!("Support for rule '{:?}' is unimplemented",node.as_rule())
+			Rule::bg_cmd => {
+				if let Some(cmd) = node.into_inner().next() {
+					let flags = ctx.flags_mut();
+					*flags |= ExecFlags::BACKGROUND;
+					dispatch_exec(cmd, ctx)?
+				}
+			}
+			_ => dispatch_exec(node, ctx)?
 		}
 	}
 	ctx.ascend()?; // Decrement depth counter
@@ -599,6 +613,9 @@ pub fn descend(mut node_stack: Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult
 fn exec_func_def<'a>(func_def: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = func_def.clone();
 	let mut inner = func_def.into_inner();
+	let func_name = inner.next().unpack()?;
+	let body = inner.next().unpack()?;
+	helper::write_func(func_name.as_str(), body.as_str().trim_matches(['{','}']).trim())?;
 	Ok(())
 }
 
@@ -607,10 +624,10 @@ fn exec_subshell<'a>(subsh: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> 
 	let mut shebang = None;
 	let body;
 	if inner.peek().is_some_and(|nd| nd.as_rule() == Rule::subshebang) {
-		shebang = Some(inner.next().unwrap().as_str().to_string());
-		body = inner.next().unwrap().as_str();
+		shebang = Some(inner.next().unpack()?.as_str().to_string());
+		body = inner.next().unpack()?.as_str();
 	} else {
-		body = inner.next().unwrap().as_str();
+		body = inner.next().unpack()?.as_str();
 	}
 	if let Some(text) = shebang {
 		shebang = Some(expand::expand_shebang(&text));
@@ -717,14 +734,14 @@ fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 				cmds.push(cmd.as_str().to_string())
 			}
 			Rule::shell_cmd => {
-				let shell_cmd = cmd_check.unpack().unwrap();
+				let shell_cmd = cmd_check.into_inner().next().unpack()?;
 				match shell_cmd.as_rule() {
 					Rule::for_cmd => cmds.push("for".into()),
 					Rule::if_cmd => cmds.push("if".into()),
 					Rule::match_cmd => cmds.push("match".into()),
 					Rule::loop_cmd => {
 						let mut inner = shell_cmd.into_inner();
-						let loop_kind = inner.next().unwrap().as_str();
+						let loop_kind = inner.next().unpack()?.as_str();
 						cmds.push(loop_kind.into());
 					}
 					Rule::subshell => cmds.push("anonymous subshell".into()),
@@ -735,7 +752,7 @@ fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 		}
 
 		let io = ctx.io_mut();
-		*io = ProcIO::from(
+		let pipe_io = ProcIO::from(
 			prev_read_pipe.take().map(|pipe| pipe.mk_shared()),
 			w_pipe.take().map(|pipe| pipe.mk_shared()),
 			io.stderr.clone(), // TODO: implement stderr piping
@@ -754,42 +771,13 @@ fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 				if let Some(mut pipe) = w_pipe {
 					pipe.close().unwrap()
 				}
+
 				write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::IN_SUB_PROC)).unwrap();
-				match node.as_rule() {
-					Rule::simple_cmd => {
-						exec_cmd(node, ctx).unwrap();
-					}
-					Rule::shell_cmd => {
-						if let Some(cmd) = node.unpack() {
-							match cmd.as_rule() {
-								Rule::for_cmd => {
-									exec_for_cmd(cmd, ctx).unwrap();
-								}
-								Rule::loop_cmd => {
-									exec_loop_cmd(cmd, ctx).unwrap();
-								}
-								Rule::if_cmd => {
-									exec_if_cmd(cmd, ctx).unwrap();
-								}
-								Rule::match_cmd => {
-									exec_match_cmd(cmd, ctx).unwrap();
-								}
-								Rule::subshell => todo!(),
-								Rule::brace_grp => todo!(),
-								Rule::assignment => todo!(),
-								Rule::func_def => todo!(),
-								_ => unreachable!()
-							};
-						}
-					}
-					_ => unreachable!()
-				}
+				*io = pipe_io;
+				dispatch_exec(node, ctx)?;
 				std::process::exit(1)
 			}
 			Ok(ForkResult::Parent { child }) => {
-				if first {
-					first = false;
-				}
 				pids.push(child);
 				if let Some(ref mut read_pipe) = prev_read_pipe {
 					read_pipe.close()?;
@@ -820,14 +808,17 @@ fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 			}
 			Err(e) => return Err(High(LashErrHigh::exec_err("Command in pipeline failed", blame)))
 		}
+		if first {
+			first = false;
+		}
 	}
 	Ok(())
 }
 
 fn exec_assignment<'a>(ass: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let mut inner = ass.into_inner();
-	let var_name = inner.next().unwrap().as_str();
-	let var_val = LashVal::parse(inner.next().unwrap().as_str()).unwrap();
+	let var_name = inner.next().unpack()?.as_str();
+	let var_val = LashVal::parse(inner.next().unpack()?.as_str()).unwrap();
 
 	if inner.clone().count() == 0 {
 		// If there are no commands attached, just set the variable
@@ -850,7 +841,7 @@ fn exec_for_cmd<'a>(cmd: Pair<'a,Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
 	*io = ProcIO::from(None, io.stdout.clone(), io.stderr.clone());
 	let mut saved_vars = HashMap::new();
 	let loop_vars = inner.next()
-		.unwrap()
+		.unpack()?
 		.into_inner()
 		.into_iter()
 		.map(|var| var.as_str())
@@ -861,11 +852,11 @@ fn exec_for_cmd<'a>(cmd: Pair<'a,Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
 	}
 	let vars_len = loop_vars.len();
 	let loop_arr = inner.next()
-		.unwrap()
+		.unpack()?
 		.into_inner()
 		.map(|elem| LashVal::parse(elem.as_str()).unwrap())
 		.collect::<Vec<LashVal>>();
-	let loop_body_pair = inner.next().unwrap();
+	let loop_body_pair = inner.next().unpack()?;
 
 	for (i,element) in loop_arr.iter().enumerate() {
 		let var_index = i % vars_len;
@@ -882,7 +873,7 @@ fn exec_for_cmd<'a>(cmd: Pair<'a,Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
 
 fn exec_match_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let mut inner = cmd.into_inner();
-	let match_pat = inner.next().unwrap();
+	let match_pat = inner.next().unpack()?;
 	let mut arms = VecDeque::new();
 
 	while let Some(arm) = inner.next() {
@@ -891,8 +882,8 @@ fn exec_match_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 
 	while let Some(arm) = arms.pop_front() {
 		let mut inner = arm.into_inner();
-		let arm_pat = inner.next().unwrap();
-		let arm_body_pair = inner.next().unwrap();
+		let arm_pat = inner.next().unpack()?;
+		let arm_body_pair = inner.next().unpack()?;
 
 		if arm_pat.as_str().trim() == match_pat.as_str().trim() {
 			let arm_body = expand::expand_list(arm_body_pair)?;
@@ -905,8 +896,8 @@ fn exec_match_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 
 fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let mut inner = cmd.to_vec_rev();
-	let if_cond_pair = inner.pop().unwrap().into_inner().next().unwrap();
-	let if_body_pair = inner.pop().unwrap().into_inner().next().unwrap();
+	let if_cond_pair = inner.pop().unpack()?.into_inner().next().unpack()?;
+	let if_body_pair = inner.pop().unpack()?.into_inner().next().unpack()?;
 	let mut elif_blocks = VecDeque::new();
 	let mut else_block = None;
 	let mut cond_ctx = ctx.as_cond();
@@ -944,8 +935,8 @@ fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 
 	while let Some(elif_block) = elif_blocks.pop_front() {
 		let mut inner = elif_block.into_inner();
-		let elif_cond_pair = inner.next().unwrap();
-		let elif_body_pair = inner.next().unwrap();
+		let elif_cond_pair = inner.next().unpack()?;
+		let elif_body_pair = inner.next().unpack()?;
 
 		let elif_cond = expand::expand_list(elif_cond_pair)?;
 		exec_list(Rule::cmd_list, elif_cond, &mut cond_ctx)?;
@@ -957,7 +948,7 @@ fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	}
 
 	if let Some(else_block) = else_block {
-		let else_body_pair = else_block.into_inner().next().unwrap();
+		let else_body_pair = else_block.into_inner().next().unpack()?;
 		let else_body = expand::expand_list(else_body_pair)?;
 		exec_list(Rule::cmd_list, else_body, &mut body_ctx)?;
 	}
@@ -972,9 +963,9 @@ fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 
 fn exec_loop_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let mut inner = cmd.to_vec_rev();
-	let loop_kind = inner.pop().unwrap();
-	let loop_cond_pair = inner.pop().unwrap().into_inner().next().unwrap();
-	let loop_body_pair = inner.pop().unwrap().into_inner().next().unwrap();
+	let loop_kind = inner.pop().unpack()?;
+	let loop_cond_pair = inner.pop().unpack()?.into_inner().next().unpack()?;
+	let loop_body_pair = inner.pop().unpack()?.into_inner().next().unpack()?;
 	let mut cond_ctx = ctx.as_cond();
 	let mut body_ctx = ctx.as_body();
 	let cond_io = cond_ctx.io_mut();
@@ -1025,7 +1016,22 @@ fn exec_loop_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 }
 
 fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()> {
+	let blame = cmd.clone();
 	match name {
+		"test" | "[" => {
+			let mut argv = cmd.to_vec_rev();
+			argv.pop(); // Ignore the command name
+			let result = proc_res(builtin::test(&mut argv, ctx), blame)?;
+			if result {
+				write_vars(|v| v.set_param("?".into(), "0".into()))?;
+			} else {
+				write_vars(|v| v.set_param("?".into(), "1".into()))?;
+			}
+		}
+		"cd" => builtin::cd(cmd, ctx)?,
+		"alias" => builtin::alias(cmd, ctx)?,
+		"pwd" => builtin::pwd(cmd, ctx)?,
+		"export" => builtin::export(cmd, ctx)?,
 		"echo" => builtin::echo(cmd, ctx)?,
 		_ => unimplemented!("Have not implemented support for builtin `{}` yet",name)
 	};
@@ -1033,29 +1039,53 @@ fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()
 }
 
 fn exec_func(cmd: Pair<Rule>,name: &str,ctx: &mut ExecCtx) -> LashResult<()> {
-	Ok(())
+	let blame = cmd.clone();
+	let argv = cmd.process_args(ctx);
+	let func_name = argv.first().unwrap();
+	let body = read_logic(|l| l.get_func(func_name).unwrap())?;
+	let mut var_table = read_vars(|v| v.clone())?;
+	let snapshot = SavedEnv::get_snapshot()?;
+
+	var_table.reset_params();
+	for arg in argv {
+		var_table.pos_param_pushback(&arg);
+	}
+	write_vars(|v| *v = var_table)?;
+	let result = exec_input(body, ctx);
+	snapshot.restore_snapshot()?;
+
+	// Let's check to see if the function was cut by the return command
+	match &result {
+		Ok(()) => Ok(()),
+		Err(e) => {
+			match e {
+				High(high) => Err(High(high.clone())),
+				Low(low) => {
+					match low {
+						FuncReturn(code) => {
+							write_vars(|v| v.set_param("?".into(), code.to_string()))?;
+							Ok(())
+						}
+						_ => {
+							proc_res(result,blame)
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 fn exec_cmd<'a>(cmd: Pair<Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = cmd.clone();
-	let mut inner = cmd.into_inner();
-	let mut argv = vec![];
-	while let Some(node) = inner.next() {
-		match node.as_rule() {
-			Rule::word | Rule::cmd_name => argv.push(node.as_str().to_string()),
-			Rule::redir => {
-				let redir = Redir::from_pair(node)?;
-				ctx.push_redir(redir);
-			}
-			_ => unreachable!("Rule: {:?}",node.as_rule())
-		}
-	}
+	let argv = cmd.process_args(ctx);
 	let argv = argv.into_iter().map(|arg| CString::new(arg).unwrap()).collect::<Vec<_>>();
+
+	let command = argv.first().unwrap().clone();
 
 	let io = ctx.io_mut();
 	io.route_io()?;
 
-	let command = argv.first().unwrap().clone();
 
 	if SHELL_CMDS.contains(&command.to_str().unwrap()) {
 		return Err(High(LashErrHigh::exec_err(format!("This shell command appears malformed"), blame)))

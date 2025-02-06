@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 
 use error::{LashErr, LashErrHigh, LashErrLow};
-use execute::{ExecCtx, ProcIO, SavedIO};
+use execute::{ExecCtx, ProcIO, Redir, SavedIO};
+use helper::StrExtension;
 use pest::{iterators::{Pair, Pairs}, Parser, Span};
 use pest_derive::Parser;
 
@@ -15,12 +16,29 @@ pub mod signal;
 pub mod expand;
 pub mod builtin;
 
+pub trait OptPairExt<'a> {
+	fn unpack(self) -> LashResult<Pair<'a,Rule>>;
+}
+
+impl<'a> OptPairExt<'a> for Option<Pair<'a,Rule>> {
+	/// There are many places in the lash codebase where we can be reasonably certain that an Option<Pair> will be Some
+	/// However, if we are wrong for whatever reason, it's probably better to not crash the program by calling unwrap()
+	///
+	/// This function is essentially a safe unwrap that returns our error type instead of panicking
+	fn unpack(self) -> LashResult<Pair<'a,Rule>> {
+		if let Some(pair) = self {
+			Ok(pair)
+		} else {
+			Err(LashErr::Low(LashErrLow::InternalErr("Called unpack() on a None value".into())))
+		}
+	}
+}
+
 pub trait PairExt<'a> {
 	fn to_vec(self) -> Vec<Pair<'a,Rule>>;
 	fn to_vec_rev(self) -> Vec<Pair<'a,Rule>>;
 	fn contains_rules(&self, rule: &[Rule]) -> bool;
-	fn unpack(self) -> Option<Pair<'a,Rule>>;
-	fn unpack_count(self, count: usize) -> Option<Pair<'a, Rule>>;
+	fn process_args(&self, ctx: &mut ExecCtx) -> Vec<String>;
 }
 
 impl<'a> PairExt<'a> for Pair<'a,Rule> {
@@ -29,6 +47,22 @@ impl<'a> PairExt<'a> for Pair<'a,Rule> {
 	}
 	fn to_vec_rev(self) -> Vec<Pair<'a,Rule>> {
 		self.into_inner().rev().collect::<Vec<_>>()
+	}
+	/// Automatically process command arguments, sorting words and redirections
+	fn process_args(&self, ctx: &mut ExecCtx) -> Vec<String> {
+		let mut argv = vec![];
+		if self.as_rule() != Rule::simple_cmd {
+			return argv
+		}
+		let inner = self.clone().into_inner();
+		for arg in inner {
+			match arg.as_rule() {
+				Rule::word | Rule::cmd_name | Rule::arg_assign => argv.push(arg.as_str().trim_quotes()),
+				Rule::redir => ctx.push_redir(Redir::from_pair(arg).unwrap()),
+				_ => unreachable!("Unexpected rule: {:?}",arg.as_rule())
+			}
+		}
+		argv
 	}
 	fn contains_rules(&self, rules: &[Rule]) -> bool {
 	  let clone = self.clone();
@@ -43,18 +77,6 @@ impl<'a> PairExt<'a> for Pair<'a,Rule> {
 			}
 		}
 		false
-	}
-	/// These methods are used when a rule follows a structure like `rule1 -> rule2 -> rule3 -> "text"` or something
-	/// Allows you to quickly descend through layers
-	fn unpack(self) -> Option<Pair<'a,Rule>> {
-	  self.into_inner().into_iter().next()
-	}
-	fn unpack_count(self, count: usize) -> Option<Pair<'a, Rule>> {
-		let mut next = Some(self);
-		for _ in 0..count {
-			next = next?.into_inner().into_iter().next();
-		}
-		next
 	}
 }
 

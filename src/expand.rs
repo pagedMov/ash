@@ -2,7 +2,7 @@ use std::{iter::Rev, mem::take};
 
 use pest::{iterators::{Pair, Pairs}, Parser, Span};
 
-use crate::{helper::{self, StrExtension}, shellenv::{read_logic, read_vars, LogicTable, VarTable}, PairExt};
+use crate::{helper::{self, StrExtension}, shellenv::{read_logic, read_vars, LogicTable, VarTable}, OptPairExt, PairExt};
 use crate::{error::{LashErr, LashErrHigh}, LashParse, LashResult, Rule};
 
 //FIXME: This function is most likely a structural weakness. It seems sound now, but something is off-putting about it.
@@ -18,7 +18,7 @@ pub fn expand_list<'a>(list: Pair<'a,Rule>) -> LashResult<String> {
 	let slice = inner.clone().count() == 1;
 
 	for cmd in inner {
-		if cmd.as_rule() == Rule::shell_cmd {
+		if matches!(cmd.as_rule(), Rule::shell_cmd) {
 			result = buffer.clone();
 			continue
 		}
@@ -49,7 +49,6 @@ pub fn expand_list<'a>(list: Pair<'a,Rule>) -> LashResult<String> {
 		// Return just the expanded slice
 		Ok(result)
 	} else {
-		dbg!(&buffer);
 		// Return the entire expanded buffer
 		Ok(buffer)
 	}
@@ -68,6 +67,7 @@ pub fn expand_cmd<'a>(cmd: Pair<'a,Rule>) -> LashResult<String> {
 		Rule::brace_word,
 		Rule::tilde_sub
 	];
+	buffer = alias_pass(buffer)?;
 	for rule in expand_rules {
 		// Expand each rule in order
 		buffer = rule_pass(rule,buffer)?;
@@ -75,10 +75,24 @@ pub fn expand_cmd<'a>(cmd: Pair<'a,Rule>) -> LashResult<String> {
 	Ok(buffer)
 }
 
+pub fn alias_pass<'a>(buffer: String) -> LashResult<String> {
+	let mut result = buffer.clone();
+	let mut list = LashParse::parse(Rule::find_expansions, &buffer).unwrap().next().unpack()?.to_vec();
+	let logic = read_logic(|l| l.clone())?;
+
+	while let Some(word) = list.pop() {
+		if let Some(body) = logic.get_alias(word.as_str()) {
+			let span = word.as_span();
+			result = replace_span(result, span, &body);
+		}
+	}
+	Ok(result)
+}
+
 pub fn rule_pass<'a>(rule: Rule, buffer: String) -> LashResult<String> {
 	// Need to clone buffer here to detach 'result' from the lifetime of 'list'
 	let mut result = buffer.clone();
-	let mut list = LashParse::parse(Rule::find_expansions, &buffer).unwrap().next().unwrap().to_vec();
+	let mut list = LashParse::parse(Rule::find_expansions, &buffer).unwrap().next().unpack()?.to_vec();
 
 	while let Some(word) = list.pop() {
 		if word.contains_rules(&[rule]) {
@@ -87,7 +101,10 @@ pub fn rule_pass<'a>(rule: Rule, buffer: String) -> LashResult<String> {
 				Rule::var_sub => {
 					read_vars(|v| v.get_var(&word.as_str()[1..]))?.unwrap_or_default().to_string()
 				}
-				Rule::param_sub => read_vars(|v| v.get_param(&word.as_str()[1..]))?.unwrap_or_default().to_string(),
+				Rule::param_sub => {
+					let param = read_vars(|v| v.get_param(&word.as_str()[1..]))?.unwrap_or_default().to_string();
+					param
+				}
 				Rule::glob_word => expand_glob(word),
 				Rule::brace_word => expand_brace(word),
 				Rule::cmd_sub => expand_cmd_sub(word),

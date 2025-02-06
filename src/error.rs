@@ -56,10 +56,10 @@ impl Display for LashErr {
 }
 
 /// Simple errors
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum LashErrLow {
 	Parse(String),
-	IoError(std::io::Error),
+	IoError(String),
 	ErrNo(Errno),
 	CmdNotFound(String),
 	BadPermission(String),
@@ -77,7 +77,7 @@ pub enum LashErrLow {
 
 impl LashErrLow {
 	pub fn from_io() -> Self {
-		Self::IoError(std::io::Error::last_os_error())
+		Self::IoError(std::io::Error::last_os_error().to_string())
 	}
 }
 
@@ -101,7 +101,7 @@ impl Display for LashErrLow {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct LashErrHigh {
 	pest_err: String,
 	low_err: LashErrLow
@@ -125,7 +125,7 @@ impl LashErrHigh {
 	}
 
 	pub fn io_err(pair: Pair<Rule>) -> Self {
-		Self::blame(pair, LashErrLow::IoError(std::io::Error::last_os_error()))
+		Self::blame(pair, LashErrLow::IoError(std::io::Error::last_os_error().to_string()))
 	}
 
 	pub fn bad_fd(msg: impl Into<String>, pair: Pair<Rule>) -> Self {

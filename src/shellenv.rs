@@ -906,7 +906,11 @@ impl VarTable {
 
 	// Getters, setters, and unsetters for `params`
 	pub fn get_param(&self, key: &str) -> Option<String> {
-		self.params.get(key).cloned().map(|param| param.to_string())
+		if let Ok(index) = key.parse::<usize>() {
+			self.pos_params.get(index).cloned().map(|param| param.to_string())
+		} else {
+			self.params.get(key).cloned().map(|param| param.to_string())
+		}
 	}
 	pub fn borrow_pos_params(&self) -> &VecDeque<String> {
 		&self.pos_params
