@@ -19,6 +19,7 @@ impl ShOpts {
 			int_comments: true,
 			auto_hist: true,
 			bell_style: 1,
+			max_recurse_depth: 500,
 		};
 		let prompt = ShOptsPrompt {
 			trunc_prompt_path: 4,
@@ -76,6 +77,7 @@ pub struct ShOptsCore {
 	pub int_comments: bool,
 	pub auto_hist: bool,
 	pub bell_style: usize,
+	pub max_recurse_depth: usize,
 }
 
 impl ShOptsCore {
@@ -89,6 +91,7 @@ impl ShOptsCore {
 			"int_comments" => Ok(LashVal::Bool(self.int_comments)),
 			"auto_hist" => Ok(LashVal::Bool(self.auto_hist)),
 			"bell_style" => Ok(LashVal::Int(self.bell_style as i32)),
+			"max_recurse_depth" => Ok(LashVal::Int(self.max_recurse_depth as i32)),
 			_ => Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid core opts key: {}",key))))
 		}
 	}
@@ -128,6 +131,11 @@ impl ShOptsCore {
 			"bell_style" => {
 				self.bell_style = if let LashVal::Int(val) = value { val as usize } else {
 					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.bell_style: {:?}", value))))
+				};
+			}
+			"max_recurse_depth" => {
+				self.max_recurse_depth = if let LashVal::Int(val) = value { val as usize } else {
+					return Err(LashErr::Low(LashErrLow::ExecFailed(format!("Invalid value for core.max_recurse_depth: {:?}", value))))
 				};
 			}
 			_ => {

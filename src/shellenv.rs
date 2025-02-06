@@ -7,7 +7,7 @@ use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::{fs::File, sync::RwLock};
 
-use crate::{error::{LashErr, LashErrLow}, exec_list, helper::{self, VecDequeExtension}, shopt::ShOpts, LashResult, Rule};
+use crate::{error::{LashErr, LashErrLow}, exec_list, execute::ExecCtx, helper::{self, VecDequeExtension}, shopt::ShOpts, LashResult, Rule};
 
 
 #[derive(Debug)]
@@ -90,7 +90,7 @@ bitflags! {
 		const NO_VAR           = 0b00000000000000000000000000000010;
 		const NO_FUNC          = 0b00000000000000000000000000000100;
 		// Context
-		const IN_FUNC          = 0b00000000000000000000000000001000; // Enables the `return` builtin
+		const IN_SUB_PROC      = 0b00000000000000000000000000001000;
 		const INTERACTIVE      = 0b00000000000000000000000000010000;
 		const CLEAN            = 0b00000000000000000000000000100000; // Do not inherit env vars from parent
 		const NO_RC            = 0b00000000000000000000000001000000;
@@ -1214,6 +1214,10 @@ pub fn term_controller() -> Pid {
 	unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) }.unwrap_or(getpgrp())
 }
 
+pub fn in_pipe() -> LashResult<bool> {
+	read_meta(|m| m.flags().contains(EnvFlags::IN_SUB_PROC))
+}
+
 pub struct SavedEnv {
 	vars: VarTable,
 	logic: LogicTable,
@@ -1296,6 +1300,10 @@ fn init_env_vars(clean: bool) -> HashMap<String,String> {
 	env_vars
 }
 
+pub fn is_func(name: &str) -> LashResult<bool> {
+	Ok(read_logic(|l| l.get_func(name))?.is_some())
+}
+
 pub fn check_status<'a>() -> LashResult<String> {
 	Ok(read_vars(|v| v.get_param("?"))?.unwrap_or("0".into()))
 }
@@ -1313,7 +1321,8 @@ pub fn source_file<'a>(path: PathBuf) -> LashResult<()> {
 	write_meta(|meta| meta.set_last_input(&buffer.clone()))?;
 	write_meta(|m| m.flags |= EnvFlags::SOURCING)?;
 
-	let result = exec_list(Rule::main, buffer, None).map(|_| ());
+	let mut ctx = ExecCtx::new();
+	let result = exec_list(Rule::main, buffer, &mut ctx).map(|_| ());
 	write_meta(|m| m.flags &= !EnvFlags::SOURCING)?;
 	result
 }

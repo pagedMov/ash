@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use error::{LashErr, LashErrHigh, LashErrLow};
-use execute::{LashWait, ProcIO};
+use execute::{ExecCtx, ProcIO, SavedIO};
 use pest::{iterators::{Pair, Pairs}, Parser, Span};
 use pest_derive::Parser;
 
@@ -65,18 +65,31 @@ pub type LashResult<T> = Result<T,error::LashErr>;
 pub struct LashParse;
 
 fn main() {
+	let mut ctx = ExecCtx::new();
 	loop {
 		let input = prompt::run_prompt();
 		if &input == "break" { break };
-		let lists = get_cmd_lists(&input).unwrap();
-		for list in lists {
-			let result = exec_list(Rule::cmd_list, list, None);
-			match result {
-				Ok(_) => continue,
-				Err(e) => eprintln!("{}",e)
-			}
+		ctx.push_state().unwrap();
+		let saved_fds = SavedIO::new().unwrap();
+		let result = exec_input(input, &mut ctx);
+		saved_fds.restore().unwrap();
+		ctx.pop_state().unwrap();
+		match result {
+			Ok(_) => continue,
+			Err(e) => eprintln!("{}",e)
 		}
 	}
+}
+
+pub fn exec_input(input: String, ctx: &mut ExecCtx) -> LashResult<()> {
+	let lists = get_cmd_lists(&input);
+	if let Err(e) = lists {
+		return Err(LashErr::Low(LashErrLow::Parse(e.to_string())))
+	}
+	for list in lists.unwrap() {
+		exec_list(Rule::cmd_list, list, ctx)?;
+	}
+	Ok(())
 }
 
 /// Separate and expand logical blocks
@@ -88,16 +101,19 @@ pub fn get_cmd_lists<'a>(input: &'a str) -> LashResult<Vec<String>> {
 	let mut list_bodies = vec![];
 	while let Some(list) = lists.next() {
 		if list.as_rule() == Rule::EOI { break };
-		let expanded = expand::expand_list(list,false)?;
+		let expanded = expand::expand_list(list)?;
 		list_bodies.push(expanded);
 	}
 
 	Ok(list_bodies)
 }
 
-pub fn exec_list<'a>(rule: Rule, input: String, io: Option<ProcIO>) -> LashResult<LashWait> {
+pub fn exec_list<'a>(rule: Rule, input: String, ctx: &mut ExecCtx) -> LashResult<()> {
 	let ast = LashParse::parse(rule, &input).map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?;
-	let mut node_stack = ast.into_iter().collect::<Vec<_>>();
-	let io = io.unwrap_or_default();
-	execute::descend(node_stack, io)
+	let node_stack = ast.into_iter().collect::<Vec<_>>();
+	if node_stack.is_empty() {
+		return Ok(())
+	}
+	let blame_target = node_stack.last().unwrap().clone();
+	helper::proc_res(execute::descend(node_stack, ctx), blame_target)
 }

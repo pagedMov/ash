@@ -63,7 +63,7 @@ pub enum LashErrLow {
 	ErrNo(Errno),
 	CmdNotFound(String),
 	BadPermission(String),
-	BadFD { context: String, fd: i32 },
+	BadFD(String),
 	InvalidSyntax(String),
 	InternalErr(String),
 	ExecFailed(String),
@@ -72,7 +72,7 @@ pub enum LashErrLow {
 	CleanExit(i32),
 	FuncReturn(i32),
 	LoopCont,
-	LoopBreak,
+	LoopBreak(i32),
 }
 
 impl LashErrLow {
@@ -87,7 +87,7 @@ impl Display for LashErrLow {
 			LashErrLow::Parse(msg) => write!(f,"Parse Error: {}",msg),
 			LashErrLow::IoError(error) => write!(f,"I/O Error: {}",error.to_string()),
 			LashErrLow::ErrNo(no) => write!(f,"ERRNO: {}",no.to_string()),
-			LashErrLow::BadFD { context, fd } => write!(f,"{}: {}",context, fd.to_string()),
+			LashErrLow::BadFD(msg) => write!(f,"{}",msg),
 			LashErrLow::InvalidSyntax(msg) => write!(f,"Syntax Error: {}",msg),
 			LashErrLow::InternalErr(msg) => write!(f,"Internal Error: {}",msg),
 			LashErrLow::ExecFailed(msg) => write!(f,"Execution Failed: {}",msg),
@@ -96,7 +96,7 @@ impl Display for LashErrLow {
 			LashErrLow::CleanExit(_) |
 			LashErrLow::FuncReturn(_) |
 			LashErrLow::LoopCont |
-			LashErrLow::LoopBreak => write!(f, ""),
+			LashErrLow::LoopBreak(_) => write!(f, ""),
 		}
 	}
 }
@@ -128,8 +128,8 @@ impl LashErrHigh {
 		Self::blame(pair, LashErrLow::IoError(std::io::Error::last_os_error()))
 	}
 
-	pub fn bad_fd(context: impl Into<String>, fd: i32, pair: Pair<Rule>) -> Self {
-		Self::blame(pair, LashErrLow::BadFD{ context: context.into(), fd })
+	pub fn bad_fd(msg: impl Into<String>, pair: Pair<Rule>) -> Self {
+		Self::blame(pair, LashErrLow::BadFD(msg.into()))
 	}
 
 	pub fn cmd_not_found(name: impl Into<String>, pair: Pair<Rule>) -> Self {

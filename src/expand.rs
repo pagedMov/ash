@@ -2,17 +2,20 @@ use std::{iter::Rev, mem::take};
 
 use pest::{iterators::{Pair, Pairs}, Parser, Span};
 
-use crate::{shellenv::{read_logic, read_vars, LogicTable, VarTable}, PairExt};
+use crate::{helper::{self, StrExtension}, shellenv::{read_logic, read_vars, LogicTable, VarTable}, PairExt};
 use crate::{error::{LashErr, LashErrHigh}, LashParse, LashResult, Rule};
 
 //FIXME: This function is most likely a structural weakness. It seems sound now, but something is off-putting about it.
 // This currently works by expanding words *before* execution, but looking into some kind of JIT method also seems reasonable
 // And way less error prone
-pub fn expand_list<'a>(list: Pair<'a,Rule>, slice: bool) -> LashResult<String> {
+pub fn expand_list<'a>(list: Pair<'a,Rule>) -> LashResult<String> {
 	let mut buffer = list.get_input().to_string();
 	let mut result = String::new();
 	let input_len = buffer.len();
 	let inner = list.into_inner().rev();
+	// We check to see if we are in a command chain here
+	// If we are, we return the whole input instead of just a slice
+	let slice = inner.clone().count() == 1;
 
 	for cmd in inner {
 		if cmd.as_rule() == Rule::shell_cmd {
@@ -31,23 +34,22 @@ pub fn expand_list<'a>(list: Pair<'a,Rule>, slice: bool) -> LashResult<String> {
 		let span_end = if delta > 0 {
 			span.end() + delta as usize
 		} else if delta < 0 {
-			span.end().saturating_sub(delta.abs() as usize)
+			span.end().saturating_sub(delta.unsigned_abs() as usize)
 		} else {
 			span.end()
 		};
 
 		// Get just the expanded slice from result
 		result = result[span.start()..span_end].to_string();
-		dbg!(&result);
 		// Reset the buffer with the newly expanded string
 		buffer = replace_span(buffer,span,&result);
-		dbg!(&buffer);
 
 	}
 	if slice {
 		// Return just the expanded slice
 		Ok(result)
 	} else {
+		dbg!(&buffer);
 		// Return the entire expanded buffer
 		Ok(buffer)
 	}
@@ -131,6 +133,17 @@ fn expand_tilde(pair: Pair<Rule>) -> String {
 	todo!()
 }
 
+pub fn expand_shebang(shebang: &str) -> String {
+	let mut command = shebang.trim_start_matches("#!").trim().to_string();
+	if command.has_unescaped("/") {
+		return format!("{}{command}{}","#!","\n");
+	}
+	if let Some(path) = helper::which(&command) {
+		return format!("{}{path}{}","#!","\n");
+	} else {
+		return shebang.to_string()
+	}
+}
 
 pub fn replace_span(buffer: String, pos: Span, replace: &str) -> String {
 	let start = pos.start();

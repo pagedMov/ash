@@ -1,5 +1,6 @@
+// Helper rules
 WHITESPACE = _{ " " | "\t" }
-COMMENT = { "#" ~ (!(NEWLINE|"#") ~ ANY)* }
+COMMENT = _{ !"#!" ~ "#" ~ (!(NEWLINE|"#") ~ ANY)* }
 number = { ASCII_DIGIT+ }
 parameter = { "#" | ASCII_DIGIT+ | "@" | "*" | "?" | "$" | "!" | "_" | "-" }
 glob_brackets = { !"\\[" ~ "[" ~ (!("]"|","|WHITESPACE|NEWLINE) ~ ANY)* ~ "]" }
@@ -13,10 +14,34 @@ path_seg = @{ path_root | path_rel }
 path_root = { ("/" ~ ident)+ }
 path_rel = { (ident ~ "/")+ }
 
-//
-operator = _{ WHITESPACE* ~ ("|" | "&&" | "|&" | ">" | "<" | "<<" | "<<<" | ">>" | ">|" | ">>|" | "<>" | "&") ~ WHITESPACE* }
-find_expansions = { (WHITESPACE|NEWLINE|word|operator)* }
 
+// Rules for the expansion phase of the parsing
+operator = _{
+	WHITESPACE* ~
+	("|" |
+	"&&" |
+	"|&" |
+	">" |
+	"<" |
+	"<<" |
+	"<<<" |
+	">>" |
+	">|" |
+	">>|" |
+	"<>" |
+	"&"
+	) ~ WHITESPACE*
+}
+find_expansions = { (WHITESPACE|NEWLINE|word|operator)* }
+glob_word = @{ ident ~ glob_pat+ ~ ident? | glob_pat+ ~ ident? }
+param_sub = { "$" ~ parameter }
+tilde_sub = @{ pwd | prev_pwd | (home ~ path_seg?) }
+brace_word = @{ ident ~ brace_expand+ ~ ident? | brace_expand+ ~ ident? }
+var_sub = @{ !"\\$" ~ "$" ~ ident }
+cmd_sub = ${ !"\\$" ~ "$" ~ subshell }
+
+
+// Types of generic words
 dqt = _{ "\"" }
 sqt = _{ "'" }
 home = { "~" }
@@ -27,34 +52,96 @@ string_body = { ("\\\""|!"\"" ~ ANY)* }
 dquoted = _{ dqt ~ string_body ~ dqt }
 squoted = _{ sqt ~ string_body ~ sqt }
 var_ident = @{ NEWLINE* ~ !parameter ~ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | "-")* }
-ident = _{ (("\\" ~ ANY) | (!out ~ !in ~ ASCII_ALPHANUMERIC | "\"" | "'" | "_" | "-" | "!" | "%" | "+" | "=" | "\\" | "/" | "," | "." | ":" | "@" ))+ }
-glob_word = @{ ident ~ glob_pat+ ~ ident? | glob_pat+ ~ ident? }
-param_sub = { "$" ~ parameter }
-tilde_sub = @{ pwd | prev_pwd | (home ~ path_seg?) }
-brace_word = @{ ident ~ brace_expand+ ~ ident? | brace_expand+ ~ ident? }
+ident = _{
+	(("\\" ~ ANY) |
+	(!out ~ !in ~ ASCII_ALPHANUMERIC |
+		"\"" |
+		"'" |
+		"_" |
+		"-" |
+		"!" |
+		"%" |
+		"+" |
+		"=" |
+		"\\" |
+		"/" |
+		"," |
+		"." |
+		":" |
+		"@"
+	))+
+}
 cmd_name = @{ word }
-word = ${ dquoted | squoted | param_sub | var_sub | cmd_sub | proc_sub | glob_word | brace_word | tilde_sub | ident }
+word = ${
+	dquoted |
+	squoted |
+	param_sub |
+	var_sub |
+	cmd_sub |
+	proc_sub |
+	glob_word |
+	brace_word |
+	tilde_sub |
+	ident
+}
 word_list = { word ~ (NEWLINE* ~ word)* }
-assignment = ${ #name = var_ident ~ "=" ~ word? ~ (expr)? }
-arg_assign = ${ #name = var_ident ~ "=" ~ word? }
-var_sub = @{ !"\\$" ~ "$" ~ ident }
-cmd_sub = ${ !"\\$" ~ "$" ~ subshell }
+assignment = { var_ident ~ "=" ~ word? ~ cmd_list? }
+arg_assign = ${ var_ident ~ "=" ~ word? }
 sep = _{ (";" | NEWLINE)+ }
 
-simple_cmd_part = { proc_sub | redir | word }
+
+// Types of commands
+cmd_list = { (bg_cmd|expr) ~ (#op = op ~ (bg_cmd|expr))* }
 simple_cmd = { (redir|cmd_name) ~ (redir | (arg_assign | word | redir))* }
-bg_cmd = { expr ~ "&" }
+bg_cmd = { expr ~ !"&&" ~  "&" ~ word_bound }
+pipeline = { (shell_cmd | simple_cmd) ~ ("|" ~ (shell_cmd | simple_cmd))+ }
+expr = _{ pipeline | shell_cmd | assignment | simple_cmd }
+shell_cmd = {
+	(for_cmd |
+	match_cmd |
+	loop_cmd |
+	if_cmd |
+	subshell |
+	brace_grp |
+    assignment |
+	func_def) ~ redir*
+}
 
-pipeline = { ((shell_cmd ~ redir_list?) | simple_cmd) ~ ("|" ~ ((shell_cmd ~ redir_list?) | simple_cmd))+ }
-expr = _{ pipeline | ((shell_cmd ~ redir_list?) | assignment | simple_cmd) }
+subshebang = @{ "#!" ~ (!NEWLINE ~ ANY)+ ~ NEWLINE }
+subsh_body = @{ (nested|non_paren)+ }
+nested = _{ "(" ~ subsh_body* ~ ")"? }
+non_paren = _{ (!"(" ~ !")" ~ ANY)+ }
+subshell = { "(" ~ subshebang? ~ subsh_body ~ ")" ~ (redir | (arg_assign | word | redir))* }
+proc_sub = { (in | out) ~ "(" ~ subsh_body ~ ")" }
 
+if_cond = { cmd_list }
+loop_cond = { cmd_list }
+if_body = { (!("fi" | "elif" | "else") ~ cmd_list ~ sep)+ }
+loop_body = { (!"done" ~ cmd_list ~ sep)+ }
+
+loop_kind = { "while" | "until" }
+loop_cmd = { loop_kind ~ NEWLINE* ~ loop_cond ~ sep ~ "do" ~ NEWLINE* ~ loop_body ~ "done" ~ word_bound }
+
+for_vars = { (!"in" ~ word ~ NEWLINE*)+ }
+for_arr = { (word ~ NEWLINE*)+ }
+for_cmd = { "for" ~ NEWLINE* ~ for_vars ~ "in" ~ NEWLINE* ~ for_arr+ ~ sep ~ "do" ~ NEWLINE* ~ loop_body ~ NEWLINE* ~ "done" ~ word_bound }
+
+match_pat = { (!"=>" ~ word)+ }
+match_body = { (brace_grp ~ ","? | (!"," ~ ANY)+ ~ ",") }
+match_arm = { match_pat ~ "=>" ~ NEWLINE* ~ match_body }
+match_cmd = {
+	"match" ~ word ~ NEWLINE* ~ "in" ~ NEWLINE* ~ match_arm ~ (NEWLINE* ~ match_arm)* ~ NEWLINE* ~ "done" ~ word_bound
+}
+
+if_cmd = { "if" ~ if_cond ~ sep ~ "then" ~ NEWLINE* ~ if_body ~ elif_block* ~ else_block? ~ "fi" ~ word_bound }
+elif_block = { "elif" ~ if_cond ~ sep ~ "then" ~ NEWLINE* ~ if_body }
+else_block = { "else" ~ NEWLINE* ~ (!("fi") ~ #else_body = cmd_list ~ sep)+ }
+
+
+// Operator stuff
 and = { "&&" }
 or = { "||" }
 op = { (and|or) }
-
-cmd_list = {
-	(bg_cmd|expr) ~ (#op = op ~ (bg_cmd|expr))*
-}
 
 redir_list = { redir ~ (redir)* }
 fd_out = @{ number }
@@ -92,46 +179,69 @@ redir = {
 }
 
 
-shell_cmd = {
-	for_cmd |
-	match_cmd |
-	loop_cmd |
-	if_cmd |
-	subshell |
-	brace_grp |
-    assignment |
-	func_def
+// Prompt Parsing
+prompt = { (raw_text|esc_sequence)* }
+raw_text = _{ WHITESPACE* ~ (!"\\" ~ ANY)+ ~ WHITESPACE* }
+ascii_oct_seq = { ASCII_OCT_DIGIT ~ ASCII_OCT_DIGIT? ~ ASCII_OCT_DIGIT? }
+ansi_params = { ASCII_DIGIT+ ~ (";" ~ ASCII_DIGIT+ )* }
+custom_esc_seg = { (!("." | "\\{" | "\\}") ~ ANY)+ }
+custom_esc_path = ${ custom_esc_seg ~ ("." ~ custom_esc_seg)* }
+esc_sequence = {
+	esc_bell |
+	esc_vis_grp |
+	esc_user_seq |
+	esc_ansi_seq  |
+	esc_ascii_oct |
+	esc_12hour_short |
+	esc_24hour_short |
+	esc_runtime |
+	esc_12hour |
+	esc_24hour |
+	esc_weekday |
+	esc_dquote |
+	esc_squote |
+	esc_return |
+	esc_newline |
+	esc_pwd |
+	esc_pwd_short |
+	esc_hostname |
+	esc_hostname_short |
+	esc_shellname |
+	esc_username |
+	esc_prompt_symbol |
+	esc_exit_code |
+	esc_success_symbol |
+	esc_failure_symbol
 }
+esc_pwd = { "\\w" }
+esc_pwd_short = { "\\W" }
+esc_hostname = { "\\H" }
+esc_hostname_short = { "\\h" }
+esc_shellname = { "\\s" }
+esc_username = { "\\u" }
+esc_prompt_symbol = @{ "\\$" }
+esc_exit_code = { "\\?" }
+esc_success_symbol = { "\\S" }
+esc_failure_symbol = { "\\F" }
+esc_bell = { "\\a" }
+esc_newline = { "\\n" }
+esc_return = { "\\r" }
+esc_backslash = { "\\" }
+esc_squote = { "'" }
+esc_dquote = { "\"" }
+esc_weekday = { "\\d" }
+esc_24hour = { "\\t" }
+esc_12hour = { "\\T" }
+esc_runtime = { "\\D" }
+esc_24hour_short = { "\\A" }
+esc_12hour_short = { "\\@" }
+esc_ascii_oct = ${ "\\" ~ ascii_oct_seq }
+esc_ansi_seq  = { "\\e" ~ "[" ~ ansi_params ~ ASCII_ALPHA }
+esc_user_seq = ${ "\\{" ~ custom_esc_path ~ "\\}" }
+esc_vis_grp = { "\\(" ~ (raw_text|esc_sequence)* ~ "\\)" }
 
-subsh_body = @{ (nested|non_paren)+ }
-nested = _{ "(" ~ subsh_body* ~ ")"? }
-non_paren = _{ (!"(" ~ !")" ~ ANY)+ }
-subshell = { "(" ~ #body = subsh_body ~ ")" }
-proc_sub = { (in | out) ~ "(" ~ subsh_body ~ ")" }
 
-if_cond = { cmd_list }
-loop_cond = { cmd_list }
-if_body = { (!("fi" | "elif" | "else") ~ cmd_list ~ sep)+ }
-loop_body = { (!"done" ~ cmd_list ~ sep)+ }
-
-loop_kind = { "while" | "until" }
-loop_cmd = { loop_kind ~ NEWLINE* ~ loop_cond ~ sep ~ "do" ~ NEWLINE* ~ loop_body ~ "done" ~ word_bound }
-
-for_vars = { (!"in" ~ word ~ NEWLINE*)+ }
-for_arr = { (word ~ NEWLINE*)+ }
-for_cmd = { "for" ~ NEWLINE* ~ for_vars ~ "in" ~ NEWLINE* ~ for_arr+ ~ sep ~ "do" ~ NEWLINE* ~ loop_body ~ NEWLINE* ~ "done" ~ word_bound }
-
-match_pat = { (!"=>" ~ word)+ }
-match_body = { (brace_grp ~ ","? | (!"," ~ ANY)+ ~ ",") }
-match_arm = { match_pat ~ "=>" ~ NEWLINE* ~ match_body }
-match_cmd = {
-	"match" ~ word ~ NEWLINE* ~ "in" ~ NEWLINE* ~ match_arm ~ (NEWLINE* ~ match_arm)* ~ NEWLINE* ~ "done" ~ word_bound
-}
-
-if_cmd = { "if" ~ if_cond ~ sep ~ "then" ~ NEWLINE* ~ if_body ~ elif_block* ~ else_block? ~ "fi" ~ word_bound }
-elif_block = { "elif" ~ if_cond ~ sep ~ "then" ~ NEWLINE* ~ if_body }
-else_block = { "else" ~ NEWLINE* ~ (!("fi") ~ #else_body = cmd_list ~ sep)+ }
-
+// Misc rules
 func_def = { word ~ "()" ~ NEWLINE* ~ brace_grp }
 
 brace_grp = { "{" ~ sub_main ~ "}" }

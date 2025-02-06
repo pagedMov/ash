@@ -3,7 +3,7 @@ use pest::{error::ErrorVariant, iterators::Pair, RuleType};
 use serde_json::Value;
 use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, f32::INFINITY, fs, io::{self, Read}, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread, time::Duration};
 
-use crate::{error::{LashErr, LashErrHigh, LashErrLow}, shellenv::{attach_tty, disable_reaping, enable_reaping, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, HashFloat, Job, LashVal}, LashResult, Rule};
+use crate::{error::{LashErr, LashErrHigh, LashErrLow}, shellenv::{self, attach_tty, disable_reaping, enable_reaping, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, HashFloat, Job, LashVal}, LashResult, Rule};
 
 
 #[macro_export]
@@ -570,7 +570,8 @@ pub fn set_last_status<'a>(status: &WaitStatus) -> LashResult<()> {
 	Ok(())
 }
 
-pub fn handle_fg<'a>(job: Job) -> LashResult<()> {
+pub fn handle_fg(job: Job) -> LashResult<()> {
+	attach_tty(job.pgid())?;
 	disable_reaping();
 	let statuses = write_jobs(|j| j.new_fg(job))??;
 	for status in statuses {
@@ -674,7 +675,7 @@ pub fn handle_prompt_hidegroup<'a>() -> LashResult<String> {
 }
 
 pub fn format_cmd_runtime(dur: Duration) -> String {
-	const ETERNITY: u64 = INFINITY as u64;
+	const ETERNITY: u64 = f32::INFINITY as u64;
 	let mut seconds    = dur.as_secs();
 	let mut minutes    = 0;
 	let mut hours      = 0;
@@ -737,7 +738,7 @@ pub fn format_cmd_runtime(dur: Duration) -> String {
 		aeons = epochs / 1000;
 		epochs %= aeons;
 	}
-	if aeons >= ETERNITY {
+	if aeons == ETERNITY {
 		eternities = aeons / ETERNITY;
 		aeons %= ETERNITY;
 	}

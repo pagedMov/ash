@@ -1,11 +1,11 @@
 use core::fmt;
-use std::{collections::{HashMap, VecDeque}, env, ffi::CString, fmt::Display, os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd}, path::Path, sync::{Arc, Mutex}};
+use std::{collections::{HashMap, HashSet, VecDeque}, env, ffi::CString, fmt::Display, os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd}, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard}};
 
 use libc::MFD_CLOEXEC;
-use nix::{errno::Errno, fcntl::{open, OFlag}, sys::{memfd::{memfd_create, MemFdCreateFlag}, signal::Signal, stat::Mode, wait::WaitStatus}, unistd::{close, dup, dup2, execvpe, fork, pipe, ForkResult, Pid}};
+use nix::{errno::Errno, fcntl::{fcntl, open, FcntlArg::F_GETFD, OFlag}, sys::{memfd::{memfd_create, MemFdCreateFlag}, signal::Signal, stat::{fstat, Mode}, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
 use pest::{iterators::Pair, Parser};
 
-use crate::error::LashErrHigh;
+use crate::{builtin::{self, BUILTINS}, error::LashErrHigh, exec_input, helper::{handle_fg, proc_res, StrExtension}, shellenv::{read_meta, EnvFlags, SavedEnv}};
 use crate::error::LashErrLow::*;
 use crate::error::LashErr::*;
 use crate::{error::{LashErr, LashErrLow}, exec_list, expand, helper, shellenv::{self, read_vars, write_meta, write_vars, ChildProc, JobBuilder, LashVal}, LashParse, LashResult, PairExt, Rule};
@@ -18,6 +18,189 @@ const SHELL_CMDS: [&str;6] = [
 	"until",
 	"if"
 ];
+
+bitflags::bitflags! {
+	#[derive(Debug,Clone,Copy)]
+	pub struct ExecFlags: u32 {
+		const NO_FORK    = 0b00000000000000000000000000000001;
+		const BACKGROUND = 0b00000000000000000000000000000010;
+	}
+}
+
+#[derive(Debug,Clone)]
+pub struct ExecCtx {
+	io: ProcIO,
+	redir_queue: Vec<Redir>,
+	flags: ExecFlags,
+	last_status: i32,
+	depth: usize,
+	state_stack: Vec<Box<ExecCtx>>,
+	max_recurse_depth: usize
+}
+
+impl ExecCtx {
+	pub fn new() -> Self {
+		let last_status = shellenv::check_status().unwrap().parse::<i32>().unwrap();
+		Self {
+			io: ProcIO::new(),
+			redir_queue: vec![],
+			flags: ExecFlags::empty(),
+			last_status,
+			depth: 0,
+			state_stack: vec![], // Each alteration is local to a single layer of recursion
+			max_recurse_depth: read_meta(|m| m.get_shopt("core.max_recurse_depth")).unwrap().unwrap().parse::<usize>().unwrap()
+		}
+	}
+	/// Creates a new instance of ExecCtx which retains only the standard input of the original
+	/// Used in shell structures like `if` and `while` to direct input to the condition
+	pub fn as_cond(&self) -> Self {
+		let mut clone = self.clone();
+		let io = clone.io_mut();
+		*io = ProcIO::from(io.stdin.clone(), None, None);
+		clone.redir_queue.retain(|rdr| {
+			matches!(rdr.redir_type(), Rule::r#in | Rule::herestring | Rule::heredoc)
+		});
+		clone
+	}
+	/// Creates a new instance of ExecCtx which retains only the stdout and stderr of the original
+	/// Used in shell structures like `if` and `while` to direct output from the body
+	pub fn as_body(&self) -> Self {
+		let mut clone = self.clone();
+		let io = clone.io_mut();
+		*io = ProcIO::from(None, io.stdout.clone(), io.stderr.clone());
+		clone.redir_queue.retain(|rdr| {
+			!matches!(rdr.redir_type(), Rule::r#in | Rule::herestring | Rule::heredoc)
+		});
+		clone
+	}
+	pub fn refresh(&mut self) -> LashResult<()> {
+		*self = ExecCtx::new();
+		Ok(())
+	}
+	pub fn push_state(&mut self) -> LashResult<()> {
+		let saved_state = Box::new(self.clone());
+		self.state_stack.push(saved_state);
+		Ok(())
+	}
+	pub fn pop_state(&mut self) -> LashResult<()> {
+		if let Some(state) = self.state_stack.pop() {
+			*self = *state;
+		}
+		Ok(())
+	}
+	pub fn set_io(&mut self, io: ProcIO) {
+		self.io = io
+	}
+	pub fn ascend(&mut self) -> LashResult<()> {
+		self.pop_state()?;
+		self.depth = self.depth.saturating_sub(1);
+		Ok(())
+	}
+	pub fn descend(&mut self) -> LashResult<()> {
+		self.push_state()?;
+		self.depth += 1;
+		if self.depth >= self.max_recurse_depth {
+			Err(Low(LashErrLow::InternalErr(format!("Hit maximum recursion depth during execution: {}",self.max_recurse_depth))))
+		} else {
+			Ok(())
+		}
+	}
+	pub fn depth(&self) -> usize {
+		self.depth
+	}
+	pub fn flags_mut(&mut self) -> &mut ExecFlags {
+		&mut self.flags
+	}
+	pub fn flags(&self) -> ExecFlags {
+		self.flags
+	}
+	pub fn io_mut(&mut self) -> &mut ProcIO {
+		&mut self.io
+	}
+	pub fn set_redirs(&mut self, redirs: Vec<Redir>) {
+		self.redir_queue = redirs
+	}
+	pub fn push_redir(&mut self,redir: Redir) {
+		self.redir_queue.push(redir)
+	}
+	pub fn pop_redir(&mut self) -> Option<Redir> {
+		self.redir_queue.pop()
+	}
+	pub fn redirs(&mut self) -> Vec<Redir> {
+		let redirs = self.redir_queue.clone();
+		// Let's reverse it so that pop() takes them in the right order
+		redirs.into_iter().rev().collect::<Vec<_>>()
+	}
+	pub fn update_status(&mut self) -> LashResult<()> {
+		let status = shellenv::check_status()?;
+		self.last_status = status.parse::<i32>().unwrap();
+		Ok(())
+	}
+}
+
+#[derive(Debug,Clone)]
+pub struct Redir {
+	redir_type: Rule,
+	source: i32,
+	fd_target: Option<i32>,
+	file_target: Option<PathBuf>
+}
+
+impl Redir {
+	pub fn from_pair(pair: Pair<Rule>) -> LashResult<Self> {
+		if let Rule::redir = pair.as_rule() {
+			let mut inner = pair.into_inner();
+			let mut redir_type = None;
+			let mut source = None;
+			let mut fd_target = None;
+			let mut file_target = None;
+			while let Some(pair) = inner.next() {
+				match pair.as_rule() {
+					Rule::fd_out => {
+						let fd = pair.as_str().parse::<i32>().unwrap();
+						source = Some(fd);
+					}
+					Rule::file => {
+						let path = PathBuf::from(pair.as_str());
+						file_target = Some(path);
+					}
+					Rule::fd_target => {
+						let fd = pair.as_str().parse::<i32>().unwrap();
+						fd_target = Some(fd);
+					}
+					Rule::r#in |
+					Rule::out |
+					Rule::force_out |
+					Rule::in_out |
+					Rule::append |
+					Rule::heredoc |
+					Rule::herestring => redir_type = Some(pair.as_rule()),
+					_ => unreachable!()
+				}
+			}
+			let source = source.unwrap_or(match redir_type.unwrap() {
+				Rule::r#in |
+				Rule::herestring |
+				Rule::heredoc => 0,
+				_ => 1
+			});
+
+			Ok(
+				Self {
+					redir_type: redir_type.unwrap(),
+					source,
+					fd_target,
+					file_target
+				}
+			)
+		} else {
+			Err(Low(LashErrLow::InternalErr(format!("Expected a redir rule in redir construction got this: {:?}", pair.as_rule()))))
+		}
+	}
+	fn redir_type(&self) -> Rule {
+		self.redir_type
+	}
+}
 
 #[derive(Hash, Eq, PartialEq, Debug)]
 pub struct RustFd {
@@ -54,10 +237,7 @@ impl<'a> RustFd {
 	pub fn from_fd<T: AsFd>(fd: T) -> LashResult<Self> {
 		let raw_fd = fd.as_fd().as_raw_fd();
 		if raw_fd < 0 {
-			return Err(LashErr::Low(LashErrLow::BadFD {
-				context: "Attempted to create a RustFd from a negative int".into(),
-				fd: raw_fd
-			}))
+			return Err(LashErr::Low(LashErrLow::BadFD("Attempted to create a RustFd from a negative int".into())))
 		}
 		Ok(RustFd { fd: raw_fd })
 	}
@@ -66,10 +246,7 @@ impl<'a> RustFd {
 	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> LashResult<Self> {
 		let raw_fd = fd.into_raw_fd(); // Consumes ownership
 		if raw_fd < 0 {
-			return Err(LashErr::Low(LashErrLow::BadFD {
-				context: "Attempted to create a RustFd from a negative int".into(),
-				fd: raw_fd
-			}))
+			return Err(LashErr::Low(LashErrLow::BadFD("Attempted to create a RustFd from a negative int".into())))
 		}
 		Ok(RustFd { fd: raw_fd })
 	}
@@ -101,10 +278,7 @@ impl<'a> RustFd {
 
 	pub fn read(&self) -> LashResult< String> {
 		if !self.is_valid() {
-			return Err(LashErr::Low(LashErrLow::BadFD {
-				context: "Attempted to read from an invalid RustFd".into(),
-				fd: self.fd
-			}))
+			return Err(LashErr::Low(LashErrLow::BadFD("Attempted to read from an invalid RustFd".into())))
 		}
 		let mut buffer = [0; 1024];
 		let mut output = String::new();
@@ -132,10 +306,7 @@ impl<'a> RustFd {
 	/// Produce a `RustFd` that points to the same resource as the 'self' `RustFd`
 	pub fn dup(&self) -> LashResult<Self> {
 		if !self.is_valid() {
-			return Err(LashErr::Low(LashErrLow::BadFD {
-				context: "Attempted to call `dup()` on an invalid RustFd".into(),
-				fd: self.fd
-			}))
+			return Err(LashErr::Low(LashErrLow::BadFD("Attempted to call `dup()` on an invalid RustFd".into())))
 		}
 		let new_fd = dup(self.fd).unwrap();
 		Ok(RustFd { fd: new_fd })
@@ -149,10 +320,7 @@ impl<'a> RustFd {
 			return Ok(())
 		}
 		if !self.is_valid() || target_fd < 0 {
-			return Err(LashErr::Low(LashErrLow::BadFD {
-				context: "Attempted to call `dup2()` on an invalid RustFd".into(),
-				fd: self.fd
-			}))
+			return Err(LashErr::Low(LashErrLow::BadFD("Attempted to call `dup2()` on an invalid RustFd".into())))
 		}
 
 		dup2(self.fd, target_fd).unwrap();
@@ -161,14 +329,23 @@ impl<'a> RustFd {
 
 	/// Open a file using a file descriptor, with the given OFlags and Mode bits
 	pub fn open(path: &Path, flags: OFlag, mode: Mode) -> LashResult<Self> {
-		let file_fd: RawFd = open(path, flags, mode).unwrap();
-		Ok(Self { fd: file_fd })
+		let file_fd = open(path, flags, mode);
+		if let Ok(file_fd) = file_fd {
+			Ok(Self { fd: file_fd })
+		} else {
+			return Err(Low(LashErrLow::BadFD(format!("Attempted to open non-existant file '{}'",path.to_str().unwrap()))))
+		}
 	}
 
 	pub fn close(&mut self) -> LashResult<()> {
 		if !self.is_valid() {
 			return Ok(())
 		}
+		if matches!(self.as_raw_fd(), 0 | 1 | 2) {
+			self.fd = -1;
+			return Ok(())
+		}
+
 		close(self.fd).unwrap();
 		self.fd = -1;
 		Ok(())
@@ -217,75 +394,26 @@ impl FromRawFd for RustFd {
 	}
 }
 
-#[derive(PartialEq,Debug,Clone)]
-pub enum LashWait {
-	Success,
-	Fail { code: i32, cmd: Option<String> },
-	Signaled { sig: Signal },
-	Stopped { sig: Signal },
-	Terminated { signal: i32 },
-	Continued,
-	Running,
-	Killed { signal: i32 },
-	TimeOut,
-
-	// These wait statuses are returned by builtins like `return` and `break`
-	RETURN { code: i32 }, // Return from a function
-	CONTINUE, // Restart a loop from the beginning
-	BREAK, // Break a loop
-	EXIT { code: i32 }
+pub struct SavedIO {
+	in_fd: RustFd,
+	out_fd: RustFd,
+	err_fd: RustFd
 }
 
-impl LashWait {
-	pub fn new() -> Self {
-		LashWait::Success
+impl SavedIO {
+	pub fn new() -> LashResult<Self> {
+		Ok(Self {
+			in_fd: RustFd::from_stdin()?,
+			out_fd: RustFd::from_stdout()?,
+			err_fd: RustFd::from_stderr()?
+		})
 	}
-	pub fn raw(&self) -> i32 {
-		match *self {
-			LashWait::Success => 0,
-			LashWait::Fail { code, cmd: _ } => code,
-			_ => unimplemented!("unimplemented signal type: {:?}", self)
-		}
-	}
-	pub fn from_wait(wait: WaitStatus, cmd: Option<String>) -> Self {
-		match wait {
-			WaitStatus::Exited(_, code) => {
-				match code {
-					0 => LashWait::Success,
-					_ => LashWait::Fail { code, cmd }
-				}
-			}
-			WaitStatus::Signaled(_, sig, _) => LashWait::Signaled { sig },
-			WaitStatus::Stopped(_, sig) => LashWait::Stopped { sig },
-			WaitStatus::PtraceEvent(_, _, _) => todo!(),
-			WaitStatus::PtraceSyscall(_) => todo!(),
-			WaitStatus::Continued(_) => LashWait::Continued,
-			WaitStatus::StillAlive => LashWait::Running
-		}
-	}
-}
-
-impl Display for LashWait {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			LashWait::Success { .. } => write!(f, "done"),
-			LashWait::Fail { code, .. } => write!(f, "exit {}", code),
-			LashWait::Signaled { sig } => write!(f, "exit {}", sig),
-			LashWait::Stopped { .. } => write!(f, "stopped"),
-			LashWait::Terminated { signal } => write!(f, "terminated {}", signal),
-			LashWait::Continued => write!(f, "continued"),
-			LashWait::Running => write!(f, "running"),
-			LashWait::Killed { signal } => write!(f, "killed {}", signal),
-			LashWait::TimeOut => write!(f, "time out"),
-			_ => write!(f, "{:?}",self)
-		}
-	}
-}
-
-
-impl Default for LashWait {
-	fn default() -> Self {
-		LashWait::new()
+	pub fn restore(self) -> LashResult<()> {
+		self.in_fd.dup2(&0)?;
+		self.out_fd.dup2(&1)?;
+		self.err_fd.dup2(&2)?;
+		std::mem::drop(self);
+		Ok(())
 	}
 }
 
@@ -294,7 +422,7 @@ pub struct ProcIO {
 	pub stdin: Option<Arc<Mutex<RustFd>>>,
 	pub stdout: Option<Arc<Mutex<RustFd>>>,
 	pub stderr: Option<Arc<Mutex<RustFd>>>,
-	pub backup: HashMap<RawFd,RustFd>
+	pub backup: HashMap<RawFd,RustFd>,
 }
 
 impl<'a> ProcIO {
@@ -376,7 +504,8 @@ impl<'a> ProcIO {
 	}
 	pub fn route_io(&mut self) -> LashResult<()> {
 		self.route_input()?;
-		self.route_output()
+		self.route_output()?;
+		Ok(())
 	}
 	pub fn take(&mut self) -> Self {
 		std::mem::take(self)
@@ -390,7 +519,8 @@ impl Clone for ProcIO {
 	///
 	/// Since ProcIO uses Arc<Mutex<RustFd>>, these clones will refer to the same data as the original. That means modifications will effect both instances.
 	fn clone(&self) -> Self {
-		ProcIO::from(self.stdin.clone(),self.stdout.clone(),self.stderr.clone())
+		let mut new = ProcIO::from(self.stdin.clone(),self.stdout.clone(),self.stderr.clone());
+		new
 	}
 }
 
@@ -400,25 +530,39 @@ impl Default for ProcIO {
 	}
 }
 
-pub fn descend<'a>(mut node_stack: Vec<Pair<'a,Rule>>, mut io: ProcIO) -> LashResult<LashWait> {
-	let mut last_status = LashWait::new();
+pub fn descend(mut node_stack: Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult<()> {
+	ctx.descend()?; // Increment depth counter
 	while let Some(node) = node_stack.pop() {
 		match node.as_rule() {
 			Rule::main | Rule::cmd_list => {
 				let inner = node.to_vec_rev();
 				node_stack.extend(inner);
 			}
-			Rule::simple_cmd => last_status = exec_cmd(node, io.take())?,
+			Rule::simple_cmd => {
+				let command_name = node.clone().into_inner().find(|pair| pair.as_rule() == Rule::cmd_name).unwrap().as_str();
+				if BUILTINS.contains(&command_name) {
+					exec_builtin(node,command_name,ctx)?;
+				} else if shellenv::is_func(command_name)? {
+					exec_func(node,command_name,ctx)?;
+				} else {
+					exec_cmd(node, ctx)?;
+				}
+			}
 			Rule::shell_cmd => {
-				let shell_cmd = node.to_vec_rev().pop().unwrap();
+				let mut shell_cmd_inner = node.to_vec_rev();
+				let shell_cmd = shell_cmd_inner.pop().unwrap();
+				while shell_cmd_inner.last().is_some_and(|pair| pair.as_rule() == Rule::redir) {
+					let redir = Redir::from_pair(shell_cmd_inner.pop().unwrap())?;
+					ctx.push_redir(redir);
+				}
 				match shell_cmd.as_rule() {
-					Rule::for_cmd => exec_for_cmd(shell_cmd, io.take())?,
-					Rule::match_cmd => exec_match_cmd(shell_cmd, io.take())?,
-					Rule::loop_cmd => exec_loop_cmd(shell_cmd, io.take())?,
-					Rule::if_cmd => exec_if_cmd(shell_cmd, io.take())?,
-					Rule::subshell => todo!(),
+					Rule::for_cmd => exec_for_cmd(shell_cmd, ctx)?,
+					Rule::match_cmd => exec_match_cmd(shell_cmd, ctx)?,
+					Rule::loop_cmd => exec_loop_cmd(shell_cmd, ctx)?,
+					Rule::if_cmd => exec_if_cmd(shell_cmd, ctx)?,
+					Rule::subshell => exec_subshell(shell_cmd, ctx)?,
 					Rule::brace_grp => todo!(),
-					Rule::assignment => todo!(),
+					Rule::assignment => exec_assignment(shell_cmd, ctx)?,
 					Rule::func_def => todo!(),
 					_ => unreachable!()
 				};
@@ -443,35 +587,267 @@ pub fn descend<'a>(mut node_stack: Vec<Pair<'a,Rule>>, mut io: ProcIO) -> LashRe
 					}
 				}
 			}
-			Rule::pipeline => { }
+			Rule::pipeline => { exec_pipeline(node, ctx)?; },
 			Rule::EOI => { /* Do nothing */ }
 			_ => todo!("Support for rule '{:?}' is unimplemented",node.as_rule())
 		}
 	}
-	Ok(last_status)
+	ctx.ascend()?; // Decrement depth counter
+	Ok(())
 }
 
-fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, io: ProcIO) -> LashResult<LashWait> {
-	let mut inner = pipeline.into_inner();
+fn exec_func_def<'a>(func_def: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
+	let blame = func_def.clone();
+	let mut inner = func_def.into_inner();
+	Ok(())
+}
+
+fn exec_subshell<'a>(subsh: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
+	let mut inner = subsh.into_inner().peekable();
+	let mut shebang = None;
+	let body;
+	if inner.peek().is_some_and(|nd| nd.as_rule() == Rule::subshebang) {
+		shebang = Some(inner.next().unwrap().as_str().to_string());
+		body = inner.next().unwrap().as_str();
+	} else {
+		body = inner.next().unwrap().as_str();
+	}
+	if let Some(text) = shebang {
+		shebang = Some(expand::expand_shebang(&text));
+	}
+
+	let mut argv = vec![];
+	let mut redirs = vec![];
+	while let Some(node) = inner.next() {
+		match node.as_rule() {
+			Rule::word => {
+				let arg = node.as_str().to_string();
+				argv.push(arg);
+			}
+			Rule::redir => {
+				let redir = Redir::from_pair(node)?;
+				redirs.push(redir);
+			}
+			_ => unreachable!()
+		}
+	}
+
+	ctx.set_redirs(redirs);
+	if let Some(shebang) = shebang {
+		let script = format!("{}{}",shebang,body);
+		handle_external_subshell(script,argv,ctx)?;
+	} else {
+		handle_internal_subshell(body.to_string(),argv,ctx)?;
+	}
+
+	Ok(())
+}
+
+fn handle_external_subshell(script: String, argv: Vec<String>, ctx: &mut ExecCtx) -> LashResult<()> {
+	let argv = argv.into_iter().map(|arg| CString::new(arg).unwrap()).collect::<Vec<_>>();
+	let envp = shellenv::get_cstring_evars()?;
+	let memfd = RustFd::new_memfd("anonymous_subshell", true)?;
+	memfd.write(script.as_bytes())?;
+	let fd_path = CString::new(format!("/proc/self/fd/{memfd}")).unwrap();
+	let io = ctx.io_mut();
+
+	io.route_io()?;
+
+	if shellenv::in_pipe()? {
+		execve(&fd_path, &argv, &envp).unwrap();
+		panic!("execve() failed in subshell execution");
+	}
+
+	match unsafe { fork() } {
+		Ok(ForkResult::Child) => {
+			execve(&fd_path, &argv, &envp).unwrap();
+			panic!("execve() failed in subshell execution");
+		}
+		Ok(ForkResult::Parent { child }) => {
+			let children = vec![
+				ChildProc::new(child, Some("anonymous_subshell"),None)?
+			];
+			let job = JobBuilder::new()
+				.with_pgid(child)
+				.with_children(children)
+				.build();
+			handle_fg(job)?;
+		}
+		Err(e) => panic!("Encountered fork error: {}",e)
+	}
+	io.restore_fildescs()?;
+	Ok(())
+}
+
+fn handle_internal_subshell(body: String, argv: Vec<String>, ctx: &mut ExecCtx) -> LashResult<()> {
+	let snapshot = SavedEnv::get_snapshot()?;
+	write_vars(|v| {
+		v.reset_params();
+		for arg in argv {
+			v.pos_param_pushback(&arg);
+		}
+	})?;
+	exec_input(body, ctx)?;
+	snapshot.restore_snapshot()?;
+	Ok(())
+}
+
+fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
+	let blame = pipeline.clone();
+	let mut inner = pipeline.into_inner().peekable();
 	let mut prev_read_pipe: Option<RustFd> = None;
 	let mut pgid: Option<Pid> = None;
 	let mut cmds: Vec<String> = vec![];
 	let mut pids: Vec<Pid> = vec![];
 
+	let mut first = true;
 	while let Some(node) = inner.next() {
-		match node.as_rule() {
+		let (r_pipe,mut w_pipe) = if inner.peek().is_some() {
+			let (r_pipe,w_pipe) = proc_res(RustFd::pipe(),blame.clone())?;
+			(Some(r_pipe),Some(w_pipe))
+		} else {
+			(None,None)
+		};
+
+		let cmd_check = node.clone();
+		match cmd_check.as_rule() {
 			Rule::simple_cmd => {
+				let mut argv = cmd_check.into_inner();
+				let cmd = argv.next().unwrap();
+				cmds.push(cmd.as_str().to_string())
 			}
 			Rule::shell_cmd => {
+				let shell_cmd = cmd_check.unpack().unwrap();
+				match shell_cmd.as_rule() {
+					Rule::for_cmd => cmds.push("for".into()),
+					Rule::if_cmd => cmds.push("if".into()),
+					Rule::match_cmd => cmds.push("match".into()),
+					Rule::loop_cmd => {
+						let mut inner = shell_cmd.into_inner();
+						let loop_kind = inner.next().unwrap().as_str();
+						cmds.push(loop_kind.into());
+					}
+					Rule::subshell => cmds.push("anonymous subshell".into()),
+					_ => todo!()
+				}
 			}
 			_ => unreachable!()
 		}
+
+		let io = ctx.io_mut();
+		*io = ProcIO::from(
+			prev_read_pipe.take().map(|pipe| pipe.mk_shared()),
+			w_pipe.take().map(|pipe| pipe.mk_shared()),
+			io.stderr.clone(), // TODO: implement stderr piping
+		);
+
+		match unsafe { fork() } {
+			Ok(ForkResult::Child) => {
+				if first {
+					io.route_input().unwrap();
+				} else if inner.peek().is_none() {
+					io.route_output().unwrap();
+				}
+				if let Some(mut pipe) = prev_read_pipe {
+					pipe.close().unwrap()
+				}
+				if let Some(mut pipe) = w_pipe {
+					pipe.close().unwrap()
+				}
+				write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::IN_SUB_PROC)).unwrap();
+				match node.as_rule() {
+					Rule::simple_cmd => {
+						exec_cmd(node, ctx).unwrap();
+					}
+					Rule::shell_cmd => {
+						if let Some(cmd) = node.unpack() {
+							match cmd.as_rule() {
+								Rule::for_cmd => {
+									exec_for_cmd(cmd, ctx).unwrap();
+								}
+								Rule::loop_cmd => {
+									exec_loop_cmd(cmd, ctx).unwrap();
+								}
+								Rule::if_cmd => {
+									exec_if_cmd(cmd, ctx).unwrap();
+								}
+								Rule::match_cmd => {
+									exec_match_cmd(cmd, ctx).unwrap();
+								}
+								Rule::subshell => todo!(),
+								Rule::brace_grp => todo!(),
+								Rule::assignment => todo!(),
+								Rule::func_def => todo!(),
+								_ => unreachable!()
+							};
+						}
+					}
+					_ => unreachable!()
+				}
+				std::process::exit(1)
+			}
+			Ok(ForkResult::Parent { child }) => {
+				if first {
+					first = false;
+				}
+				pids.push(child);
+				if let Some(ref mut read_pipe) = prev_read_pipe {
+					read_pipe.close()?;
+				}
+				if let Some(mut write_pipe) = w_pipe {
+					write_pipe.close()?;
+				}
+				prev_read_pipe = r_pipe;
+				if pgid.is_none() {
+					pgid = Some(child);
+				}
+				if inner.peek().is_none() {
+					let mut children = vec![];
+					let mut commands = cmds.iter();
+					for pid in &pids {
+						let cmd = commands.next().map(|cmd| cmd.as_str());
+						let child = ChildProc::new(*pid,cmd,pgid)?;
+						children.push(child);
+					}
+					let job = JobBuilder::new()
+						.with_pgid(pgid.unwrap())
+						.with_children(children)
+						.build();
+
+
+					handle_fg(job)?;
+				}
+			}
+			Err(e) => return Err(High(LashErrHigh::exec_err("Command in pipeline failed", blame)))
+		}
 	}
+	Ok(())
 }
 
-fn exec_for_cmd<'a>(cmd: Pair<'a,Rule>,io: ProcIO) -> LashResult<LashWait> {
+fn exec_assignment<'a>(ass: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
+	let mut inner = ass.into_inner();
+	let var_name = inner.next().unwrap().as_str();
+	let var_val = LashVal::parse(inner.next().unwrap().as_str()).unwrap();
+
+	if inner.clone().count() == 0 {
+		// If there are no commands attached, just set the variable
+		write_vars(|v| v.set_var(var_name, var_val))?;
+	} else {
+		// If there are commands attached, export the variables, then execute, then restore environment state
+		let saved_vars = read_vars(|v| v.clone())?;
+		write_vars(|v| v.export_var(var_name, &var_val.to_string()))?;
+		while let Some(list) = inner.next() {
+			exec_list(Rule::cmd_list, list.as_str().to_string(), ctx)?;
+		}
+		write_vars(|v| *v = saved_vars)?;
+	}
+	Ok(())
+}
+
+fn exec_for_cmd<'a>(cmd: Pair<'a,Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
 	let mut inner = cmd.into_inner();
-	let body_io = ProcIO::from(None, io.stdout, io.stderr);
+	let io = ctx.io_mut();
+	*io = ProcIO::from(None, io.stdout.clone(), io.stderr.clone());
 	let mut saved_vars = HashMap::new();
 	let loop_vars = inner.next()
 		.unwrap()
@@ -494,17 +870,17 @@ fn exec_for_cmd<'a>(cmd: Pair<'a,Rule>,io: ProcIO) -> LashResult<LashWait> {
 	for (i,element) in loop_arr.iter().enumerate() {
 		let var_index = i % vars_len;
 		write_vars(|v| v.set_var(loop_vars[var_index], element.clone()))?;
-		let loop_body = expand::expand_list(loop_body_pair.clone(),true)?;
-		exec_list(Rule::cmd_list, loop_body, Some(body_io.clone()))?;
+		let loop_body = expand::expand_list(loop_body_pair.clone())?;
+		exec_list(Rule::cmd_list, loop_body, ctx)?;
 	}
 	for var in &loop_vars {
 		let saved_val = saved_vars.remove(var).unwrap_or_default();
 		write_vars(|v| v.set_var(var, saved_val))?;
 	}
-	Ok(LashWait::Success)
+	Ok(())
 }
 
-fn exec_match_cmd<'a>(cmd: Pair<'a,Rule>, io: ProcIO) -> LashResult<LashWait> {
+fn exec_match_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let mut inner = cmd.into_inner();
 	let match_pat = inner.next().unwrap();
 	let mut arms = VecDeque::new();
@@ -519,22 +895,33 @@ fn exec_match_cmd<'a>(cmd: Pair<'a,Rule>, io: ProcIO) -> LashResult<LashWait> {
 		let arm_body_pair = inner.next().unwrap();
 
 		if arm_pat.as_str().trim() == match_pat.as_str().trim() {
-			let arm_body = expand::expand_list(arm_body_pair,true)?;
-			exec_list(Rule::cmd_list, arm_body.trim_end_matches(',').to_string(), Some(io))?;
+			let arm_body = expand::expand_list(arm_body_pair)?;
+			exec_list(Rule::cmd_list, arm_body.trim_end_matches(',').to_string(), ctx)?;
 			break
 		}
 	}
-	Ok(LashWait::Success)
+	Ok(())
 }
 
-fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, mut io: ProcIO) -> LashResult<LashWait> {
+fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let mut inner = cmd.to_vec_rev();
 	let if_cond_pair = inner.pop().unwrap().into_inner().next().unwrap();
 	let if_body_pair = inner.pop().unwrap().into_inner().next().unwrap();
 	let mut elif_blocks = VecDeque::new();
 	let mut else_block = None;
-	let cond_io = ProcIO::from(io.stdin, None, None);
-	let body_io = ProcIO::from(None, io.stdout, io.stderr);
+	let mut cond_ctx = ctx.as_cond();
+	let mut body_ctx = ctx.as_body();
+	let cond_io = cond_ctx.io_mut();
+	*cond_io = ProcIO::from(cond_io.stdin.clone(), None, None);
+	let body_io = body_ctx.io_mut();
+	*body_io = ProcIO::from(None, body_io.stdout.clone(), body_io.stderr.clone());
+
+	let in_pipe = shellenv::in_pipe()?;
+	if in_pipe {
+		// We are going to temporarily remove this flag here, to make sure that cond/body executions fork the process
+		// If we don't do this, the program will exit after executing the first condition
+		write_meta(|m| m.mod_flags(|f| *f &= !EnvFlags::IN_SUB_PROC))?;
+	}
 
 	while let Some(pair) = inner.pop() {
 		match pair.as_rule() {
@@ -547,12 +934,12 @@ fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, mut io: ProcIO) -> LashResult<LashWait> {
 		}
 	}
 
-	let if_cond = expand::expand_list(if_cond_pair,true)?;
-	exec_list(Rule::cmd_list, if_cond, Some(cond_io.clone()))?;
+	let if_cond = expand::expand_list(if_cond_pair)?;
+	exec_list(Rule::cmd_list, if_cond, &mut cond_ctx)?;
 	if &shellenv::check_status()? == "0" {
-		let if_body = expand::expand_list(if_body_pair,true)?;
-		exec_list(Rule::cmd_list, if_body, Some(body_io.clone()))?;
-		return Ok(LashWait::Success)
+		let if_body = expand::expand_list(if_body_pair)?;
+		exec_list(Rule::cmd_list, if_body, &mut body_ctx)?;
+		return Ok(())
 	}
 
 	while let Some(elif_block) = elif_blocks.pop_front() {
@@ -560,36 +947,45 @@ fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, mut io: ProcIO) -> LashResult<LashWait> {
 		let elif_cond_pair = inner.next().unwrap();
 		let elif_body_pair = inner.next().unwrap();
 
-		let elif_cond = expand::expand_list(elif_cond_pair,true)?;
-		exec_list(Rule::cmd_list, elif_cond, Some(cond_io.clone()))?;
+		let elif_cond = expand::expand_list(elif_cond_pair)?;
+		exec_list(Rule::cmd_list, elif_cond, &mut cond_ctx)?;
 		if &shellenv::check_status()? == "0" {
-			let elif_body = expand::expand_list(elif_body_pair,true)?;
-			exec_list(Rule::cmd_list, elif_body, Some(body_io.clone()))?;
-			return Ok(LashWait::Success)
+			let elif_body = expand::expand_list(elif_body_pair)?;
+			exec_list(Rule::cmd_list, elif_body, &mut body_ctx)?;
+			return Ok(())
 		}
 	}
 
 	if let Some(else_block) = else_block {
 		let else_body_pair = else_block.into_inner().next().unwrap();
-		let else_body = expand::expand_list(else_body_pair,true)?;
-		exec_list(Rule::cmd_list, else_body, Some(body_io.clone()))?;
+		let else_body = expand::expand_list(else_body_pair)?;
+		exec_list(Rule::cmd_list, else_body, &mut body_ctx)?;
 	}
 
-	Ok(LashWait::Success)
+	if in_pipe {
+		// We are going to temporarily remove this flag here, to make sure that cond/body executions fork the process
+		// If we don't do this, the program will exit after executing the first condition
+		write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::IN_SUB_PROC))?;
+	}
+	Ok(())
 }
 
-fn exec_loop_cmd<'a>(cmd: Pair<'a,Rule>, mut io: ProcIO) -> LashResult<LashWait> {
+fn exec_loop_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let mut inner = cmd.to_vec_rev();
 	let loop_kind = inner.pop().unwrap();
 	let loop_cond_pair = inner.pop().unwrap().into_inner().next().unwrap();
 	let loop_body_pair = inner.pop().unwrap().into_inner().next().unwrap();
-	let cond_io = ProcIO::from(io.stdin, None, None);
-	let body_io = ProcIO::from(None, io.stdout, io.stderr);
+	let mut cond_ctx = ctx.as_cond();
+	let mut body_ctx = ctx.as_body();
+	let cond_io = cond_ctx.io_mut();
+	*cond_io = ProcIO::from(cond_io.stdin.clone(), None, None);
+	let body_io = body_ctx.io_mut();
+	*body_io = ProcIO::from(None, body_io.stdout.clone(), body_io.stderr.clone());
 
 
 	loop {
-		let loop_cond = expand::expand_list(loop_cond_pair.clone(),true)?;
-		exec_list(Rule::cmd_list, loop_cond, Some(cond_io.clone()))?;
+		let loop_cond = expand::expand_list(loop_cond_pair.clone())?;
+		exec_list(Rule::cmd_list, loop_cond, &mut cond_ctx)?;
 		let is_success = shellenv::check_status()? == "0";
 		match loop_kind.as_str() {
 			"while" => {
@@ -608,12 +1004,15 @@ fn exec_loop_cmd<'a>(cmd: Pair<'a,Rule>, mut io: ProcIO) -> LashResult<LashWait>
 			}
 			_ => unreachable!()
 		}
-		let loop_body = expand::expand_list(loop_body_pair.clone(),true)?;
-		let result = exec_list(Rule::cmd_list, loop_body, Some(body_io.clone()));
+		let loop_body = expand::expand_list(loop_body_pair.clone())?;
+		let result = exec_list(Rule::cmd_list, loop_body, &mut body_ctx);
 		match result {
 			Err(LashErr::High(err)) => {
 				match err.get_err() {
-					LashErrLow::LoopBreak => break,
+					LashErrLow::LoopBreak(code) => {
+						write_vars(|v| v.set_param("?".into(), code.to_string()))?;
+						break
+					}
 					LashErrLow::LoopCont => continue,
 					_ => return Err(LashErr::High(err))
 				}
@@ -622,49 +1021,146 @@ fn exec_loop_cmd<'a>(cmd: Pair<'a,Rule>, mut io: ProcIO) -> LashResult<LashWait>
 			Ok(_) => continue,
 		}
 	}
-	Ok(LashWait::Success)
+	Ok(())
 }
 
-fn exec_cmd<'a>(cmd: Pair<Rule>, mut io: ProcIO) -> LashResult<LashWait> {
-	let mut last_status = LashWait::new();
-	let err_target = cmd.clone();
-	let mut argv = cmd.clone().to_vec().into_iter().map(|arg| CString::new(arg.as_str().to_string()).unwrap()).collect::<Vec<_>>();
+fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()> {
+	match name {
+		"echo" => builtin::echo(cmd, ctx)?,
+		_ => unimplemented!("Have not implemented support for builtin `{}` yet",name)
+	};
+	Ok(())
+}
 
-	io.backup_fildescs()?;
+fn exec_func(cmd: Pair<Rule>,name: &str,ctx: &mut ExecCtx) -> LashResult<()> {
+	Ok(())
+}
+
+fn exec_cmd<'a>(cmd: Pair<Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
+	let blame = cmd.clone();
+	let mut inner = cmd.into_inner();
+	let mut argv = vec![];
+	while let Some(node) = inner.next() {
+		match node.as_rule() {
+			Rule::word | Rule::cmd_name => argv.push(node.as_str().to_string()),
+			Rule::redir => {
+				let redir = Redir::from_pair(node)?;
+				ctx.push_redir(redir);
+			}
+			_ => unreachable!("Rule: {:?}",node.as_rule())
+		}
+	}
+	let argv = argv.into_iter().map(|arg| CString::new(arg).unwrap()).collect::<Vec<_>>();
+
+	let io = ctx.io_mut();
 	io.route_io()?;
 
 	let command = argv.first().unwrap().clone();
 
 	if SHELL_CMDS.contains(&command.to_str().unwrap()) {
-		return Err(High(LashErrHigh::exec_err(format!("This shell command appears malformed"), cmd)))
+		return Err(High(LashErrHigh::exec_err(format!("This shell command appears malformed"), blame)))
 	}
 
 	let env_vars = env::vars().into_iter().collect::<Vec<(String,String)>>();
 	let envp = env_vars.iter().map(|var| CString::new(format!("{}={}",var.0,var.1)).unwrap()).collect::<Vec<_>>();
 
+	let mut redirs = CmdRedirs::new(ctx.redirs());
+	proc_res(redirs.activate(),blame.clone())?;
+
+	if ctx.flags().contains(ExecFlags::NO_FORK) {
+		exec_external(command, argv, envp, blame);
+	}
+
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
-			let Err(e) = execvpe(&command, &argv, &envp);
-			match e {
-				Errno::ENOENT => {
-					let error = High(LashErrHigh::cmd_not_found(command.to_str().unwrap(), err_target));
-					eprintln!("{}",error);
-				}
-				Errno::EPERM => {
-					let error = High(LashErrHigh::no_permission(command.to_str().unwrap(), err_target));
-					eprintln!("{}",error);
-				}
-				_ => unimplemented!("Case for `{}` not implemented", e.to_string())
-			}
-			std::process::exit(e as i32)
+			exec_external(command, argv, envp, blame);
 		}
 		Ok(ForkResult::Parent { child }) => {
 			handle_parent_process(child, command.to_str().unwrap().to_string())?;
+			redirs.close_all()?;
 		}
 		Err(_) => todo!()
 	}
 
-	Ok(last_status)
+	Ok(())
+}
+
+pub struct CmdRedirs {
+	open_fds: Vec<RustFd>,
+	targets_fd: Vec<Redir>,
+	targets_file: Vec<Redir>
+}
+
+impl CmdRedirs {
+	pub fn new(mut redirs: Vec<Redir>) -> Self {
+		let mut targets_fd = vec![];
+		let mut targets_file = vec![];
+		while let Some(redir) = redirs.pop() {
+			let Redir { redir_type: _, source: _, fd_target, file_target: _ } = &redir;
+			if fd_target.is_some() {
+				targets_fd.push(redir);
+			} else {
+				targets_file.push(redir);
+			}
+		}
+		Self { open_fds: vec![], targets_fd, targets_file }
+	}
+	pub fn activate(&mut self) -> LashResult<()> {
+		self.open_file_targets()?;
+		self.open_fd_targets()?;
+		Ok(())
+	}
+	pub fn close_all(mut self) -> LashResult<()> {
+		for fd in self.open_fds.iter_mut() {
+			fd.close()?
+		}
+		Ok(())
+	}
+	pub fn open_file_targets(&mut self) -> LashResult<()> {
+		for redir in &self.targets_file {
+			let Redir { redir_type, source, fd_target: _, file_target } = redir;
+			let src_fd = RustFd::new(*source)?;
+			let path = file_target.as_ref().unwrap(); // We know that there's a file target so unwrap is safe
+			let flags = match redir_type {
+				Rule::r#in => OFlag::O_RDONLY,
+				Rule::out => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
+				Rule::append => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_APPEND,
+				_ => unreachable!(),
+			};
+			let mut file_fd = RustFd::open(path, flags, Mode::from_bits(0o644).unwrap())?;
+			file_fd.dup2(&src_fd)?;
+			file_fd.close()?;
+			self.open_fds.push(src_fd);
+		}
+		Ok(())
+	}
+	pub fn open_fd_targets(&mut self) -> LashResult<()> {
+		for redir in &self.targets_fd {
+			let Redir { redir_type: _, source, fd_target, file_target: _ } = redir;
+			let mut tgt_fd = RustFd::new(fd_target.unwrap())?;
+			let src_fd = RustFd::new(*source)?;
+			tgt_fd.dup2(&src_fd)?;
+			tgt_fd.close()?;
+			self.open_fds.push(src_fd);
+		}
+		Ok(())
+	}
+}
+
+fn exec_external(command: CString, argv: Vec<CString>, envp: Vec<CString>,blame: Pair<Rule>) -> ! {
+	let Err(e) = execvpe(&command, &argv, &envp);
+	match e {
+		Errno::ENOENT => {
+			let error = High(LashErrHigh::cmd_not_found(command.to_str().unwrap(), blame));
+			eprintln!("{}",error);
+		}
+		Errno::EPERM => {
+			let error = High(LashErrHigh::no_permission(command.to_str().unwrap(), blame));
+			eprintln!("{}",error);
+		}
+		_ => unimplemented!("Case for `{}` not implemented", e.to_string())
+	}
+	std::process::exit(e as i32)
 }
 
 fn handle_parent_process<'a>(child: Pid, command: String) -> LashResult<()> {
@@ -677,12 +1173,5 @@ fn handle_parent_process<'a>(child: Pid, command: String) -> LashResult<()> {
 		.build();
 
 	helper::handle_fg(job)?;
-	/*
-	if node.flags.contains(NdFlags::BACKGROUND) {
-		write_jobs(|j| j.insert_job(job,false))??;
-	} else {
-		helper::handle_fg(job)?;
-	}
-	*/
 	Ok(())
 }
