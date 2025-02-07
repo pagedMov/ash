@@ -3,10 +3,10 @@ use std::{collections::VecDeque, env, ffi::CString, fs, os::{fd::AsRawFd, unix::
 use nix::unistd::{access, fork, getegid, geteuid, isatty, setpgid, AccessFlags, ForkResult};
 use pest::iterators::Pair;
 
-use crate::{error::{LashErr::*, LashErrHigh, LashErrLow}, execute::{CmdRedirs, ExecCtx, ExecFlags, Redir, RustFd}, helper::{self, StrExtension}, shellenv::{self, read_logic, read_vars, write_jobs, write_vars, ChildProc, JobBuilder}, LashResult, OptPairExt, PairExt, Rule};
+use crate::{error::{LashErr::*, LashErrHigh, LashErrLow}, execute::{CmdRedirs, ExecCtx, ExecFlags, Redir, RustFd}, helper::{self, StrExtension}, shellenv::{self, read_logic, read_vars, write_jobs, write_meta, write_vars, ChildProc, HashFloat, JobBuilder, LashVal}, LashResult, OptPairExt, PairExt, Rule};
 
-pub const BUILTINS: [&str; 41] = [
-	"return", "break", "contine", "exit", "command", "pushd", "popd", "setopt", "getopt", "type", "string", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
+pub const BUILTINS: [&str; 43] = [
+	"try", "except", "return", "break", "contine", "exit", "command", "pushd", "popd", "setopt", "getopt", "type", "string", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
 ];
 
 bitflags::bitflags! {
@@ -88,7 +88,6 @@ fn do_log_op<'a>(args: &mut Vec<Pair<'a,Rule>>, result: bool, operator: &str, ct
 /// The test function is a special snowflake and takes a mutable reference to an already prepared arg vector
 /// instead of a raw pair like the other builtins. This is to make recursion with -a/-o flags easier
 pub fn test<'a>(test_call: &mut Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult<bool> {
-	let blame = test_call.clone();
 	if test_call.first().is_some_and(|arg| arg.as_str() == "]") {
 		*test_call = Vec::from(&test_call[1..]); // Ignore it
 	}
@@ -201,6 +200,88 @@ pub fn test<'a>(test_call: &mut Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResul
 	Ok(result)
 }
 
+/// stuff like 'int', 'float' etc for setting typed vars
+pub fn assign_builtin<'a>(assign: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
+	let blame = assign.clone();
+	let mut inner = assign.into_inner();
+	let cmd_name = inner.next().unpack()?;
+	while let Some(arg) = inner.next() {
+		match arg.as_rule() {
+			Rule::arg_assign => {
+				let mut arg_inner = arg.into_inner();
+				let var_name = arg_inner.next().unpack()?;
+				if let Some(val) = arg_inner.next() {
+					let lash_val = match cmd_name.as_str() {
+						"string" => {
+							LashVal::String(val.as_str().to_string())
+						}
+						"int" => {
+							let lash_int = val.as_str().parse::<i32>();
+							if lash_int.is_err() {
+								let msg = format!("Expected an integer in `int` assignment");
+								return Err(High(LashErrHigh::syntax_err(msg, blame)))
+							}
+							LashVal::Int(lash_int.unwrap())
+						}
+						"bool" => {
+							let lash_bool = val.as_str().parse::<bool>();
+							if lash_bool.is_err() {
+								let msg = format!("Expected a boolean in `bool` assignment");
+								return Err(High(LashErrHigh::syntax_err(msg, blame)))
+							}
+							LashVal::Bool(lash_bool.unwrap())
+						}
+						"float" => {
+							let lash_float = val.as_str().parse::<f64>();
+							if lash_float.is_err() {
+								let msg = format!("Expected a floating point value in `float` assignment");
+								return Err(High(LashErrHigh::syntax_err(msg, blame)))
+							}
+							LashVal::Float(HashFloat(lash_float.unwrap()))
+						}
+						"arr" => {
+							if let Rule::array = val.as_rule() {
+								LashVal::parse(val.as_str())?
+							} else {
+								let msg = format!("Expected an array in `array` assignment");
+								return Err(High(LashErrHigh::syntax_err(msg, blame)))
+							}
+						}
+						_ => unimplemented!("Have not yet implemented var type builtin '{}'",cmd_name.as_str())
+					};
+					write_vars(|v| v.set_var(var_name.as_str(), lash_val))?;
+				} else {
+					write_vars(|v| v.unset_var(var_name.as_str()))?;
+				}
+			}
+			Rule::redir => { /* Do nothing */ }
+			_ => {
+				let msg = format!("Expected assignment in '{}' args, found this: '{}'",cmd_name.as_str(),arg.as_str());
+				return Err(High(LashErrHigh::syntax_err(msg, blame)))
+			}
+		}
+	}
+	Ok(())
+}
+
+pub fn setopt<'a>(setopt_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
+	let blame = setopt_call.clone();
+	let mut inner = setopt_call.into_inner();
+	inner.next();
+	while let Some(arg) = inner.next() {
+		if arg.as_rule() == Rule::arg_assign {
+			let mut arg_inner = arg.into_inner();
+			let opt_path = arg_inner.next().unpack()?.as_str();
+			let val = arg_inner.next().map(|val| val.as_str()).unwrap_or_default();
+			write_meta(|m| m.set_shopt(opt_path, val))??;
+		} else {
+			let msg = "Expected an assignment in setopt args";
+			return Err(High(LashErrHigh::syntax_err(msg, arg)))
+		}
+	}
+	Ok(())
+}
+
 pub fn cd<'a>(cd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = cd_call.clone();
 	let mut inner = cd_call.into_inner();
@@ -270,13 +351,12 @@ pub fn source<'a>(src_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> 
 	inner.next(); // Ignore 'source'
 	while let Some(arg) = inner.next() {
 		if arg.as_rule() == Rule::word {
-			let blame = arg.clone();
 			let path = PathBuf::from(arg.as_str());
 			if path.exists() && path.is_file() {
 				shellenv::source_file(path)?;
 			} else {
 				let msg = String::from("source failed: File not found");
-				return Err(High(LashErrHigh::exec_err(msg, blame)))
+				return Err(High(LashErrHigh::exec_err(msg, arg)))
 			}
 		}
 	}
@@ -323,7 +403,7 @@ pub fn export<'a>(export_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 			}
 			_ => {
 				let msg = String::from("Expected an assignment in export args, got this");
-				return Err(High(LashErrHigh::syntax_err(msg, blame)))
+				return Err(High(LashErrHigh::syntax_err(msg, arg)))
 			}
 		}
 	}

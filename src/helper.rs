@@ -1,9 +1,10 @@
 use nix::{sys::wait::WaitStatus, unistd::{dup2, getpgrp}, NixPath};
-use pest::{error::ErrorVariant, iterators::Pair, RuleType};
+use pest::{error::ErrorVariant, iterators::Pair, Parser, RuleType};
+use regex::Regex;
 use serde_json::Value;
 use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, f32::INFINITY, fs, io::{self, Read}, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread, time::Duration};
 
-use crate::{error::{LashErr, LashErrHigh, LashErrLow}, shellenv::{self, attach_tty, disable_reaping, enable_reaping, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, HashFloat, Job, LashVal}, LashResult, Rule};
+use crate::{comp::REGEX, error::{LashErr, LashErrHigh, LashErrLow}, expand::{self, expand_esc, expand_time, replace_span}, shellenv::{self, attach_tty, disable_reaping, enable_reaping, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, HashFloat, Job, LashVal}, LashParse, LashResult, OptPairExt, Rule};
 
 
 #[macro_export]
@@ -57,6 +58,8 @@ impl<T> VecDequeExtension<T> for VecDeque<T> {
 }
 
 pub trait StrExtension {
+	fn replacen_ignore_ansi(&self, pat: &str, new: &str, num: usize) -> String;
+	fn fill_from(&self, other: &str) -> String;
 	fn trim_command_sub(&self) -> Option<String>;
 	fn split_last(&self, pat: &str) -> Option<(String,String)>;
 	fn has_unescaped(&self, pat: &str) -> bool;
@@ -70,6 +73,42 @@ pub trait StrExtension {
 }
 
 impl StrExtension for str {
+	fn replacen_ignore_ansi(&self, pat: &str, new: &str, num: usize) -> String {
+
+		let ansi_regex = &REGEX["ansi"];
+
+		// Step 1: Remove ANSI escape sequences temporarily
+		let stripped_buffer = ansi_regex.replace_all(self, "");
+
+		// Step 2: Perform the replacement on the stripped string
+		let result = stripped_buffer.replacen(pat, new, num);
+
+		// Step 3: Reinsert the original ANSI escape sequences back into the result
+		let mut final_result = String::new();
+		let mut last_pos = 0;
+
+		for mat in ansi_regex.find_iter(self) {
+			let start = mat.start();
+			let end = mat.end();
+			final_result.push_str(&result[last_pos..start]);
+			final_result.push_str(mat.as_str());
+			last_pos = end;
+		}
+
+		final_result.push_str(&result[last_pos..]);
+
+		final_result
+	}
+
+	/// If some other string is longer than this one, extend this string by the difference by taking characters from the other
+	fn fill_from(&self, other: &str) -> String {
+		let mut result = self.to_string();
+		if self.len() < other.len() {
+			let clipped = other[self.len()..].to_string();
+			result = format!("{}{}",self,clipped);
+		}
+		result
+	}
 	fn has_varsub(&self) -> bool {
 		let mut chars = self.chars().peekable();
 		let mut paren_stack = vec![];
@@ -596,21 +635,27 @@ pub fn handle_fg(job: Job) -> LashResult<()> {
 	enable_reaping()
 }
 
-pub fn check_git(path: PathBuf) -> Option<PathBuf> {
-	let mut current_path = path.as_path();
-
-	if current_path.join(".git").exists() {
-			return Some(current_path.join(".git"));
-	}
-
-	while let Some(parent) = current_path.parent() {
-		if parent.join(".git").exists() {
-			return Some(parent.join(".git"));
+pub fn handle_prompt_visgroup(pair: Pair<Rule>, buffer: &mut String) -> LashResult<String> {
+	let mut found = false;
+	let span = pair.as_span();
+	let mut result = String::new();
+	let mut visgroup = pair.as_str().to_string();
+	let mut ps1 = pair.get_input().to_string();
+	let mut inner = pair.into_inner().rev();
+	while let Some(esc) = inner.next() {
+		let span = esc.as_span();
+		let expanded = expand_esc(esc, buffer)?;
+		if !expanded.is_empty() {
+			found = true;
 		}
-		current_path = parent;
-	}
 
-	None
+		result = expanded;
+	}
+	if found {
+		Ok(result)
+	} else {
+		Ok(String::new())
+	}
 }
 
 pub fn capture_octal_escape(chars: &mut VecDeque<char>, first_digit: char) -> String {
@@ -844,7 +889,14 @@ pub fn escseq_cmdtime<'a>() -> LashResult<String> {
 }
 
 pub fn escseq_custom(query: &str) -> LashResult<String> {
-	todo!()
+	let command = read_meta(|m| m.get_shopt(&format!("prompt.custom.{query}")))??;
+	let cmd_sub = format!("$({command})");
+	let parsed = LashParse::parse(Rule::cmd_sub, &cmd_sub)
+		.map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?
+		.into_iter()
+		.next()
+		.unpack()?;
+	expand::expand_cmd_sub(parsed)
 }
 
 pub fn escseq_exitcode<'a>() -> LashResult<String> {

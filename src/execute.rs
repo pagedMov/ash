@@ -24,6 +24,7 @@ bitflags::bitflags! {
 	pub struct ExecFlags: u32 {
 		const NO_FORK    = 0b00000000000000000000000000000001;
 		const BACKGROUND = 0b00000000000000000000000000000010;
+		const IN_PIPE    = 0b00000000000000000000000000000100;
 	}
 }
 
@@ -619,7 +620,7 @@ fn exec_func_def<'a>(func_def: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 	Ok(())
 }
 
-fn exec_subshell<'a>(subsh: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
+pub fn exec_subshell<'a>(subsh: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let mut inner = subsh.into_inner().peekable();
 	let mut shebang = None;
 	let body;
@@ -1028,6 +1029,8 @@ fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()
 				write_vars(|v| v.set_param("?".into(), "1".into()))?;
 			}
 		}
+		"string" | "float" | "int" | "arr" | "bool" => builtin::assign_builtin(cmd, ctx)?,
+		"setopt" => builtin::setopt(cmd, ctx)?,
 		"cd" => builtin::cd(cmd, ctx)?,
 		"alias" => builtin::alias(cmd, ctx)?,
 		"pwd" => builtin::pwd(cmd, ctx)?,

@@ -1,10 +1,11 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, env, path::PathBuf};
 
 use error::{LashErr, LashErrHigh, LashErrLow};
 use execute::{ExecCtx, ProcIO, Redir, SavedIO};
 use helper::StrExtension;
 use pest::{iterators::{Pair, Pairs}, Parser, Span};
 use pest_derive::Parser;
+use shellenv::{read_meta, write_meta, EnvFlags};
 
 pub mod prompt;
 pub mod execute;
@@ -15,6 +16,7 @@ pub mod helper;
 pub mod signal;
 pub mod expand;
 pub mod builtin;
+pub mod comp;
 
 pub trait OptPairExt<'a> {
 	fn unpack(self) -> LashResult<Pair<'a,Rule>>;
@@ -89,8 +91,13 @@ pub struct LashParse;
 fn main() {
 	let mut ctx = ExecCtx::new();
 	loop {
-		let input = prompt::run_prompt();
-		if &input == "break" { break };
+		let is_initialized = read_meta(|m| m.flags().contains(EnvFlags::INITIALIZED)).unwrap();
+		if !is_initialized {
+			write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::INITIALIZED)).unwrap();
+			let home = env::var("HOME").unwrap();
+			shellenv::source_file(PathBuf::from(format!("{home}/.lashrc"))).unwrap();
+		}
+		let input = prompt::run_prompt().unwrap();
 		ctx.push_state().unwrap();
 		let saved_fds = SavedIO::new().unwrap();
 		let result = exec_input(input, &mut ctx);

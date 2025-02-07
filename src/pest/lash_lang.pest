@@ -37,7 +37,11 @@ find_expansions = { (WHITESPACE|NEWLINE|word|operator)* }
 glob_word = @{ ident ~ glob_pat+ ~ ident? | glob_pat+ ~ ident? }
 tilde_sub = @{ pwd | prev_pwd | (home ~ path_seg?) }
 brace_word = @{ ident ~ brace_expand+ ~ ident? | brace_expand+ ~ ident? }
-var_sub = @{ !"\\$" ~ "$" ~ ident }
+var_sub = ${ !"\\$" ~ "$" ~ var_ident }
+index = { ASCII_DIGIT+ }
+slice = ${ index ~ ".." ~ index }
+key = { dquoted|squoted }
+arr_index = { !"\\$" ~ "$" ~ var_ident ~ ("[" ~ (key|slice|index) ~ "]")+ }
 cmd_sub = ${ !"\\$" ~ "$" ~ subshell }
 param_sub = { !"\\$" ~ "$" ~ parameter }
 
@@ -54,7 +58,9 @@ dquote_body = { ("\\\""|!"\"" ~ ANY)* }
 squote_body = { ("\\'"|!"'" ~ ANY)* }
 dquoted = { dqt ~ dquote_body ~ dqt }
 squoted = { sqt ~ squote_body ~ sqt }
-var_ident = @{ NEWLINE* ~ !parameter ~ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "." | "_" | "-")* }
+var_ident_plain = @{ NEWLINE* ~ !parameter ~ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "." | "_" | "-")* }
+var_ident_brackets = ${ !"\\{" ~ "{" ~ var_ident_plain ~ !"\\}" ~ "}" }
+var_ident = { var_ident_brackets | var_ident_plain }
 ident = _{
 	(("\\" ~ ANY) |
     // 'out' and 'in' refer to redir operators '>' and '<'
@@ -82,6 +88,7 @@ word = ${
 	dquoted |
 	squoted |
 	param_sub |
+    arr_index |
 	var_sub |
 	cmd_sub |
 	proc_sub |
@@ -90,9 +97,11 @@ word = ${
 	tilde_sub |
 	ident
 }
+array_elem = { array | (("\\," | "\\]") | !("]"|",") ~ ANY)+ }
+array = { "[" ~ (array_elem ~ ("," ~ array_elem)*)? ~ "]"  }
 word_list = { word ~ (NEWLINE* ~ word)* }
 assignment = { var_ident ~ "=" ~ word? ~ cmd_list? }
-arg_assign = ${ var_ident ~ "=" ~ word? }
+arg_assign = ${ var_ident ~ "=" ~ (array|word)? }
 sep = _{ (";" | NEWLINE)+ }
 
 
@@ -191,7 +200,7 @@ raw_text = _{ WHITESPACE* ~ (!"\\" ~ ANY)+ ~ WHITESPACE* }
 ascii_oct_seq = { ASCII_OCT_DIGIT ~ ASCII_OCT_DIGIT? ~ ASCII_OCT_DIGIT? }
 ansi_params = { ASCII_DIGIT+ ~ (";" ~ ASCII_DIGIT+ )* }
 custom_esc_seg = { (!("." | "\\{" | "\\}") ~ ANY)+ }
-custom_esc_path = ${ custom_esc_seg ~ ("." ~ custom_esc_seg)* }
+custom_esc_path = @{ custom_esc_seg ~ ("." ~ custom_esc_seg)* }
 esc_sequence = {
 	esc_bell |
 	esc_vis_grp |
@@ -246,6 +255,74 @@ esc_ansi_seq  = { "\\e" ~ "[" ~ ansi_params ~ ASCII_ALPHA }
 esc_user_seq = ${ "\\{" ~ custom_esc_path ~ "\\}" }
 esc_vis_grp = { "\\(" ~ (raw_text|esc_sequence)* ~ "\\)" }
 
+// Syntax Highlighting
+
+
+for = { "for" }
+var = { !loud_operator ~ word }
+for_with_vars = { for ~ (!"in" ~ var)+ }
+if = { "if" }
+then = { "then" }
+else = { "else" }
+elif = { "elif" }
+fi = { "fi" }
+in_kw = { WHITESPACE* ~ "in" ~ WHITESPACE* }
+in_with_vars = { in_kw ~ var+ }
+match = { "match" }
+select = { "select" }
+until = { "until" }
+while = { "while" }
+do = { "do" }
+done = { "done" }
+
+loud_sep = { (";" | NEWLINE)+ } // Loud because the rule is not silent
+
+loud_operator = {
+	WHITESPACE* ~
+	("|" |
+    "{" | // Brackets are here to delimit brace groups
+    "}" |
+    "=>" |
+	"&&" |
+	"|&" |
+	">" |
+    "=" |
+	"<" |
+	"<<" |
+	"<<<" |
+	">>" |
+	">|" |
+	">>|" |
+	"<>" |
+	"&"
+	) ~ WHITESPACE*
+}
+
+shell_struct = {
+    for_with_vars |
+	for |
+	if |
+    then |
+    else |
+	elif |
+	fi |
+	match |
+	select |
+	until |
+	while |
+    done |
+	do |
+    in_with_vars |
+    in_kw |
+	func_name
+}
+
+hl_brace_grp = { "{" ~ syntax_hl ~ "}" }
+
+
+words = { (!shell_struct ~ word)+ }
+
+syntax_hl = { (loud_sep|shell_struct|loud_operator|words)* }
 
 // Misc rules
 func_name = @{ word ~ "()" }

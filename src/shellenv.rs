@@ -4,10 +4,11 @@ use std::collections::HashMap;
 use bitflags::bitflags;
 use nix::{sys::{signal::{kill, killpg, signal, SigHandler, Signal}, wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{gethostname, getpgrp, isatty, setpgid, tcgetpgrp, tcsetpgrp, Pid, User}};
 use once_cell::sync::Lazy;
+use pest::Parser;
 use serde_json::Value;
 use std::{fs::File, sync::RwLock};
 
-use crate::{error::{LashErr, LashErrLow}, exec_list, execute::ExecCtx, helper::{self, VecDequeExtension}, shopt::ShOpts, LashResult, Rule};
+use crate::{error::{LashErr, LashErrLow}, exec_input, exec_list, execute::ExecCtx, helper::{self, VecDequeExtension}, shopt::ShOpts, LashParse, LashResult, OptPairExt, Rule};
 
 
 #[derive(Debug)]
@@ -115,6 +116,7 @@ bitflags! {
 		const NO_CD_SYMLINKS   = 0b00000010000000000000000000000000; // set -P
 		const INHERIT_RET      = 0b00000100000000000000000000000000; // set -T
 		const SOURCING         = 0b00001000000000000000000000000000;
+		const INITIALIZED      = 0b00010000000000000000000000000000;
 	}
 	#[derive(Debug,Copy,Clone)]
 	pub struct JobCmdFlags: i8 { // Options for the jobs builtin
@@ -713,7 +715,7 @@ pub enum LashVal {
 }
 
 impl LashVal {
-	pub fn parse(mut s: &str) -> Result<Self, String> {
+	pub fn parse(mut s: &str) -> LashResult<Self> {
 		if let Ok(int) = s.parse::<i32>() {
 			return Ok(LashVal::Int(int));
 		}
@@ -725,8 +727,23 @@ impl LashVal {
 		}
 		if s.starts_with('"') && s.ends_with('"') {
 			s = s.trim_matches('"');
+			return Ok(LashVal::String(s.to_string()))
 		} else if s.starts_with('\'') && s.ends_with('\'') {
 			s = s.trim_matches('\'');
+			return Ok(LashVal::String(s.to_string()))
+		}
+		if let Ok(array) = LashParse::parse(Rule::array, s) {
+			let mut arr_inner = array.into_iter().next().unpack()?.into_inner();
+			let mut elements = vec![];
+			if arr_inner.as_str() == "[]" {
+				return Ok(LashVal::Array(elements))
+			} else {
+				while let Some(element) = arr_inner.next() {
+					let lash_val = LashVal::parse(element.as_str())?;
+					elements.push(lash_val)
+				}
+				return Ok(LashVal::Array(elements))
+			}
 		}
 		Ok(LashVal::String(s.to_string()))
 	}
@@ -1105,7 +1122,7 @@ impl EnvMeta {
 		&self.shopts
 	}
 	pub fn set_shopt(&mut self, key: &str, val: &str) -> LashResult<()> {
-		let val = LashVal::parse(val).map_err(|e| LashErr::Low(LashErrLow::InternalErr(e)))?;
+		let val = LashVal::parse(val)?;
 		let query = key.split('.').map(|str| str.to_string()).collect::<VecDeque<String>>();
 		self.shopts.set(query,val)
 	}
@@ -1326,7 +1343,7 @@ pub fn source_file<'a>(path: PathBuf) -> LashResult<()> {
 	write_meta(|m| m.flags |= EnvFlags::SOURCING)?;
 
 	let mut ctx = ExecCtx::new();
-	let result = exec_list(Rule::main, buffer, &mut ctx).map(|_| ());
+	let result = exec_input(buffer, &mut ctx);
 	write_meta(|m| m.flags &= !EnvFlags::SOURCING)?;
 	result
 }

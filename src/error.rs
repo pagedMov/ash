@@ -66,6 +66,7 @@ pub enum LashErrLow {
 	BadFD(String),
 	InvalidSyntax(String),
 	InternalErr(String),
+	IndexErr(String),
 	ExecFailed(String),
 
 	// Not actual errors, used to propagate logic from commands like `exit` and `return`
@@ -90,6 +91,7 @@ impl Display for LashErrLow {
 			LashErrLow::BadFD(msg) => write!(f,"{}",msg),
 			LashErrLow::InvalidSyntax(msg) => write!(f,"Syntax Error: {}",msg),
 			LashErrLow::InternalErr(msg) => write!(f,"Internal Error: {}",msg),
+			LashErrLow::IndexErr(msg) => write!(f,"Index Error: {}",msg),
 			LashErrLow::ExecFailed(msg) => write!(f,"Execution Failed: {}",msg),
 			LashErrLow::CmdNotFound(name) => write!(f,"Command not found: {}",name),
 			LashErrLow::BadPermission(name) => write!(f,"Permission denied: {}",name),
