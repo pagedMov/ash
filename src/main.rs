@@ -87,7 +87,7 @@ struct LashArgs {
 	hist_path: Option<PathBuf>,
 
 	#[arg(short = 'c', value_name = "COMMAND", help = "Run a single command and then exit")]
-	command: String
+	command: Option<String>
 }
 
 fn main() {

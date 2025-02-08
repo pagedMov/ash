@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{collections::{HashMap, HashSet, VecDeque}, env, ffi::CString, fmt::Display, os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, RawFd}, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard}};
+use std::{collections::{HashMap, HashSet, VecDeque}, env, ffi::CString, fmt::Display, io::{self, Write}, os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd}, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard}};
 
 use libc::MFD_CLOEXEC;
 use nix::{errno::Errno, fcntl::{fcntl, open, FcntlArg::F_GETFD, OFlag}, sys::{memfd::{memfd_create, MemFdCreateFlag}, signal::Signal, stat::{fstat, Mode}, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
@@ -211,6 +211,121 @@ pub struct RustFd {
 	fd: RawFd,
 }
 
+impl fmt::Write for RustFd {
+	fn write_str(&mut self, s: &str) -> std::fmt::Result {
+	  self.write(s.as_bytes()).map_err(|_| fmt::Error)?;
+		Ok(())
+	}
+	fn write_char(&mut self, c: char) -> std::fmt::Result {
+		let mut buffer = [0u8;4];
+		let slice = c.encode_utf8(&mut buffer);
+		self.write(slice.as_bytes()).map_err(|_| fmt::Error)?;
+		Ok(())
+	}
+}
+
+impl io::Write for RustFd {
+	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+		if !self.is_valid() {
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"))
+		}
+
+		let result = unsafe { libc::write(self.fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
+
+		if result < 0 {
+			Err(io::Error::last_os_error())
+		} else {
+			Ok(result as usize)
+		}
+	}
+	fn flush(&mut self) -> std::io::Result<()> {
+		Ok(())
+	}
+	fn write_fmt(&mut self, fmt: std::fmt::Arguments<'_>) -> io::Result<()> {
+		let mut formatted = String::new();
+		fmt::write(&mut formatted, fmt).unwrap(); // FIXME: do not leave this unwrap unhandled for long
+
+		self.write(formatted.as_bytes())?;
+		Ok(())
+	}
+}
+
+impl io::Read for RustFd {
+	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		if !self.is_valid() {
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
+		}
+
+		match nix::unistd::read(self.as_raw_fd(), buf) {
+			Ok(num_bytes) => Ok(num_bytes), // Return the number of bytes read
+			Err(nix::errno::Errno::EINTR) => self.read(buf), // Retry if interrupted
+			Err(_) => Err(io::Error::last_os_error()), // Convert other errors
+		}
+	}
+	fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+		if !self.is_valid() {
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
+		}
+
+		let mut temp_buf = [0u8; 4096];
+		let mut total_read = 0;
+
+		loop {
+			match nix::unistd::read(self.as_raw_fd(), &mut temp_buf) {
+				Ok(0) => break,
+				Ok(n) => {
+					buf.extend_from_slice(&temp_buf[..n]);
+					total_read += n;
+				}
+				Err(nix::errno::Errno::EINTR) => continue,
+				Err(_) => return Err(io::Error::last_os_error())
+			}
+		}
+		Ok(total_read)
+	}
+	fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
+		if !self.is_valid() {
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
+		}
+
+		let mut temp_buf = [0u8; 4096];
+		let mut total_read = 0;
+
+		loop {
+			match nix::unistd::read(self.as_raw_fd(), &mut temp_buf) {
+				Ok(0) => break,
+				Ok(n) => {
+					match std::str::from_utf8(&temp_buf[..n]) {
+						Ok(valid) => buf.push_str(valid),
+						Err(_) => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid UTF-8"))
+					}
+					total_read += n;
+				}
+				Err(nix::errno::Errno::EINTR) => continue,
+				Err(_) => return Err(io::Error::last_os_error())
+			}
+		}
+		Ok(total_read)
+	}
+	fn read_vectored(&mut self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
+		if !self.is_valid() {
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
+		}
+
+		match nix::sys::uio::readv(&mut *self, bufs) {
+			Ok(n) => Ok(n),
+			Err(nix::errno::Errno::EINTR) => self.read_vectored(bufs),
+			Err(_) => Err(io::Error::last_os_error())
+		}
+	}
+}
+
+impl AsFd for RustFd {
+	fn as_fd(&self) -> std::os::unix::prelude::BorrowedFd<'_> {
+		unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
+	}
+}
+
 impl<'a> RustFd {
 	pub fn new(fd: RawFd) -> LashResult<Self> {
 		if fd < 0 {
@@ -267,38 +382,6 @@ impl<'a> RustFd {
 		Ok(RustFd { fd: fd.as_raw_fd() })
 	}
 
-	/// Write some bytes to the contained file descriptor
-	pub fn write(&self, buffer: &[u8]) -> LashResult<()> {
-		if !self.is_valid() {
-			panic!()
-		}
-		let result = unsafe { libc::write(self.fd, buffer.as_ptr() as *const libc::c_void, buffer.len()) };
-		if result < 0 {
-			return Err(LashErr::Low(LashErrLow::from_io()))
-		} else {
-			Ok(())
-		}
-	}
-
-	pub fn read(&self) -> LashResult< String> {
-		if !self.is_valid() {
-			return Err(LashErr::Low(LashErrLow::BadFD("Attempted to read from an invalid RustFd".into())))
-		}
-		let mut buffer = [0; 1024];
-		let mut output = String::new();
-
-		loop {
-			match nix::unistd::read(self.as_raw_fd(), &mut buffer) {
-				Ok(0) => break, // End of pipe
-				Ok(bytes_read) => {
-					output.push_str(&String::from_utf8_lossy(&buffer[..bytes_read]));
-				}
-				Err(_) => return Err(LashErr::Low(LashErrLow::from_io()))
-			}
-		}
-		Ok(output)
-	}
-
 	/// Wrapper for nix::unistd::pipe(), simply produces two `RustFds` that point to a read and write pipe respectfully
 	pub fn pipe() -> LashResult<(Self,Self)> {
 		let (r_pipe,w_pipe) = pipe().map_err(|_| LashErr::Low(LashErrLow::from_io()))?;
@@ -336,6 +419,17 @@ impl<'a> RustFd {
 		let file_fd = open(path, flags, mode);
 		if let Ok(file_fd) = file_fd {
 			Ok(Self { fd: file_fd })
+		} else {
+			return Err(Low(LashErrLow::BadFD(format!("Attempted to open non-existant file '{}'",path.to_str().unwrap()))))
+		}
+	}
+
+	pub fn std_open(path: &Path) -> LashResult<Self> {
+		let flags = OFlag::O_RDWR;
+		let mode = Mode::from_bits(0o644).unwrap();
+		let fd = open(path, flags, mode);
+		if let Ok(file) = fd {
+			Ok(Self { fd: file})
 		} else {
 			return Err(Low(LashErrLow::BadFD(format!("Attempted to open non-existant file '{}'",path.to_str().unwrap()))))
 		}
@@ -649,8 +743,9 @@ pub fn exec_subshell<'a>(subsh: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<
 fn handle_external_subshell(script: String, argv: VecDeque<String>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let argv = argv.into_iter().map(|arg| CString::new(arg).unwrap()).collect::<Vec<_>>();
 	let envp = shellenv::get_cstring_evars()?;
-	let memfd = RustFd::new_memfd("anonymous_subshell", true)?;
-	memfd.write(script.as_bytes())?;
+	let mut memfd = RustFd::new_memfd("anonymous_subshell", true)?;
+	write!(memfd,"{}",script)?;
+
 	let fd_path = CString::new(format!("/proc/self/fd/{memfd}")).unwrap();
 	let io = ctx.io_mut();
 
@@ -1006,6 +1101,7 @@ fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()
 			}
 		}
 		"string" | "float" | "int" | "arr" | "bool" => builtin::assign_builtin(cmd, ctx)?,
+		"type" => builtin::var_type(cmd, ctx)?,
 		"setopt" => builtin::setopt(cmd, ctx)?,
 		"cd" => builtin::cd(cmd, ctx)?,
 		"alias" => builtin::alias(cmd, ctx)?,

@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, env, iter::Rev, mem::take, os::fd::AsRawFd};
+use std::{collections::VecDeque, env, io::Read, iter::Rev, mem::take, os::fd::AsRawFd};
 
 use chrono::Local;
 use nix::unistd::{fork, ForkResult};
@@ -222,9 +222,10 @@ pub fn expand_cmd_sub(mut pair: Pair<Rule>) -> LashResult<String> {
 		Err(_) => panic!()
 	}
 
-	let buffer = r_pipe.read()?.trim().to_string();
+	let mut buffer = String::new();
+	r_pipe.read_to_string(&mut buffer)?;
 	r_pipe.close()?;
-	Ok(buffer)
+	Ok(buffer.trim().to_string())
 }
 
 fn expand_proc_sub(pair: Pair<Rule>) -> String {

@@ -46,6 +46,12 @@ pub enum LashErr {
 	High(LashErrHigh)
 }
 
+impl From<std::io::Error> for LashErr {
+	fn from(value: std::io::Error) -> Self {
+		Self::Low(LashErrLow::IoError(value.to_string()))
+	}
+}
+
 impl Display for LashErr {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
@@ -75,6 +81,7 @@ pub enum LashErrLow {
 	LoopCont,
 	LoopBreak(i32),
 }
+
 
 impl LashErrLow {
 	pub fn from_io() -> Self {

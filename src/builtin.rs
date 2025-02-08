@@ -1,5 +1,6 @@
-use std::{collections::VecDeque, env, ffi::CString, fs, os::{fd::AsRawFd, unix::fs::{FileTypeExt, MetadataExt}}, path::{Path, PathBuf}};
+use std::{io::Write,collections::VecDeque, env, ffi::CString, fs, os::{fd::AsRawFd, unix::fs::{FileTypeExt, MetadataExt}}, path::{Path, PathBuf}};
 
+use libc::STDOUT_FILENO;
 use nix::unistd::{access, fork, getegid, geteuid, isatty, setpgid, AccessFlags, ForkResult};
 use pest::iterators::Pair;
 
@@ -48,6 +49,23 @@ pub fn catstr(mut c_strings: VecDeque<CString>,newline: bool) -> CString {
 	}
 
 	CString::from_vec_with_nul(cat).unwrap()
+}
+
+pub fn var_type<'a>(pair: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
+	let mut argv = helper::prepare_argv(pair.clone());
+	let mut redirs = helper::prepare_redirs(pair.clone())?;
+	redirs.extend(ctx.redirs());
+	let mut redirs = CmdRedirs::new(Vec::from(redirs));
+	redirs.activate()?;
+
+	let mut stdout = RustFd::new(STDOUT_FILENO)?;
+	while let Some(arg) = argv.pop_front() {
+		if let Some(var) = read_vars(|v| v.get_var(&arg))? {
+			let display = var.fmt_type();
+			writeln!(stdout,"{}",display)?;
+		}
+	}
+	Ok(())
 }
 
 pub fn run_test<T,F1,F2>(arg: Option<Pair<Rule>>,alter: F1,check_property: F2) -> LashResult<bool>
@@ -300,7 +318,7 @@ pub fn cd<'a>(cd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 }
 
 pub fn alias<'a>(alias_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
-	let mut stdout = RustFd::new(1)?;
+	let mut stdout = RustFd::new(STDOUT_FILENO)?;
 
 	let mut args = alias_call.filter(&ARG_RULES[..]);
 	let redirs = helper::prepare_redirs(alias_call)?;
@@ -324,8 +342,7 @@ pub fn alias<'a>(alias_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()>
 			Rule::word => {
 				let alias = read_logic(|l| l.get_alias(arg.as_str()))?;
 				if let Some(alias) = alias {
-					let fmt_output = format!("{alias}\n");
-					stdout.write(fmt_output.as_bytes())?;
+					write!(stdout,"{alias}\n")?;
 				}
 			}
 			_ => unreachable!()
@@ -363,8 +380,8 @@ pub fn pwd<'a>(pwd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	}
 
 	if let Ok(pwd) = env::var("PWD") {
-		let stdout = RustFd::new(1)?;
-		stdout.write(pwd.as_bytes())?;
+		let mut stdout = RustFd::new(STDOUT_FILENO)?;
+		write!(stdout,"{}",pwd)?;
 		Ok(())
 	} else {
 		let msg = String::from("PWD environment variable is unset");
@@ -397,7 +414,7 @@ pub fn echo<'a>(echo_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let mut flags = EchoFlags::empty();
 	let blame = echo_call.clone();
 	let mut echo_args = echo_call.filter(&ARG_RULES[..]);
-	let mut os_args = VecDeque::new();
+	let mut arg_buffer = vec![];
 	let mut redirs = helper::prepare_redirs(echo_call)?;
 	redirs.extend(ctx.redirs());
 
@@ -426,20 +443,21 @@ pub fn echo<'a>(echo_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 				}
 			}
 			if new_flags.is_empty() {
-				os_args.push_back(CString::new(arg.as_str().trim_quotes()).unwrap());
+				arg_buffer.push(arg.as_str().trim_quotes().to_string());
 			} else {
 				flags |= new_flags;
 			}
 		} else {
-			os_args.push_back(CString::new(arg.as_str().trim_quotes()).unwrap());
+			arg_buffer.push(arg.as_str().trim_quotes().to_string());
 		}
 	}
 
+	let output = arg_buffer.join(" ");
+
 	let newline = !flags.contains(EchoFlags::NO_NEWLINE);
 
-	let output = catstr(os_args, newline);
 	let io = ctx.io_mut();
-	let target_fd = if flags.contains(EchoFlags::STDERR) {
+	let mut target_fd = if flags.contains(EchoFlags::STDERR) {
 		if let Some(ref err_fd) = io.stderr {
 			err_fd.lock().unwrap().dup().unwrap_or_else(|_| RustFd::from_stderr().unwrap())
 		} else {
@@ -448,7 +466,7 @@ pub fn echo<'a>(echo_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	} else if let Some(ref out_fd) = io.stdout {
 			out_fd.lock().unwrap().dup().unwrap_or_else(|_| RustFd::from_stdout().unwrap())
 		} else {
-			RustFd::new(1)?
+			RustFd::new(STDOUT_FILENO)?
 	};
 
 	if let Some(ref fd) = io.stderr {
@@ -462,12 +480,20 @@ pub fn echo<'a>(echo_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	redirs.activate()?;
 
 	if ctx.flags().contains(ExecFlags::NO_FORK) {
-		target_fd.write(output.as_bytes())?;
+		if newline {
+			writeln!(target_fd,"{}",output)?;
+		} else {
+			write!(target_fd,"{}",output)?;
+		}
 		std::process::exit(0);
 	}
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {
-			target_fd.write(output.as_bytes()).unwrap();
+			if newline {
+				writeln!(target_fd,"{}",output)?;
+			} else {
+				write!(target_fd,"{}",output)?;
+			}
 			std::process::exit(0);
 		}
 		Ok(ForkResult::Parent { child }) => {

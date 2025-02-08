@@ -8,7 +8,7 @@ use pest::Parser;
 use serde_json::Value;
 use std::{fs::File, sync::RwLock};
 
-use crate::{error::{LashErr, LashErrLow}, exec_input, exec_list, execute::ExecCtx, helper::{self, VecDequeExtension}, shopt::ShOpts, LashParse, LashResult, pair::OptPairExt, Rule};
+use crate::{error::{LashErr, LashErrLow}, exec_input, exec_list, execute::{ExecCtx, RustFd}, helper::{self, VecDequeExtension}, pair::OptPairExt, shopt::ShOpts, LashParse, LashResult, Rule};
 
 
 #[derive(Debug)]
@@ -1342,7 +1342,7 @@ pub fn get_cstring_evars<'a>() -> LashResult<Vec<CString>> {
 }
 
 pub fn source_file<'a>(path: PathBuf) -> LashResult<()> {
-	let mut file = File::open(&path).map_err(|_| LashErr::Low(LashErrLow::from_io()))?;
+	let mut file = RustFd::std_open(&path)?;
 	let mut buffer = String::new();
 	file.read_to_string(&mut buffer).map_err(|_| LashErr::Low(LashErrLow::from_io()))?;
 	write_meta(|meta| meta.set_last_input(&buffer.clone()))?;
