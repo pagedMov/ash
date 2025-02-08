@@ -4,10 +4,10 @@ use libc::STDOUT_FILENO;
 use nix::unistd::{access, fork, getegid, geteuid, isatty, setpgid, AccessFlags, ForkResult};
 use pest::iterators::Pair;
 
-use crate::{error::{LashErr::*, LashErrHigh, LashErrLow}, execute::{CmdRedirs, ExecCtx, ExecFlags, Redir, RustFd}, helper::{self, StrExtension}, pair::{OptPairExt, PairExt, ARG_RULES}, shellenv::{self, read_logic, read_vars, write_jobs, write_meta, write_vars, ChildProc, HashFloat, JobBuilder, LashVal}, LashResult, Rule};
+use crate::{error::{LashErr::*, LashErrHigh, LashErrLow}, execute::{CmdRedirs, ExecCtx, ExecFlags, Redir, RustFd}, helper::{self, StrExtension}, pair::{OptPairExt, PairExt, ARG_RULES}, shellenv::{self, read_logic, read_meta, read_vars, write_jobs, write_meta, write_vars, ChildProc, HashFloat, JobBuilder, LashVal}, LashResult, Rule};
 
 pub const BUILTINS: [&str; 43] = [
-	"try", "except", "return", "break", "contine", "exit", "command", "pushd", "popd", "setopt", "getopt", "type", "string", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
+	"try", "except", "return", "break", "continue", "exit", "command", "pushd", "popd", "setopt", "getopt", "type", "string", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
 ];
 
 bitflags::bitflags! {
@@ -296,6 +296,73 @@ pub fn setopt<'a>(setopt_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 	Ok(())
 }
 
+pub fn popd<'a>(popd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
+	let mut argv = helper::prepare_argv(popd_call.clone());
+	argv.pop_front();
+	let arg = argv.pop_front();
+	let mut path = None;
+	if let Some(arg) = arg {
+		match arg.as_str().parse::<usize>() {
+			Ok(count) => {
+				for _ in 0..count {
+					let popped = write_meta(|m| m.pop_dir())?;
+					if let Some(popped) = popped {
+						path = Some(popped);
+					}
+				}
+			}
+			Err(_) => {
+				let msg = "`popd` expects a positive integer";
+				return Err(High(LashErrHigh::syntax_err(msg, popd_call)))
+			}
+		}
+	} else {
+		path = write_meta(|m| m.pop_dir())?;
+	}
+	match path {
+		Some(path) => {
+			if path.exists() {
+				if path.is_dir() {
+					shellenv::change_dir(&path)?;
+				} else {
+					return Err(High(LashErrHigh::syntax_err("Path is not a directory", popd_call)))
+				}
+			} else {
+				return Err(High(LashErrHigh::syntax_err("Path does not exist", popd_call)))
+			}
+		}
+		None => {
+			let msg = "`popd` called with an empty directory stack";
+			return Err(High(LashErrHigh::exec_err(msg, popd_call)))
+		}
+	}
+	Ok(())
+}
+
+pub fn pushd<'a>(pushd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
+	let arg = pushd_call.scry(&ARG_RULES[..]);
+	match arg {
+		Some(arg) => {
+			let blame = arg.clone();
+			let path = Path::new(arg.as_str());
+			if path.exists() {
+				if path.is_dir() {
+					write_vars(|v| v.export_var("OLDPWD", &env::var("PWD").unwrap_or_default()))?;
+					write_vars(|v| v.export_var("PWD", path.to_str().unwrap()))?;
+					write_meta(|m| m.push_dir(env::current_dir().unwrap()))?;
+					env::set_current_dir(path)?;
+				} else {
+					return Err(High(LashErrHigh::syntax_err("Path is not a directory", blame)))
+				}
+			} else {
+				return Err(High(LashErrHigh::syntax_err("Path does not exist", blame)))
+			}
+		}
+		None => return Err(High(LashErrHigh::syntax_err("Expected a directory path in pushd args", pushd_call)))
+	}
+	Ok(())
+}
+
 pub fn cd<'a>(cd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = cd_call.clone();
 	let arg = cd_call.scry(&ARG_RULES[..]);
@@ -312,7 +379,8 @@ pub fn cd<'a>(cd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 			new_pwd = env::var("HOME").unwrap_or("/".into());
 		}
 	}
-	env::set_current_dir(new_pwd).map_err(|_| High(LashErrHigh::io_err(blame)))?;
+	write_vars(|v| v.export_var("OLDPWD", &env::var("PWD").unwrap_or_default()))?;
+	env::set_current_dir(new_pwd)?;
 	write_vars(|v| v.export_var("PWD", env::current_dir().unwrap().to_str().unwrap()))?;
 	Ok(())
 }

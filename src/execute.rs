@@ -1101,6 +1101,8 @@ fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()
 			}
 		}
 		"string" | "float" | "int" | "arr" | "bool" => builtin::assign_builtin(cmd, ctx)?,
+		"pushd" => builtin::pushd(cmd, ctx)?,
+		"popd" => builtin::popd(cmd, ctx)?,
 		"type" => builtin::var_type(cmd, ctx)?,
 		"setopt" => builtin::setopt(cmd, ctx)?,
 		"cd" => builtin::cd(cmd, ctx)?,

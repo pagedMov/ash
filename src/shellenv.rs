@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, VecDeque}, env, ffi::{CString, OsStr}, fmt, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::PathBuf, sync::{Arc, LazyLock}, time::{Duration, Instant}};
+use std::{collections::{BTreeMap, VecDeque}, env, ffi::{CString, OsStr}, fmt, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::{Path, PathBuf}, sync::{Arc, LazyLock}, time::{Duration, Instant}};
 use std::collections::HashMap;
 
 use bitflags::bitflags;
@@ -1138,6 +1138,13 @@ impl EnvMeta {
 	pub fn flags(&self) -> EnvFlags {
 		self.flags
 	}
+}
+
+pub fn change_dir(path: &Path) -> LashResult<()> {
+	write_vars(|v| v.export_var("OLDPWD", &env::var("PWD").unwrap_or_default()))?;
+	write_vars(|v| v.export_var("PWD", path.to_str().unwrap()))?;
+	env::set_current_dir(path)?;
+	Ok(())
 }
 
 pub fn set_code(code: isize) -> LashResult<()> {
