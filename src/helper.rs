@@ -4,7 +4,7 @@ use regex::Regex;
 use serde_json::Value;
 use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, f32::INFINITY, fs, io::{self, Read}, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread, time::Duration};
 
-use crate::{comp::REGEX, error::{LashErr, LashErrHigh, LashErrLow}, expand::{self, expand_esc, expand_time, replace_span}, shellenv::{self, attach_tty, disable_reaping, enable_reaping, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, HashFloat, Job, LashVal}, LashParse, LashResult, OptPairExt, Rule};
+use crate::{comp::REGEX, error::{LashErr, LashErrHigh, LashErrLow}, execute::Redir, expand::{self, expand_esc, expand_time, replace_span}, shellenv::{self, attach_tty, disable_reaping, enable_reaping, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, HashFloat, Job, LashVal}, LashParse, LashResult, pair::OptPairExt, pair::PairExt, Rule};
 
 
 #[macro_export]
@@ -65,6 +65,7 @@ pub trait StrExtension {
 	fn has_unescaped(&self, pat: &str) -> bool;
 	fn has_varsub(&self) -> bool;
 	fn has_unquoted(&self, pat: &str) -> bool;
+	fn is_quoted(&self) -> bool;
 	fn trim_quotes(&self) -> String;
 	fn split_outside_quotes(&self) -> Vec<String>;
 	fn split_twice(&self,left: &str, right: &str) -> Option<(String,String,String)>;
@@ -73,6 +74,9 @@ pub trait StrExtension {
 }
 
 impl StrExtension for str {
+	fn is_quoted(&self) -> bool {
+		(self.starts_with('"') && self.ends_with('"')) || (self.starts_with('\'') && self.ends_with('\''))
+	}
 	fn replacen_ignore_ansi(&self, pat: &str, new: &str, num: usize) -> String {
 
 		let ansi_regex = &REGEX["ansi"];
@@ -369,6 +373,27 @@ impl StrExtension for str {
 		false
 	}
 
+}
+
+pub fn prepare_argv<'a>(pair: Pair<'a,Rule>) -> VecDeque<String> {
+	let cmd_name = pair.scry(Rule::cmd_name);
+	if let Some(name) = cmd_name {
+		let mut args = pair.into_inner().filter(|pr| matches!(pr.as_rule(), Rule::arg_assign | Rule::word)).map(|pr| pr.to_string()).collect::<VecDeque<_>>();
+		args.push_front(name.to_string());
+		args
+	} else {
+		VecDeque::new()
+	}
+}
+
+pub fn prepare_redirs<'a>(pair: Pair<'a,Rule>) -> LashResult<VecDeque<Redir>> {
+	let mut results = pair.filter(Rule::redir).into_iter().map(|pr| Redir::from_pair(pr)).collect::<VecDeque<_>>();
+	let mut redirs = VecDeque::new();
+	while let Some(result) = results.pop_front() {
+		let extracted = result?;
+		redirs.push_back(extracted);
+	}
+	Ok(redirs)
 }
 
 pub fn handle_nested(open: &str, close: &str, haystack: &mut VecDeque<char>) -> String {

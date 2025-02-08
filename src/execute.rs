@@ -5,10 +5,10 @@ use libc::MFD_CLOEXEC;
 use nix::{errno::Errno, fcntl::{fcntl, open, FcntlArg::F_GETFD, OFlag}, sys::{memfd::{memfd_create, MemFdCreateFlag}, signal::Signal, stat::{fstat, Mode}, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
 use pest::{iterators::Pair, Parser};
 
-use crate::{builtin::{self, BUILTINS}, error::LashErrHigh, exec_input, helper::{handle_fg, proc_res, StrExtension}, shellenv::{read_logic, read_meta, EnvFlags, SavedEnv}, OptPairExt};
+use crate::{builtin::{self, BUILTINS}, error::LashErrHigh, exec_input, helper::{handle_fg, proc_res, StrExtension}, shellenv::{read_logic, read_meta, EnvFlags, SavedEnv}, pair::OptPairExt};
 use crate::error::LashErrLow::*;
 use crate::error::LashErr::*;
-use crate::{error::{LashErr, LashErrLow}, exec_list, expand, helper, shellenv::{self, read_vars, write_meta, write_vars, ChildProc, JobBuilder, LashVal}, LashParse, LashResult, PairExt, Rule};
+use crate::{error::{LashErr, LashErrLow}, exec_list, expand, helper, shellenv::{self, read_vars, write_meta, write_vars, ChildProc, JobBuilder, LashVal}, LashParse, LashResult, pair::PairExt, Rule};
 
 const SHELL_CMDS: [&str;6] = [
 	"for",
@@ -31,7 +31,7 @@ bitflags::bitflags! {
 #[derive(Debug,Clone)]
 pub struct ExecCtx {
 	io: ProcIO,
-	redir_queue: Vec<Redir>,
+	redir_queue: VecDeque<Redir>,
 	flags: ExecFlags,
 	last_status: i32,
 	depth: usize,
@@ -44,7 +44,7 @@ impl ExecCtx {
 		let last_status = shellenv::check_status().unwrap().parse::<i32>().unwrap();
 		Self {
 			io: ProcIO::new(),
-			redir_queue: vec![],
+			redir_queue: VecDeque::new(),
 			flags: ExecFlags::empty(),
 			last_status,
 			depth: 0,
@@ -118,14 +118,17 @@ impl ExecCtx {
 	pub fn io_mut(&mut self) -> &mut ProcIO {
 		&mut self.io
 	}
-	pub fn set_redirs(&mut self, redirs: Vec<Redir>) {
+	pub fn set_redirs(&mut self, redirs: VecDeque<Redir>) {
 		self.redir_queue = redirs
 	}
+	pub fn extend_redirs(&mut self, redirs: VecDeque<Redir>) {
+		self.redir_queue.extend(redirs);
+	}
 	pub fn push_redir(&mut self,redir: Redir) {
-		self.redir_queue.push(redir)
+		self.redir_queue.push_back(redir)
 	}
 	pub fn pop_redir(&mut self) -> Option<Redir> {
-		self.redir_queue.pop()
+		self.redir_queue.pop_back()
 	}
 	pub fn redirs(&mut self) -> Vec<Redir> {
 		let redirs = self.redir_queue.clone();
@@ -538,16 +541,16 @@ fn dispatch_exec<'a>(node: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 				if BUILTINS.contains(&command_name) {
 					exec_builtin(node,command_name,ctx)?;
 				} else if shellenv::is_func(command_name)? {
-					exec_func(node,command_name,ctx)?;
+					exec_func(node,ctx)?;
 				} else {
 					exec_cmd(node, ctx)?;
 				}
 			}
 			Rule::shell_cmd => {
-				let mut shell_cmd_inner = node.to_vec_rev();
-				let shell_cmd = shell_cmd_inner.pop().unpack()?;
-				while shell_cmd_inner.last().is_some_and(|pair| pair.as_rule() == Rule::redir) {
-					let redir = Redir::from_pair(shell_cmd_inner.pop().unpack()?)?;
+				let mut shell_cmd_inner = node.to_deque();
+				let shell_cmd = shell_cmd_inner.pop_front().unpack()?;
+				while shell_cmd_inner.front().is_some_and(|pair| pair.as_rule() == Rule::redir) {
+					let redir = Redir::from_pair(shell_cmd_inner.pop_front().unpack()?)?;
 					ctx.push_redir(redir);
 				}
 				match shell_cmd.as_rule() {
@@ -569,16 +572,16 @@ fn dispatch_exec<'a>(node: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 		Ok(())
 }
 
-pub fn descend(mut node_stack: Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult<()> {
+pub fn descend(mut node_stack: VecDeque<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult<()> {
 	ctx.descend()?; // Increment depth counter
-	while let Some(node) = node_stack.pop() {
+	while let Some(node) = node_stack.pop_front() {
 		match node.as_rule() {
 			Rule::main | Rule::cmd_list => {
-				let inner = node.to_vec_rev();
+				let inner = node.to_deque();
 				node_stack.extend(inner);
 			}
 			Rule::op => {
-				let option = node.into_inner().next();
+				let option = node.step(1);
 				if let Some(op) = option {
 					match op.as_rule() {
 						Rule::and => {
@@ -598,7 +601,7 @@ pub fn descend(mut node_stack: Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult
 				}
 			}
 			Rule::bg_cmd => {
-				if let Some(cmd) = node.into_inner().next() {
+				if let Some(cmd) = node.step(1) {
 					let flags = ctx.flags_mut();
 					*flags |= ExecFlags::BACKGROUND;
 					dispatch_exec(cmd, ctx)?
@@ -613,42 +616,22 @@ pub fn descend(mut node_stack: Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult
 
 fn exec_func_def<'a>(func_def: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = func_def.clone();
-	let mut inner = func_def.into_inner();
-	let func_name = inner.next().unpack()?;
-	let body = inner.next().unpack()?;
+	let func_name = func_def.scry(Rule::func_name).unpack()?;
+	let body = func_def.scry(Rule::brace_grp).unpack()?;
 	helper::write_func(func_name.as_str(), body.as_str().trim_matches(['{','}']).trim())?;
 	Ok(())
 }
 
 pub fn exec_subshell<'a>(subsh: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
-	let mut inner = subsh.into_inner().peekable();
 	let mut shebang = None;
-	let body;
-	if inner.peek().is_some_and(|nd| nd.as_rule() == Rule::subshebang) {
-		shebang = Some(inner.next().unpack()?.as_str().to_string());
-		body = inner.next().unpack()?.as_str();
-	} else {
-		body = inner.next().unpack()?.as_str();
-	}
-	if let Some(text) = shebang {
-		shebang = Some(expand::expand_shebang(&text));
+	let body = subsh.scry(Rule::subsh_body).unpack()?.as_str();
+	if let Some(subshebang) = subsh.scry(Rule::subshebang) {
+		let raw_shebang = subshebang.as_str().to_string();
+		shebang = Some(expand::expand_shebang(&raw_shebang));
 	}
 
-	let mut argv = vec![];
-	let mut redirs = vec![];
-	while let Some(node) = inner.next() {
-		match node.as_rule() {
-			Rule::word => {
-				let arg = node.as_str().to_string();
-				argv.push(arg);
-			}
-			Rule::redir => {
-				let redir = Redir::from_pair(node)?;
-				redirs.push(redir);
-			}
-			_ => unreachable!()
-		}
-	}
+	let argv = helper::prepare_argv(subsh.clone());
+	let redirs = helper::prepare_redirs(subsh)?;
 
 	ctx.set_redirs(redirs);
 	if let Some(shebang) = shebang {
@@ -661,7 +644,7 @@ pub fn exec_subshell<'a>(subsh: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<
 	Ok(())
 }
 
-fn handle_external_subshell(script: String, argv: Vec<String>, ctx: &mut ExecCtx) -> LashResult<()> {
+fn handle_external_subshell(script: String, argv: VecDeque<String>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let argv = argv.into_iter().map(|arg| CString::new(arg).unwrap()).collect::<Vec<_>>();
 	let envp = shellenv::get_cstring_evars()?;
 	let memfd = RustFd::new_memfd("anonymous_subshell", true)?;
@@ -697,7 +680,7 @@ fn handle_external_subshell(script: String, argv: Vec<String>, ctx: &mut ExecCtx
 	Ok(())
 }
 
-fn handle_internal_subshell(body: String, argv: Vec<String>, ctx: &mut ExecCtx) -> LashResult<()> {
+fn handle_internal_subshell(body: String, argv: VecDeque<String>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let snapshot = SavedEnv::get_snapshot()?;
 	write_vars(|v| {
 		v.reset_params();
@@ -735,7 +718,7 @@ fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 				cmds.push(cmd.as_str().to_string())
 			}
 			Rule::shell_cmd => {
-				let shell_cmd = cmd_check.into_inner().next().unpack()?;
+				let shell_cmd = cmd_check.step(1).unpack()?;
 				match shell_cmd.as_rule() {
 					Rule::for_cmd => cmds.push("for".into()),
 					Rule::if_cmd => cmds.push("if".into()),
@@ -817,47 +800,44 @@ fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 }
 
 fn exec_assignment<'a>(ass: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
-	let mut inner = ass.into_inner();
-	let var_name = inner.next().unpack()?.as_str();
-	let var_val = LashVal::parse(inner.next().unpack()?.as_str()).unwrap();
+	let var_name = ass.scry(Rule::var_ident).unpack()?.as_str().trim_matches(['{','}']);
+	let var_val = LashVal::parse(ass.scry(Rule::word).unpack()?.as_str()).unwrap();
 
-	if inner.clone().count() == 0 {
-		// If there are no commands attached, just set the variable
-		write_vars(|v| v.set_var(var_name, var_val))?;
-	} else {
+	if let Some(cmd) = ass.scry(Rule::cmd_list) {
 		// If there are commands attached, export the variables, then execute, then restore environment state
 		let saved_vars = read_vars(|v| v.clone())?;
 		write_vars(|v| v.export_var(var_name, &var_val.to_string()))?;
-		while let Some(list) = inner.next() {
-			exec_list(Rule::cmd_list, list.as_str().to_string(), ctx)?;
-		}
+		exec_list(Rule::cmd_list, cmd.as_str().to_string(), ctx)?;
 		write_vars(|v| *v = saved_vars)?;
+	} else {
+		// If there are no commands attached, just set the variable
+		write_vars(|v| v.set_var(var_name, var_val))?;
 	}
 	Ok(())
 }
 
 fn exec_for_cmd<'a>(cmd: Pair<'a,Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
-	let mut inner = cmd.into_inner();
 	let io = ctx.io_mut();
 	*io = ProcIO::from(None, io.stdout.clone(), io.stderr.clone());
 	let mut saved_vars = HashMap::new();
-	let loop_vars = inner.next()
+	let loop_body_pair = cmd.scry(Rule::loop_body).unpack()?;
+	let loop_vars = cmd.scry(Rule::for_vars)
 		.unpack()?
 		.into_inner()
 		.into_iter()
 		.map(|var| var.as_str())
 		.collect::<Vec<&str>>();
-	for var in &loop_vars {
-		let existing_val = read_vars(|v| v.get_var(var))?.unwrap_or_default();
-		saved_vars.insert(var,existing_val);
-	}
-	let vars_len = loop_vars.len();
-	let loop_arr = inner.next()
+	let loop_arr = cmd.scry(Rule::for_arr)
 		.unpack()?
 		.into_inner()
 		.map(|elem| LashVal::parse(elem.as_str()).unwrap())
 		.collect::<Vec<LashVal>>();
-	let loop_body_pair = inner.next().unpack()?;
+
+	let vars_len = loop_vars.len();
+	for var in &loop_vars {
+		let existing_val = read_vars(|v| v.get_var(var))?.unwrap_or_default();
+		saved_vars.insert(var,existing_val);
+	}
 
 	for (i,element) in loop_arr.iter().enumerate() {
 		let var_index = i % vars_len;
@@ -896,11 +876,11 @@ fn exec_match_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 }
 
 fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
-	let mut inner = cmd.to_vec_rev();
-	let if_cond_pair = inner.pop().unpack()?.into_inner().next().unpack()?;
-	let if_body_pair = inner.pop().unpack()?.into_inner().next().unpack()?;
-	let mut elif_blocks = VecDeque::new();
-	let mut else_block = None;
+	let if_cond_pair = cmd.scry(Rule::if_cond).unpack()?;
+	let if_body_pair = cmd.scry(Rule::if_body).unpack()?;
+	let else_block = cmd.scry(Rule::else_block);
+	let mut elif_blocks = cmd.into_inner().filter(|pr| pr.as_rule() == Rule::elif_block).collect::<VecDeque<_>>();
+
 	let mut cond_ctx = ctx.as_cond();
 	let mut body_ctx = ctx.as_body();
 	let cond_io = cond_ctx.io_mut();
@@ -913,17 +893,6 @@ fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 		// We are going to temporarily remove this flag here, to make sure that cond/body executions fork the process
 		// If we don't do this, the program will exit after executing the first condition
 		write_meta(|m| m.mod_flags(|f| *f &= !EnvFlags::IN_SUB_PROC))?;
-	}
-
-	while let Some(pair) = inner.pop() {
-		match pair.as_rule() {
-			Rule::elif_block => elif_blocks.push_back(pair),
-			Rule::else_block => {
-				else_block = Some(pair);
-				break
-			}
-			_ => unreachable!()
-		}
 	}
 
 	let if_cond = expand::expand_list(if_cond_pair)?;
@@ -949,7 +918,7 @@ fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	}
 
 	if let Some(else_block) = else_block {
-		let else_body_pair = else_block.into_inner().next().unpack()?;
+		let else_body_pair = else_block.step(1).unpack()?;
 		let else_body = expand::expand_list(else_body_pair)?;
 		exec_list(Rule::cmd_list, else_body, &mut body_ctx)?;
 	}
@@ -963,10 +932,9 @@ fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 }
 
 fn exec_loop_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
-	let mut inner = cmd.to_vec_rev();
-	let loop_kind = inner.pop().unpack()?;
-	let loop_cond_pair = inner.pop().unpack()?.into_inner().next().unpack()?;
-	let loop_body_pair = inner.pop().unpack()?.into_inner().next().unpack()?;
+	let loop_kind = cmd.scry(Rule::loop_kind).unpack()?;
+	let loop_cond_pair = cmd.scry(Rule::loop_cond).unpack()?;
+	let loop_body_pair = cmd.scry(Rule::loop_body).unpack()?;
 	let mut cond_ctx = ctx.as_cond();
 	let mut body_ctx = ctx.as_body();
 	let cond_io = cond_ctx.io_mut();
@@ -1020,8 +988,8 @@ fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()
 	let blame = cmd.clone();
 	match name {
 		"test" | "[" => {
-			let mut argv = cmd.to_vec_rev();
-			argv.pop(); // Ignore the command name
+			let mut argv = cmd.to_deque();
+			argv.pop_front(); // Ignore the command name
 			let result = proc_res(builtin::test(&mut argv, ctx), blame)?;
 			if result {
 				write_vars(|v| v.set_param("?".into(), "0".into()))?;
@@ -1041,10 +1009,10 @@ fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()
 	Ok(())
 }
 
-fn exec_func(cmd: Pair<Rule>,name: &str,ctx: &mut ExecCtx) -> LashResult<()> {
+fn exec_func(cmd: Pair<Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = cmd.clone();
-	let argv = cmd.process_args(ctx);
-	let func_name = argv.first().unwrap();
+	let argv = helper::prepare_argv(cmd);
+	let func_name = argv.front().unwrap();
 	let body = read_logic(|l| l.get_func(func_name).unwrap())?;
 	let mut var_table = read_vars(|v| v.clone())?;
 	let snapshot = SavedEnv::get_snapshot()?;

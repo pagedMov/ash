@@ -8,7 +8,7 @@ use pest::Parser;
 use serde_json::Value;
 use std::{fs::File, sync::RwLock};
 
-use crate::{error::{LashErr, LashErrLow}, exec_input, exec_list, execute::ExecCtx, helper::{self, VecDequeExtension}, shopt::ShOpts, LashParse, LashResult, OptPairExt, Rule};
+use crate::{error::{LashErr, LashErrLow}, exec_input, exec_list, execute::ExecCtx, helper::{self, VecDequeExtension}, shopt::ShOpts, LashParse, LashResult, pair::OptPairExt, Rule};
 
 
 #[derive(Debug)]

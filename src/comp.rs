@@ -1,13 +1,13 @@
-use std::{collections::{HashMap, HashSet}, env, fmt::Display, io::stdout, path::Path};
+use std::{collections::{HashMap, HashSet, VecDeque}, env, fmt::Display, io::stdout, path::Path};
 
 use crossterm::{cursor::{self, MoveTo}, execute, style::{style, Color, Stylize}, terminal::{Clear, ClearType}};
 use once_cell::sync::Lazy;
-use pest::{iterators::Pair, Parser};
+use pest::{iterators::Pair, Parser, Span};
 use regex::Regex;
 use rustyline::{completion::{Candidate, Completer, FilenameCompleter}, error::ReadlineError, highlight::Highlighter, hint::{Hint, Hinter}, history::History, validate::Validator, Context, Helper};
 use skim::{prelude::{Key, SkimItemReader, SkimOptionsBuilder}, Skim};
 
-use crate::{builtin::BUILTINS, expand::{self, replace_span}, helper::{self, StrExtension}, shellenv::{read_logic, read_vars}, LashParse, LashResult, OptPairExt, PairExt, Rule};
+use crate::{builtin::BUILTINS, expand::{self, replace_span}, helper::{self, StrExtension}, shellenv::{read_logic, read_vars}, LashParse, LashResult, pair::OptPairExt, pair::PairExt, Rule};
 
 
 pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
@@ -323,14 +323,42 @@ fn highlight_struct<'a>(pair: Pair<'a,Rule>, mut buffer: String) -> String {
 		Rule::done |
 		Rule::r#do |
 		Rule::in_kw => style_text(KEYWORD, struct_pair.as_str()),
-		Rule::for_with_vars | Rule::in_with_vars => {
-			let mut inner = struct_pair.into_inner();
-			let kw = inner.next().unwrap();
-			let styled = style_text(KEYWORD, kw.as_str());
-			buffer = expand::replace_from_right(&buffer, kw.as_str(), &styled);
-			while let Some(var) = inner.next() {
-				let var_styled = style_text(VARSUB, var.as_str());
-				buffer = expand::replace_from_right(&buffer, var.as_str(), &var_styled);
+		Rule::hl_subshell => {
+			let body = struct_pair.scry(Rule::subsh_body).unwrap();
+			let span = struct_pair.as_span();
+			let highlighted = highlight_input(body.as_str()).fill_from(body.as_str());
+			let sub_left = style_text(STRING,"(");
+			let sub_right = style_text(STRING,")");
+			let subsh = format!("{sub_left}{highlighted}{sub_right}");
+			println!("{}",subsh);
+			buffer = replace_span(buffer, span, &subsh);
+			buffer
+		}
+		Rule::hl_assign => {
+			let (var,val) = struct_pair.as_str().split_once('=').unwrap();
+			let styled_var = style_text(VARSUB,var);
+			let styled_val = style_text(STRING,val);
+			[styled_var,styled_val].join("=").to_string()
+		}
+		Rule::for_with_in | Rule::for_with_vars | Rule::in_with_vars => {
+			let mut inner = if let Rule::for_with_in = struct_pair.as_rule() {
+				let for_pair = struct_pair.scry(&[Rule::for_with_vars,Rule::r#for][..]).unwrap();
+				let in_pair = struct_pair.scry(&[Rule::in_with_vars,Rule::in_kw][..]).unwrap();
+				let mut for_deque = for_pair.to_deque();
+				let in_deque = in_pair.to_deque();
+				for_deque.extend(in_deque);
+				for_deque
+			} else {
+				struct_pair.to_deque()
+			};
+			while let Some(word) = inner.pop_back() {
+				let span = word.as_span();
+				let code = match word.as_rule() {
+					Rule::var => VARSUB,
+					_ => KEYWORD
+				};
+				let styled = style_text(code, word.as_str());
+				buffer = replace_span(buffer, span, &styled);
 			}
 			buffer
 		}
@@ -339,45 +367,177 @@ fn highlight_struct<'a>(pair: Pair<'a,Rule>, mut buffer: String) -> String {
 			let styled = style_text(FUNCNAME, stripped);
 			format!("{}()",styled)
 		}
-		_ => unreachable!()
+		_ => unreachable!("Unexpected rule: {:?}",struct_pair.as_rule())
+	}
+}
+
+fn highlight_dquote<'a>(pair: Pair<'a,Rule>) -> String {
+	let body = pair.scry(Rule::dquote_body).unwrap().as_str();
+	let sub_parse = LashParse::parse(Rule::syntax_hl, body);
+	if let Ok(parse) = sub_parse {
+		let mut buffer = body.to_string();
+		let mut words = parse.into_iter().next().unwrap().to_deque();
+		while let Some(word) = words.pop_back() {
+			if word.as_rule() == Rule::words {
+				let mut inner_words = word.into_inner().collect::<VecDeque<_>>();
+				while let Some(in_wd) = inner_words.pop_back() {
+					let span = in_wd.as_span();
+					if in_wd.clone().step(1).is_some() {
+						let wd_type = in_wd.step(1).unwrap();
+						match wd_type.as_rule() {
+							Rule::cmd_sub => {
+								let body = wd_type.as_str().trim_start_matches("$(").trim_end_matches(')');
+								let highlighted = highlight_input(body).fill_from(body);
+								let sub_left = style_text(STRING,"$(");
+								let sub_right = format!("{}{}",STRING,")");
+								let cmd_sub = format!("{sub_left}{highlighted}{sub_right}");
+								buffer = replace_span(buffer, span, &cmd_sub);
+							}
+							Rule::var_sub | Rule::param_sub => {
+								let word = wd_type.as_str();
+								let styled = format!("{}{}{}",VARSUB,word,STRING);
+								buffer = replace_span(buffer, span, &styled);
+							}
+							_ => { /* Do nothing */ }
+						}
+					}
+				}
+			}
+		}
+		format!("\"{}{}{}\"",STRING,buffer,RESET)
+	} else {
+		pair.as_str().to_string()
 	}
 }
 
 fn highlight_words<'a>(pair: Pair<'a,Rule>, mut buffer: String, path: &str) -> String {
 	let mut is_cmd = true;
-	let mut words = pair.into_inner();
-	for word_pair in words {
-		let word = word_pair.as_str();
-		if is_cmd {
-			let code = if validate_cmd(word, path) {
-				COMMAND
-			} else {
-				ERROR
-			};
-			let styled_word = style_text(code, word);
-			buffer = expand::replace_from_right(&buffer, word, &styled_word);
+	let mut words = pair.to_deque();
+	while let Some(word_pair) = words.pop_back() {
+		let sub_type = word_pair.clone().step(1);
+		if sub_type.clone().is_some_and(|pr| pr.as_rule() != Rule::tilde_sub) {
+			let sub_type = sub_type.unwrap();
+			let span = sub_type.as_span();
+			match sub_type.as_rule() {
+				Rule::loud_ident => { /* Pass */ }
+				Rule::dquoted => {
+					let styled = highlight_dquote(sub_type);
+					buffer = replace_span(buffer,span,&styled);
+				}
+				Rule::squoted => {
+					let body = sub_type.as_str().trim_matches('\'');
+					let styled = style_text(STRING,body);
+					let squoted = format!("{}{}{}",'\'',styled,'\'');
+					buffer = replace_span(buffer,span,&squoted);
+				}
+				Rule::param_sub | Rule::var_sub => {
+					let word = sub_type.as_str();
+					let styled = style_text(VARSUB,word);
+					buffer = replace_span(buffer,span,&styled);
+				}
+				Rule::arr_index => {
+					// If it works, it works
+					let (left,right) = sub_type.as_str().split_once('[').unwrap();
+					let styled_name = style_text(VARSUB,&left);
+					let styled = [styled_name,right.to_string()].join("[").to_string();
+					buffer = replace_span(buffer,span,&styled);
+				}
+				Rule::cmd_sub => {
+					let body = sub_type.as_str().trim_start_matches("$(").trim_end_matches(')');
+					let highlighted = highlight_input(body).fill_from(body);
+					let sub_left = style_text(STRING,"$(");
+					let sub_right = style_text(STRING,")");
+					let cmd_sub = format!("{sub_left}{highlighted}{sub_right}");
+					buffer = replace_span(buffer, span, &cmd_sub);
+				}
+				Rule::proc_sub => {
+					let body = sub_type.as_str().trim_start_matches(">(").trim_start_matches("<(").trim_end_matches(')');
+					let highlighted = highlight_input(body).fill_from(body);
+					let sub_left = if sub_type.as_str().starts_with("<(") {
+						style_text(STRING,"<(")
+					} else {
+						style_text(STRING,">(")
+					};
+					let sub_right = style_text(STRING,")");
+					let proc_sub = format!("{sub_left}{highlighted}{sub_right}");
+					buffer = replace_span(buffer, span, &proc_sub);
+				}
+				Rule::hl_glob => {
+					let glob_kind = sub_type.scry(Rule::hl_globs).unwrap().step(1).unwrap();
+					let glob_span = glob_kind.as_span();
+					match glob_kind.as_rule() {
+						Rule::glob_opt | Rule::glob_wild => {
+							let styled = style_text(KEYWORD,glob_kind.as_str());
+							buffer = replace_span(buffer, glob_span, &styled);
+						}
+						Rule::glob_brackets => {
+							let body = glob_kind.as_str().trim_matches(['[',']']);
+							let left_brack = format!("{}{}{}",KEYWORD,'[',RESET);
+							let right_brack = format!("{}{}{}",KEYWORD,']',RESET);
+							let rebuilt = format!("{left_brack}{body}{right_brack}");
+							buffer = replace_span(buffer,glob_span,&rebuilt);
+						}
+						_ => unreachable!("Unexpected rule: {:?}",sub_type.as_rule())
+					}
+				}
+				Rule::hl_brace_word => {
+					let body = sub_type.scry(Rule::brace_expand).unwrap().as_str().trim_matches(['{','}']);
+					let left_brace = format!("{}{}{}",KEYWORD,'{',RESET);
+					let right_brace = format!("{}{}{}",KEYWORD,'}',RESET);
+					let rebuilt = format!("{left_brace}{body}{right_brace}");
+					buffer = replace_span(buffer,span,&rebuilt);
+				}
+				_ => unreachable!("Unexpected rule: {:?}",sub_type.as_rule())
+			}
 		} else {
-			let code = RESET;
-			let styled_word = style_text(code, word);
-			buffer = expand::replace_from_right(&buffer, word, &styled_word);
-		}
+			let word = word_pair.as_str();
+			let span = word_pair.as_span();
+			if words.is_empty() {
+				let code = if validate_cmd(word, path) {
+					COMMAND
+				} else {
+					ERROR
+				};
+				let styled_word = style_text(code, word);
+				buffer = replace_span(buffer, span, &styled_word);
+			} else {
+				let code = RESET;
+				let styled_word = style_text(code, word);
+				buffer = replace_span(buffer, span, &styled_word);
+			}
 
-		is_cmd = false;
+		}
 	}
 	buffer.to_string()
 }
 
-fn highlight_pair<'a>(pair: Pair<'a,Rule>) -> String {
+fn highlight_pair<'a>(pair: Pair<'a,Rule>, mut buffer: String) -> String {
 	let path = env::var("PATH").unwrap_or_default();
-	let mut styled = pair.as_str().to_string();
 	match pair.as_rule() {
-		Rule::loud_sep => styled = style_text(RESET, &styled),
-		Rule::loud_operator => styled = style_text(OPERATOR, &styled),
-		Rule::words => styled = highlight_words(pair, styled, &path),
-		Rule::shell_struct => styled = highlight_struct(pair, styled),
+		Rule::loud_sep => buffer = style_text(RESET, &buffer),
+		Rule::loud_operator => buffer = style_text(OPERATOR, &buffer),
+		Rule::words => buffer = highlight_words(pair, buffer, &path),
+		Rule::shell_struct => buffer = highlight_struct(pair, buffer),
 		_ => unreachable!("Reached highlight pair with this unexpected rule: {:?}",pair.as_rule())
 	}
-	styled
+	buffer
+}
+
+fn highlight_input(input: &str) -> String {
+	let parsed_input = LashParse::parse(Rule::syntax_hl, input);
+	match parsed_input {
+		Ok(parsed_input) => {
+			let mut buffer = parsed_input.as_str().to_string().fill_from(input);
+			let mut inner = parsed_input.into_iter().next().unwrap().to_vec();
+			while let Some(pair) = inner.pop() {
+				buffer = highlight_pair(pair, buffer);
+			}
+			buffer
+		}
+		Err(_) => {
+			input.to_string()
+		}
+	}
 }
 
 pub struct LashHint {
@@ -427,28 +587,13 @@ impl Hinter for LashHelper {
 		}
 	}
 
-type Hint = LashHint;
+	type Hint = LashHint;
 }
 
 impl Highlighter for LashHelper {
 	fn highlight<'l>(&self, line: &'l str, pos: usize) -> std::borrow::Cow<'l, str> {
 		let _ = pos;
-		let parsed_line = LashParse::parse(Rule::syntax_hl, line);
-		match parsed_line {
-			Ok(parsed_line) => {
-				let mut buffer = parsed_line.as_str().to_string().fill_from(line);
-				let mut inner = parsed_line.into_iter().next().unwrap().to_vec();
-				while let Some(pair) = inner.pop() {
-					let word = pair.as_str();
-					let highlighted = highlight_pair(pair);
-					buffer = expand::replace_from_right(&buffer, word, &highlighted);
-				}
-				std::borrow::Cow::Owned(buffer)
-			}
-			Err(_) => {
-				std::borrow::Cow::Borrowed(line)
-			}
-		}
+		std::borrow::Cow::Owned(highlight_input(line))
 	}
 
 	fn highlight_prompt<'b, 's: 'b, 'p: 'b>(

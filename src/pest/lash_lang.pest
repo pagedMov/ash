@@ -261,21 +261,45 @@ esc_vis_grp = { "\\(" ~ (raw_text|esc_sequence)* ~ "\\)" }
 for = { "for" }
 var = { !loud_operator ~ word }
 for_with_vars = { for ~ (!"in" ~ var)+ }
+in_kw = { WHITESPACE* ~ "in" ~ WHITESPACE* }
+in_with_vars = { in_kw ~ var+ }
+for_with_in = { (for_with_vars|for) ~ (in_with_vars|in_kw) }
 if = { "if" }
 then = { "then" }
 else = { "else" }
 elif = { "elif" }
 fi = { "fi" }
-in_kw = { WHITESPACE* ~ "in" ~ WHITESPACE* }
-in_with_vars = { in_kw ~ var+ }
 match = { "match" }
 select = { "select" }
 until = { "until" }
 while = { "while" }
 do = { "do" }
 done = { "done" }
+hl_assign = { var_ident ~ "=" ~ word? }
+hl_subshell = { "(" ~ subshebang? ~ subsh_body ~ ")" }
 
 loud_sep = { (";" | NEWLINE)+ } // Loud because the rule is not silent
+
+loud_ident = @{
+	(("\\" ~ ANY) |
+    // 'out' and 'in' refer to redir operators '>' and '<'
+	(!out ~ !in ~ ASCII_ALPHANUMERIC |
+		"\"" |
+		"'" |
+		"_" |
+		"-" |
+		"!" |
+		"%" |
+		"+" |
+		"=" |
+		"\\" |
+		"/" |
+		"," |
+		"." |
+		":" |
+		"@"
+	))+
+}
 
 loud_operator = {
 	WHITESPACE* ~
@@ -298,9 +322,24 @@ loud_operator = {
 	) ~ WHITESPACE*
 }
 
+hl_word = ${
+	dquoted |
+	squoted |
+	param_sub |
+    arr_index |
+	var_sub |
+	cmd_sub |
+	proc_sub |
+	tilde_sub |
+	ident
+}
+
 shell_struct = {
+    for_with_in |
     for_with_vars |
-	for |
+   	for |
+    in_with_vars |
+    in_kw |
 	if |
     then |
     else |
@@ -312,15 +351,21 @@ shell_struct = {
 	while |
     done |
 	do |
-    in_with_vars |
-    in_kw |
+    hl_subshell |
+    hl_assign |
 	func_name
 }
+
+glob_opt = { !"\\?" ~ "?" }
+glob_wild = { "\\*" ~ "*" }
+hl_globs = { glob_opt | glob_wild | glob_brackets }
+hl_glob = { loud_ident ~ hl_globs+ ~ loud_ident? | hl_globs+ ~ loud_ident? }
+hl_brace_word = { loud_ident ~ brace_expand+ ~ loud_ident? | brace_expand+ ~ loud_ident? }
 
 hl_brace_grp = { "{" ~ syntax_hl ~ "}" }
 
 
-words = { (!shell_struct ~ word)+ }
+words = { (!shell_struct ~ (hl_brace_word|hl_glob|hl_word))+ }
 
 syntax_hl = { (loud_sep|shell_struct|loud_operator|words)* }
 

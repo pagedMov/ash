@@ -3,7 +3,7 @@ use std::{collections::VecDeque, env, ffi::CString, fs, os::{fd::AsRawFd, unix::
 use nix::unistd::{access, fork, getegid, geteuid, isatty, setpgid, AccessFlags, ForkResult};
 use pest::iterators::Pair;
 
-use crate::{error::{LashErr::*, LashErrHigh, LashErrLow}, execute::{CmdRedirs, ExecCtx, ExecFlags, Redir, RustFd}, helper::{self, StrExtension}, shellenv::{self, read_logic, read_vars, write_jobs, write_meta, write_vars, ChildProc, HashFloat, JobBuilder, LashVal}, LashResult, OptPairExt, PairExt, Rule};
+use crate::{error::{LashErr::*, LashErrHigh, LashErrLow}, execute::{CmdRedirs, ExecCtx, ExecFlags, Redir, RustFd}, helper::{self, StrExtension}, pair::{OptPairExt, PairExt, ARG_RULES}, shellenv::{self, read_logic, read_vars, write_jobs, write_meta, write_vars, ChildProc, HashFloat, JobBuilder, LashVal}, LashResult, Rule};
 
 pub const BUILTINS: [&str; 43] = [
 	"try", "except", "return", "break", "contine", "exit", "command", "pushd", "popd", "setopt", "getopt", "type", "string", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
@@ -75,7 +75,7 @@ where F1: Fn(&str) -> LashResult<T>, F2: FnOnce(&T,&T) -> bool {
 	Ok(cmp(&lhs.unwrap(),&rhs.unwrap()))
 }
 
-fn do_log_op<'a>(args: &mut Vec<Pair<'a,Rule>>, result: bool, operator: &str, ctx: &mut ExecCtx) -> LashResult<bool> {
+fn do_log_op<'a>(args: &mut VecDeque<Pair<'a,Rule>>, result: bool, operator: &str, ctx: &mut ExecCtx) -> LashResult<bool> {
 	let rec_result = test(args,ctx)?;
 	match operator {
 		"!" => Ok(!rec_result),
@@ -87,9 +87,9 @@ fn do_log_op<'a>(args: &mut Vec<Pair<'a,Rule>>, result: bool, operator: &str, ct
 
 /// The test function is a special snowflake and takes a mutable reference to an already prepared arg vector
 /// instead of a raw pair like the other builtins. This is to make recursion with -a/-o flags easier
-pub fn test<'a>(test_call: &mut Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult<bool> {
-	if test_call.first().is_some_and(|arg| arg.as_str() == "]") {
-		*test_call = Vec::from(&test_call[1..]); // Ignore it
+pub fn test<'a>(test_call: &mut VecDeque<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult<bool> {
+	if test_call.back().is_some_and(|arg| arg.as_str() == "]") {
+		test_call.pop_back();
 	}
 	// Here we define some useful closures to use later
 	let is_int = |arg: &str| -> bool { arg.parse::<i32>().is_ok() };
@@ -104,52 +104,52 @@ pub fn test<'a>(test_call: &mut Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResul
 	let mut result = false;
 
 	// Now we will use our helper functions and pass those closures to use for type conversions on the arg string
-	if let Some(arg) = test_call.pop() {
+	if let Some(arg) = test_call.pop_front() {
 		result = match arg.as_str() {
 			"!" => do_log_op(test_call, true, arg.as_str(), ctx)?,
-			"-t" => run_test(test_call.pop(), to_int, |int| isatty(*int).is_ok())?,
-			"-b" => run_test(test_call.pop(), to_meta, |meta| meta.file_type().is_block_device())?,
-			"-c" => run_test(test_call.pop(), to_meta, |meta| meta.file_type().is_char_device())?,
-			"-d" => run_test(test_call.pop(), to_meta, |meta| meta.is_dir())?,
-			"-f" => run_test(test_call.pop(), to_meta, |meta| meta.is_file())?,
-			"-g" => run_test(test_call.pop(), to_meta, |meta| meta.mode() & 0o2000 != 0)?, // check setgid bit
-			"-G" => run_test(test_call.pop(), to_meta, |meta| meta.gid() == u32::from(getegid()))?,
-			"-h" => run_test(test_call.pop(), to_meta, |meta| meta.is_symlink())?,
-			"-L" => run_test(test_call.pop(), to_meta, |meta| meta.is_symlink())?,
-			"-k" => run_test(test_call.pop(), to_meta, |meta| meta.mode() & 0o1000 != 0)?, // check sticky bit
-			"-N" => run_test(test_call.pop(), to_meta, |meta| meta.mtime() > meta.atime())?,
-			"-O" => run_test(test_call.pop(), to_meta, |meta| meta.uid() == u32::from(geteuid()))?,
-			"-p" => run_test(test_call.pop(), to_meta, |meta| meta.file_type().is_fifo())?,
-			"-s" => run_test(test_call.pop(), to_meta, |meta| meta.len() > 0)?,
-			"-S" => run_test(test_call.pop(), to_meta, |meta| meta.file_type().is_socket())?,
-			"-u" => run_test(test_call.pop(), to_meta, |meta| meta.mode() & 0o4000 != 0)?, // check setuid bit
-			"-n" => run_test(test_call.pop(), str_no_op, |st| !st.is_empty())?, // check setuid bit
-			"-z" => run_test(test_call.pop(), str_no_op, |st| st.is_empty())?,
-			"-e" => run_test(test_call.pop(), str_no_op, |st| Path::new(st).exists())?,
-			"-r" => run_test(test_call.pop(), str_no_op, |st| access(Path::new(st),AccessFlags::R_OK).is_ok())?,
-			"-w" => run_test(test_call.pop(), str_no_op, |st| access(Path::new(st),AccessFlags::W_OK).is_ok())?,
-			"-x" => run_test(test_call.pop(), str_no_op, |st| access(Path::new(st),AccessFlags::X_OK).is_ok())?,
+			"-t" => run_test(test_call.pop_front(), to_int, |int| isatty(*int).is_ok())?,
+			"-b" => run_test(test_call.pop_front(), to_meta, |meta| meta.file_type().is_block_device())?,
+			"-c" => run_test(test_call.pop_front(), to_meta, |meta| meta.file_type().is_char_device())?,
+			"-d" => run_test(test_call.pop_front(), to_meta, |meta| meta.is_dir())?,
+			"-f" => run_test(test_call.pop_front(), to_meta, |meta| meta.is_file())?,
+			"-g" => run_test(test_call.pop_front(), to_meta, |meta| meta.mode() & 0o2000 != 0)?, // check setgid bit
+			"-G" => run_test(test_call.pop_front(), to_meta, |meta| meta.gid() == u32::from(getegid()))?,
+			"-h" => run_test(test_call.pop_front(), to_meta, |meta| meta.is_symlink())?,
+			"-L" => run_test(test_call.pop_front(), to_meta, |meta| meta.is_symlink())?,
+			"-k" => run_test(test_call.pop_front(), to_meta, |meta| meta.mode() & 0o1000 != 0)?, // check sticky bit
+			"-N" => run_test(test_call.pop_front(), to_meta, |meta| meta.mtime() > meta.atime())?,
+			"-O" => run_test(test_call.pop_front(), to_meta, |meta| meta.uid() == u32::from(geteuid()))?,
+			"-p" => run_test(test_call.pop_front(), to_meta, |meta| meta.file_type().is_fifo())?,
+			"-s" => run_test(test_call.pop_front(), to_meta, |meta| meta.len() > 0)?,
+			"-S" => run_test(test_call.pop_front(), to_meta, |meta| meta.file_type().is_socket())?,
+			"-u" => run_test(test_call.pop_front(), to_meta, |meta| meta.mode() & 0o4000 != 0)?, // check setuid bit
+			"-n" => run_test(test_call.pop_front(), str_no_op, |st| !st.is_empty())?, // check setuid bit
+			"-z" => run_test(test_call.pop_front(), str_no_op, |st| st.is_empty())?,
+			"-e" => run_test(test_call.pop_front(), str_no_op, |st| Path::new(st).exists())?,
+			"-r" => run_test(test_call.pop_front(), str_no_op, |st| access(Path::new(st),AccessFlags::R_OK).is_ok())?,
+			"-w" => run_test(test_call.pop_front(), str_no_op, |st| access(Path::new(st),AccessFlags::W_OK).is_ok())?,
+			"-x" => run_test(test_call.pop_front(), str_no_op, |st| access(Path::new(st),AccessFlags::X_OK).is_ok())?,
 			_ if is_int(&arg.as_str()) => {
-				if let Some(cmp) = test_call.pop() {
+				if let Some(cmp) = test_call.pop_front() {
 					match cmp.as_str() {
-						"-eq" => do_cmp(arg.as_str(),test_call.pop(), to_int, |lhs, rhs| lhs == rhs)?,
-						"-ge" => do_cmp(arg.as_str(),test_call.pop(), to_int, |lhs, rhs| lhs >= rhs)?,
-						"-gt" => do_cmp(arg.as_str(),test_call.pop(), to_int, |lhs, rhs| lhs > rhs)?,
-						"-le" => do_cmp(arg.as_str(),test_call.pop(), to_int, |lhs, rhs| lhs <= rhs)?,
-						"-lt" => do_cmp(arg.as_str(),test_call.pop(), to_int, |lhs, rhs| lhs < rhs)?,
-						"-ne" => do_cmp(arg.as_str(),test_call.pop(), to_int, |lhs, rhs| lhs != rhs)?,
+						"-eq" => do_cmp(arg.as_str(),test_call.pop_front(), to_int, |lhs, rhs| lhs == rhs)?,
+						"-ge" => do_cmp(arg.as_str(),test_call.pop_front(), to_int, |lhs, rhs| lhs >= rhs)?,
+						"-gt" => do_cmp(arg.as_str(),test_call.pop_front(), to_int, |lhs, rhs| lhs > rhs)?,
+						"-le" => do_cmp(arg.as_str(),test_call.pop_front(), to_int, |lhs, rhs| lhs <= rhs)?,
+						"-lt" => do_cmp(arg.as_str(),test_call.pop_front(), to_int, |lhs, rhs| lhs < rhs)?,
+						"-ne" => do_cmp(arg.as_str(),test_call.pop_front(), to_int, |lhs, rhs| lhs != rhs)?,
 						_ => return Err(Low(LashErrLow::InvalidSyntax("Expected an integer after comparison flag in test call".into())))
 					}
 				} else {
 					return Err(Low(LashErrLow::InvalidSyntax("Expected a comparison flag after integer in test call".into())))
 				}
 			}
-			_ if is_path(arg.as_str()) && test_call.last().is_some_and(|arg| matches!(arg.as_str(), "-ef" | "nt" | "-ot")) => {
-				let cmp = test_call.pop().unwrap();
+			_ if is_path(arg.as_str()) && test_call.front().is_some_and(|arg| matches!(arg.as_str(), "-ef" | "nt" | "-ot")) => {
+				let cmp = test_call.pop_front().unwrap();
 				match cmp.as_str() {
-					"-ef" => do_cmp(cmp.as_str(), test_call.pop(), to_meta, |lhs, rhs| lhs.dev() == rhs.dev())?,
-					"-nt" => do_cmp(cmp.as_str(), test_call.pop(), to_meta, |lhs, rhs| lhs.mtime() > rhs.mtime())?,
-					"-ot" => do_cmp(cmp.as_str(), test_call.pop(), to_meta, |lhs, rhs| lhs.mtime() < rhs.mtime())?,
+					"-ef" => do_cmp(cmp.as_str(), test_call.pop_front(), to_meta, |lhs, rhs| lhs.dev() == rhs.dev())?,
+					"-nt" => do_cmp(cmp.as_str(), test_call.pop_front(), to_meta, |lhs, rhs| lhs.mtime() > rhs.mtime())?,
+					"-ot" => do_cmp(cmp.as_str(), test_call.pop_front(), to_meta, |lhs, rhs| lhs.mtime() < rhs.mtime())?,
 					_ => unreachable!()
 				}
 			}
@@ -159,16 +159,16 @@ pub fn test<'a>(test_call: &mut Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResul
 				} else if matches!(arg.as_str(), "=") {
 					// First arg encountered is an equal sign for some reason. Most likely, an expansion returned nothing, and now there's no word here.
 					// Therefore, the only situations which return true are an equally empty right hand side, or a logical continuation flag
-					let result = test_call.is_empty() || test_call.last().is_some_and(|arg| matches!(arg.as_str(), "-o" | "-a"));
+					let result = test_call.is_empty() || test_call.front().is_some_and(|arg| matches!(arg.as_str(), "-o" | "-a"));
 
-					if test_call.last().is_some_and(|arg| !matches!(arg.as_str(), "-o" | "-a")) {
-						test_call.pop();
+					if test_call.front().is_some_and(|arg| !matches!(arg.as_str(), "-o" | "-a")) {
+						test_call.pop_front();
 					}
 					result
-				} else if let Some(cmp) = test_call.pop() {
+				} else if let Some(cmp) = test_call.pop_front() {
 					match cmp.as_str() {
-						"=" => do_cmp(arg.as_str(), test_call.pop(), str_no_op, |lhs, rhs| lhs == rhs)?,
-						"!=" => do_cmp(arg.as_str(), test_call.pop(), str_no_op, |lhs, rhs| lhs != rhs)?,
+						"=" => do_cmp(arg.as_str(), test_call.pop_front(), str_no_op, |lhs, rhs| lhs == rhs)?,
+						"!=" => do_cmp(arg.as_str(), test_call.pop_front(), str_no_op, |lhs, rhs| lhs != rhs)?,
 						_ => {
 							if cmp.as_str() == "==" {
 								return Err(Low(LashErrLow::InvalidSyntax("'==' is not a valid comparison operator for test calls. Use '=' instead.".into())));
@@ -182,7 +182,7 @@ pub fn test<'a>(test_call: &mut Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResul
 				}
 			}
 		};
-		if let Some(arg) = test_call.pop() {
+		if let Some(arg) = test_call.pop_front() {
 			let word = arg.as_str();
 			if word == "-a" && !result {
 				return Ok(result); // Short-circuit AND if already false
@@ -203,14 +203,13 @@ pub fn test<'a>(test_call: &mut Vec<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResul
 /// stuff like 'int', 'float' etc for setting typed vars
 pub fn assign_builtin<'a>(assign: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = assign.clone();
-	let mut inner = assign.into_inner();
-	let cmd_name = inner.next().unpack()?;
-	while let Some(arg) = inner.next() {
+	let mut argv = assign.filter(&ARG_RULES[..]);
+	let cmd_name = assign.scry(Rule::cmd_name).unpack()?;
+	while let Some(arg) = argv.pop_front() {
 		match arg.as_rule() {
 			Rule::arg_assign => {
-				let mut arg_inner = arg.into_inner();
-				let var_name = arg_inner.next().unpack()?;
-				if let Some(val) = arg_inner.next() {
+				let var_name = arg.scry(Rule::var_ident).unpack()?;
+				if let Some(val) = arg.scry(Rule::word) {
 					let lash_val = match cmd_name.as_str() {
 						"string" => {
 							LashVal::String(val.as_str().to_string())
@@ -265,14 +264,11 @@ pub fn assign_builtin<'a>(assign: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResul
 }
 
 pub fn setopt<'a>(setopt_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
-	let blame = setopt_call.clone();
-	let mut inner = setopt_call.into_inner();
-	inner.next();
-	while let Some(arg) = inner.next() {
+	let mut argv = setopt_call.filter(&ARG_RULES[..]);
+	while let Some(arg) = argv.pop_front() {
 		if arg.as_rule() == Rule::arg_assign {
-			let mut arg_inner = arg.into_inner();
-			let opt_path = arg_inner.next().unpack()?.as_str();
-			let val = arg_inner.next().map(|val| val.as_str()).unwrap_or_default();
+			let opt_path = arg.scry(Rule::var_ident).unpack()?.as_str();
+			let val = arg.scry(Rule::word).map(|val| val.as_str()).unwrap_or_default();
 			write_meta(|m| m.set_shopt(opt_path, val))??;
 		} else {
 			let msg = "Expected an assignment in setopt args";
@@ -284,9 +280,7 @@ pub fn setopt<'a>(setopt_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 
 pub fn cd<'a>(cd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = cd_call.clone();
-	let mut inner = cd_call.into_inner();
-	inner.next(); // Ignore 'cd'
-	let arg = inner.next();
+	let arg = cd_call.scry(&ARG_RULES[..]);
 	let new_pwd;
 	match arg {
 		Some(arg) => {
@@ -306,18 +300,12 @@ pub fn cd<'a>(cd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 }
 
 pub fn alias<'a>(alias_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
-	let mut inner1 = alias_call.clone().into_inner();
-	let mut inner2 = alias_call.into_inner(); // Need two, one for redir processing, one for arg processing
-	inner1.next(); // Ignore 'alias'
-	inner2.next();
 	let mut stdout = RustFd::new(1)?;
 
-	while let Some(arg) = inner2.next() {
-		match arg.as_rule() {
-			Rule::redir => ctx.push_redir(Redir::from_pair(arg)?),
-			_ => { /* Do nothing */}
-		}
-	}
+	let mut args = alias_call.filter(&ARG_RULES[..]);
+	let redirs = helper::prepare_redirs(alias_call)?;
+
+	ctx.extend_redirs(redirs);
 
 	let ctx_redirs = ctx.redirs();
 	if !ctx_redirs.is_empty() {
@@ -325,7 +313,7 @@ pub fn alias<'a>(alias_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()>
 		redirs.activate()?;
 	}
 
-	while let Some(arg) = inner1.next() {
+	while let Some(arg) = args.pop_front() {
 		match arg.as_rule() {
 			Rule::arg_assign => {
 				let mut assign_inner = arg.into_inner();
@@ -347,9 +335,8 @@ pub fn alias<'a>(alias_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()>
 }
 
 pub fn source<'a>(src_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
-	let mut inner = src_call.into_inner();
-	inner.next(); // Ignore 'source'
-	while let Some(arg) = inner.next() {
+	let mut args = src_call.filter(&ARG_RULES[..]);
+	while let Some(arg) = args.pop_front() {
 		if arg.as_rule() == Rule::word {
 			let path = PathBuf::from(arg.as_str());
 			if path.exists() && path.is_file() {
@@ -365,13 +352,9 @@ pub fn source<'a>(src_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> 
 
 pub fn pwd<'a>(pwd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = pwd_call.clone();
-	let mut inner = pwd_call.into_inner();
+	let redirs = helper::prepare_redirs(pwd_call)?;
 
-	while let Some(arg) = inner.next() {
-		if arg.as_rule() == Rule::redir {
-			ctx.push_redir(Redir::from_pair(arg)?);
-		}
-	}
+	ctx.extend_redirs(redirs);
 
 	let redirs = ctx.redirs();
 	if !redirs.is_empty() {
@@ -390,9 +373,8 @@ pub fn pwd<'a>(pwd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 }
 
 pub fn export<'a>(export_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
-	let blame = export_call.clone();
-	let mut inner = export_call.into_inner();
-	while let Some(arg) = inner.next() {
+	let mut argv = export_call.filter(&ARG_RULES[..]);
+	while let Some(arg) = argv.pop_front() {
 		match arg.as_rule() {
 			Rule::cmd_name => continue,
 			Rule::arg_assign => {
@@ -414,50 +396,47 @@ pub fn export<'a>(export_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 pub fn echo<'a>(echo_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let mut flags = EchoFlags::empty();
 	let blame = echo_call.clone();
-	let mut inner = echo_call.into_inner();
-	let mut argv = vec![];
+	let mut echo_args = echo_call.filter(&ARG_RULES[..]);
+	let mut os_args = VecDeque::new();
+	let redirs = helper::prepare_redirs(echo_call)?;
 
-	while let Some(arg) = inner.next() {
-		match arg.as_rule() {
-			Rule::cmd_name => continue,
-			Rule::word => {
-				if arg.as_str().starts_with('-') {
-					let mut options = arg.as_str().strip_prefix('-').unwrap().chars();
-					while let Some(opt) = options.next() {
-						match opt {
-							'e' => {
-								if flags.contains(EchoFlags::NO_ESCAPE) {
-									flags &= !EchoFlags::NO_ESCAPE
-								}
-								flags |= EchoFlags::USE_ESCAPE
-							}
-							'r' => flags |= EchoFlags::STDERR,
-							'n' => flags |= EchoFlags::NO_NEWLINE,
-							'P' => flags |= EchoFlags::EXPAND_OX_ESC,
-							'E' => {
-								if flags.contains(EchoFlags::USE_ESCAPE) {
-									flags &= !EchoFlags::USE_ESCAPE
-								}
-								flags |= EchoFlags::NO_ESCAPE
-							}
-							_ => break
+	while let Some(arg) = echo_args.pop_front() {
+		if arg.as_str().starts_with('-') {
+			let mut options = arg.as_str().strip_prefix('-').unwrap().chars();
+			let mut new_flags = EchoFlags::empty();
+			while let Some(opt) = options.next() {
+				match opt {
+					'e' => {
+						if new_flags.contains(EchoFlags::NO_ESCAPE) {
+							new_flags &= !EchoFlags::NO_ESCAPE
 						}
-						if flags.is_empty() {
-							argv.push(CString::new(arg.as_str().trim_quotes()).unwrap());
-						}
+						new_flags |= EchoFlags::USE_ESCAPE
 					}
-				} else {
-					argv.push(CString::new(arg.as_str().trim_quotes()).unwrap());
+					'r' => new_flags |= EchoFlags::STDERR,
+					'n' => new_flags |= EchoFlags::NO_NEWLINE,
+					'P' => new_flags |= EchoFlags::EXPAND_OX_ESC,
+					'E' => {
+						if new_flags.contains(EchoFlags::USE_ESCAPE) {
+							new_flags &= !EchoFlags::USE_ESCAPE
+						}
+						new_flags |= EchoFlags::NO_ESCAPE
+					}
+					_ => break
 				}
 			}
-			Rule::redir => ctx.push_redir(Redir::from_pair(arg)?),
-			_ => unreachable!()
+			if new_flags.is_empty() {
+				os_args.push_back(CString::new(arg.as_str().trim_quotes()).unwrap());
+			} else {
+				flags |= new_flags;
+			}
+		} else {
+			os_args.push_back(CString::new(arg.as_str().trim_quotes()).unwrap());
 		}
 	}
 
 	let newline = !flags.contains(EchoFlags::NO_NEWLINE);
 
-	let output = catstr(VecDeque::from(argv), newline);
+	let output = catstr(os_args, newline);
 	let io = ctx.io_mut();
 	let target_fd = if flags.contains(EchoFlags::STDERR) {
 		if let Some(ref err_fd) = io.stderr {
@@ -504,7 +483,7 @@ pub fn echo<'a>(echo_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 			if ctx.flags().contains(ExecFlags::BACKGROUND) {
 				write_jobs(|j| j.insert_job(job,false))??;
 			} else {
-				helper::handle_fg(job);
+				helper::handle_fg(job)?;
 			}
 		}
 		Err(_) => return Err(High(LashErrHigh::exec_err("Failed to fork in echo()", blame)))

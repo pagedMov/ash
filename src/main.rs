@@ -17,70 +17,8 @@ pub mod signal;
 pub mod expand;
 pub mod builtin;
 pub mod comp;
+pub mod pair;
 
-pub trait OptPairExt<'a> {
-	fn unpack(self) -> LashResult<Pair<'a,Rule>>;
-}
-
-impl<'a> OptPairExt<'a> for Option<Pair<'a,Rule>> {
-	/// There are many places in the lash codebase where we can be reasonably certain that an Option<Pair> will be Some
-	/// However, if we are wrong for whatever reason, it's probably better to not crash the program by calling unwrap()
-	///
-	/// This function is essentially a safe unwrap that returns our error type instead of panicking
-	fn unpack(self) -> LashResult<Pair<'a,Rule>> {
-		if let Some(pair) = self {
-			Ok(pair)
-		} else {
-			Err(LashErr::Low(LashErrLow::InternalErr("Called unpack() on a None value".into())))
-		}
-	}
-}
-
-pub trait PairExt<'a> {
-	fn to_vec(self) -> Vec<Pair<'a,Rule>>;
-	fn to_vec_rev(self) -> Vec<Pair<'a,Rule>>;
-	fn contains_rules(&self, rule: &[Rule]) -> bool;
-	fn process_args(&self, ctx: &mut ExecCtx) -> Vec<String>;
-}
-
-impl<'a> PairExt<'a> for Pair<'a,Rule> {
-	fn to_vec(self) -> Vec<Pair<'a,Rule>> {
-		self.into_inner().collect::<Vec<_>>()
-	}
-	fn to_vec_rev(self) -> Vec<Pair<'a,Rule>> {
-		self.into_inner().rev().collect::<Vec<_>>()
-	}
-	/// Automatically process command arguments, sorting words and redirections
-	fn process_args(&self, ctx: &mut ExecCtx) -> Vec<String> {
-		let mut argv = vec![];
-		if self.as_rule() != Rule::simple_cmd {
-			return argv
-		}
-		let inner = self.clone().into_inner();
-		for arg in inner {
-			match arg.as_rule() {
-				Rule::word | Rule::cmd_name | Rule::arg_assign => argv.push(arg.as_str().trim_quotes()),
-				Rule::redir => ctx.push_redir(Redir::from_pair(arg).unwrap()),
-				_ => unreachable!("Unexpected rule: {:?}",arg.as_rule())
-			}
-		}
-		argv
-	}
-	fn contains_rules(&self, rules: &[Rule]) -> bool {
-	  let clone = self.clone();
-		let mut stack = clone.to_vec_rev();
-		while let Some(pair) = stack.pop() {
-			if rules.contains(&pair.as_rule()) {
-				return true;
-			}
-			let inner = pair.to_vec_rev();
-			if !inner.is_empty() {
-				stack.extend(inner);
-			}
-		}
-		false
-	}
-}
 
 pub type LashResult<T> = Result<T,error::LashErr>;
 
@@ -139,10 +77,10 @@ pub fn get_cmd_lists<'a>(input: &'a str) -> LashResult<Vec<String>> {
 
 pub fn exec_list<'a>(rule: Rule, input: String, ctx: &mut ExecCtx) -> LashResult<()> {
 	let ast = LashParse::parse(rule, &input).map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?;
-	let node_stack = ast.into_iter().collect::<Vec<_>>();
+	let node_stack = ast.into_iter().collect::<VecDeque<_>>();
 	if node_stack.is_empty() {
 		return Ok(())
 	}
-	let blame_target = node_stack.last().unwrap().clone();
+	let blame_target = node_stack.front().unwrap().clone();
 	helper::proc_res(execute::descend(node_stack, ctx), blame_target)
 }

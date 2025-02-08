@@ -1,10 +1,10 @@
-use std::{env, iter::Rev, mem::take, os::fd::AsRawFd};
+use std::{collections::VecDeque, env, iter::Rev, mem::take, os::fd::AsRawFd};
 
 use chrono::Local;
 use nix::unistd::{fork, ForkResult};
 use pest::{iterators::{Pair, Pairs}, Parser, Span};
 
-use crate::{error::LashErrLow, exec_input, execute::{exec_subshell, ExecCtx, ExecFlags, ProcIO, Redir, RustFd}, helper::{self, StrExtension}, shellenv::{read_logic, read_vars, LashVal, LogicTable, VarTable}, OptPairExt, PairExt};
+use crate::{error::LashErrLow, exec_input, execute::{exec_subshell, ExecCtx, ExecFlags, ProcIO, Redir, RustFd}, helper::{self, StrExtension}, shellenv::{read_logic, read_vars, LashVal, LogicTable, VarTable}, pair::OptPairExt, pair::PairExt};
 use crate::{error::LashErr, LashParse, LashResult, Rule};
 
 //FIXME: This function is most likely a structural weakness. It seems sound now, but something is off-putting about it.
@@ -12,8 +12,8 @@ use crate::{error::LashErr, LashParse, LashResult, Rule};
 // And way less error prone
 pub fn expand_list<'a>(list: Pair<'a,Rule>) -> LashResult<String> {
 	let mut buffer = list.get_input().to_string();
+	let list_body = list.as_str().to_string();
 	let mut result = String::new();
-	let input_len = buffer.len();
 	let inner = list.into_inner().rev();
 	// We check to see if we are in a command chain here
 	// If we are, we return the whole input instead of just a slice
@@ -21,7 +21,7 @@ pub fn expand_list<'a>(list: Pair<'a,Rule>) -> LashResult<String> {
 
 	for cmd in inner {
 		if matches!(cmd.as_rule(), Rule::shell_cmd) {
-			result = buffer.clone();
+			result = list_body.clone();
 			continue
 		}
 
@@ -52,6 +52,7 @@ pub fn expand_cmd<'a>(cmd: Pair<'a,Rule>) -> LashResult<String> {
 		Rule::glob_word,
 		Rule::cmd_sub,
 		Rule::arr_index,
+		Rule::dquoted,
 		Rule::proc_sub,
 		Rule::brace_word,
 		Rule::tilde_sub
@@ -94,6 +95,7 @@ pub fn rule_pass<'a>(rule: Rule, buffer: String) -> LashResult<String> {
 					let param = read_vars(|v| v.get_param(&word.as_str()[1..]))?.unwrap_or_default().to_string();
 					param
 				}
+				Rule::dquoted => expand_string(word)?,
 				Rule::arr_index => expand_index(word)?,
 				Rule::glob_word => expand_glob(word),
 				Rule::brace_word => expand_brace(word),
@@ -109,6 +111,41 @@ pub fn rule_pass<'a>(rule: Rule, buffer: String) -> LashResult<String> {
 	Ok(result)
 }
 
+fn expand_string(pair: Pair<Rule>) -> LashResult<String> {
+	let body = pair.scry(Rule::dquote_body);
+	if body.is_none() {
+		return Ok(String::new());
+	}
+	let body = body.unwrap();
+	// TODO: this is three unwraps in a row. One is guaranteed to work, but still
+	let mut sub_expansions = LashParse::parse(Rule::find_expansions, body.as_str()).unwrap().next().unwrap().to_vec();
+	let mut result = body.as_str().to_string();
+	while let Some(word) = sub_expansions.pop() {
+		let span = word.as_span();
+		let mut inner = word.clone().into_inner();
+		if word.clone().into_inner().count() == 0 {
+			continue
+		} else {
+			let sub_type = inner.next().unpack()?;
+			let expanded = match sub_type.as_rule() {
+				Rule::var_sub => {
+					read_vars(|v| v.get_var(&word.as_str()[1..]))?.unwrap_or_default().to_string()
+				}
+				Rule::param_sub => {
+					let param = read_vars(|v| v.get_param(&word.as_str()[1..]))?.unwrap_or_default().to_string();
+					param
+				}
+				Rule::arr_index => expand_index(word)?,
+				Rule::proc_sub => expand_proc_sub(word),
+				_ => continue
+			};
+			result = replace_span(result, span, &expanded);
+		}
+	}
+	result = format!("\"{}\"",result);
+	Ok(result)
+}
+
 fn expand_glob(pair: Pair<Rule>) -> String {
 	let word = pair.as_str();
 	let mut result = String::new();
@@ -121,7 +158,7 @@ fn expand_glob(pair: Pair<Rule>) -> String {
 }
 
 fn expand_index(pair: Pair<Rule>) -> LashResult<String> {
-	let mut inner = pair.into_inner().next().unpack()?.into_inner().peekable();
+	let mut inner = pair.step(1).unpack()?.into_inner().peekable();
 	let arr_name = inner.next().unpack()?;
 
 	let array = read_vars(|v| v.get_var(arr_name.as_str()))?;
@@ -147,12 +184,12 @@ fn expand_brace(pair: Pair<Rule>) -> String {
 
 pub fn expand_cmd_sub(mut pair: Pair<Rule>) -> LashResult<String> {
 	if pair.as_rule() == Rule::word {
-		pair = pair.into_inner().next().unpack()?;
+		pair = pair.step(1).unpack()?;
 	}
 	assert!(pair.as_rule() == Rule::cmd_sub);
 	// Get the subshell token
-	let subshell = pair.into_inner().next().unpack()?;
-	let body = subshell.into_inner().next().unpack()?;
+	let subshell = pair.step(1).unpack()?;
+	let body = subshell.step(1).unpack()?;
 
 	// Set up output redirection. I originally used ProcIO for this, but I had a hunch that turning it in a redir like this would be better.
 	// I don't really know why it would be, and it certainly looks goofier, but it works so whatever
@@ -187,7 +224,7 @@ fn expand_proc_sub(pair: Pair<Rule>) -> String {
 }
 
 fn expand_tilde(pair: Pair<Rule>) -> LashResult<String> {
-	let tilde_sub = pair.into_inner().next().unpack()?;
+	let tilde_sub = pair.step(1).unpack()?;
 	debug_assert!(tilde_sub.as_rule() == Rule::tilde_sub, "Found this: {:?}",tilde_sub.as_rule());
 	let word = tilde_sub.as_str();
 	let home = env::var("HOME").unwrap_or_default();
@@ -231,7 +268,7 @@ pub fn expand_time(fmt: &str) -> String {
 }
 
 pub fn expand_esc<'a>(pair: Pair<'a,Rule>, buffer: &mut String) -> LashResult<String> {
-	let pair = pair.into_inner().next().unpack()?;
+	let pair = pair.step(1).unpack()?;
 	Ok(match pair.as_rule() {
 		Rule::esc_bell => "\x07".into(),
 		Rule::esc_dquote => "\"".into(),
@@ -240,11 +277,11 @@ pub fn expand_esc<'a>(pair: Pair<'a,Rule>, buffer: &mut String) -> LashResult<St
 		Rule::esc_newline => "\n".into(),
 		Rule::esc_vis_grp => helper::handle_prompt_visgroup(pair, buffer)?,
 		Rule::esc_user_seq => {
-			let query = pair.into_inner().next().unpack()?.as_str();
+			let query = pair.step(1).unpack()?.as_str();
 			helper::escseq_custom(query)?
 		}
 		Rule::esc_ascii_oct => {
-			let octal = pair.into_inner().next().unpack()?.as_str();
+			let octal = pair.step(1).unpack()?.as_str();
 			if let Ok(val) = u8::from_str_radix(octal, 8) {
 				(val as char).to_string()
 			} else {
@@ -252,7 +289,7 @@ pub fn expand_esc<'a>(pair: Pair<'a,Rule>, buffer: &mut String) -> LashResult<St
 			}
 		}
 		Rule::esc_ansi_seq  => {
-			let params = pair.into_inner().next().unpack()?.as_str();
+			let params = pair.step(1).unpack()?.as_str();
 			format!("\x1B[{params}m")
 		}
 		Rule::esc_12hour_short => expand_time("%I:%M %p"),
@@ -276,16 +313,40 @@ pub fn expand_esc<'a>(pair: Pair<'a,Rule>, buffer: &mut String) -> LashResult<St
 }
 
 pub fn replace_from_right(buffer: &str, pat: &str, new: &str) -> String {
-	if let Some(pos) = buffer.rfind(pat) {
-		let mut result = buffer.to_string();
-		result.replace_range(pos..pos+pat.len(), new);
-		result
-	} else {
-		buffer.to_string()
+	let mut working_buffer = VecDeque::new();
+	let mut chars = buffer.chars().collect::<VecDeque<_>>();
+	let mut pos = chars.len();
+	let mut prev_char = None;
+	let mut result = buffer.to_string();  // Start with a copy of the original buffer
+
+	// Traverse the string from the end to the beginning
+	while let Some(ch) = chars.pop_back() {
+		pos -= 1;
+		working_buffer.push_front(ch);
+
+		// Keep the last 'pat.len()' characters in the working buffer
+		if working_buffer.len() > pat.len() {
+			prev_char = working_buffer.pop_back();
+		}
+
+		// Check if the current buffer matches the pattern
+		if working_buffer.iter().collect::<String>().as_str() == pat {
+			let not_substring = chars.back().map_or(true, |ch| ch.is_whitespace() || *ch == ';')
+				&& prev_char.map_or(true, |ch| ch.is_whitespace() || ch == ';');
+
+			// Only replace if it's a valid match (i.e., not part of a larger word)
+			if not_substring {
+				result.replace_range(pos..pos+pat.len(), new);
+				break;  // Replace only the first valid occurrence
+			}
+		}
 	}
+	result
 }
 
+#[track_caller]
 pub fn replace_span(buffer: String, pos: Span, replace: &str) -> String {
+	//dbg!(std::panic::Location::caller());
 	let start = pos.start();
 	let end = pos.end();
 	let left = &buffer[..start];
