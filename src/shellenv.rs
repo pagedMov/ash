@@ -926,7 +926,8 @@ impl VarTable {
 		if let Ok(index) = key.parse::<usize>() {
 			self.pos_params.get(index).cloned().map(|param| param.to_string())
 		} else {
-			self.params.get(key).cloned().map(|param| param.to_string())
+			let result = self.params.get(key).cloned().map(|param| param.to_string());
+			result
 		}
 	}
 	pub fn borrow_pos_params(&self) -> &VecDeque<String> {
@@ -1322,7 +1323,8 @@ fn init_env_vars(clean: bool) -> HashMap<String,String> {
 }
 
 pub fn is_func(name: &str) -> LashResult<bool> {
-	Ok(read_logic(|l| l.get_func(name))?.is_some())
+	let result = read_logic(|l| l.get_func(name))?.is_some();
+	Ok(result)
 }
 
 pub fn check_status<'a>() -> LashResult<String> {

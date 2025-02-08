@@ -93,6 +93,7 @@ pub fn rule_pass<'a>(rule: Rule, buffer: String) -> LashResult<String> {
 				}
 				Rule::param_sub => {
 					let param = read_vars(|v| v.get_param(&word.as_str()[1..]))?.unwrap_or_default().to_string();
+					dbg!(&param);
 					param
 				}
 				Rule::dquoted => expand_string(word)?,

@@ -375,11 +375,20 @@ impl StrExtension for str {
 
 }
 
+pub fn validate_autocd(argv: &VecDeque<String>) -> LashResult<bool> {
+	if read_meta(|m| m.get_shopt("core.autocd").is_ok_and(|opt| opt.parse::<bool>().unwrap()))? && argv.len() == 1 {
+		let candidate = argv.front().unwrap();
+		Ok(Path::new(candidate).is_dir())
+	} else {
+		Ok(false)
+	}
+}
+
 pub fn prepare_argv<'a>(pair: Pair<'a,Rule>) -> VecDeque<String> {
 	let cmd_name = pair.scry(Rule::cmd_name);
 	if let Some(name) = cmd_name {
-		let mut args = pair.into_inner().filter(|pr| matches!(pr.as_rule(), Rule::arg_assign | Rule::word)).map(|pr| pr.to_string()).collect::<VecDeque<_>>();
-		args.push_front(name.to_string());
+		let mut args = pair.into_inner().filter(|pr| matches!(pr.as_rule(), Rule::arg_assign | Rule::word)).map(|pr| pr.as_str().to_string()).collect::<VecDeque<_>>();
+		args.push_front(name.as_str().to_string());
 		args
 	} else {
 		VecDeque::new()

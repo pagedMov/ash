@@ -618,7 +618,7 @@ fn exec_func_def<'a>(func_def: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 	let blame = func_def.clone();
 	let func_name = func_def.scry(Rule::func_name).unpack()?;
 	let body = func_def.scry(Rule::brace_grp).unpack()?;
-	helper::write_func(func_name.as_str(), body.as_str().trim_matches(['{','}']).trim())?;
+	helper::write_func(func_name.as_str().trim_end_matches("()"), body.as_str().trim_matches(['{','}']).trim())?;
 	Ok(())
 }
 
@@ -1011,9 +1011,9 @@ fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()
 
 fn exec_func(cmd: Pair<Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = cmd.clone();
-	let argv = helper::prepare_argv(cmd);
-	let func_name = argv.front().unwrap();
-	let body = read_logic(|l| l.get_func(func_name).unwrap())?;
+	let mut argv = helper::prepare_argv(cmd);
+	let func_name = argv.pop_front().unwrap();
+	let body = read_logic(|l| l.get_func(&func_name).unwrap())?;
 	let mut var_table = read_vars(|v| v.clone())?;
 	let snapshot = SavedEnv::get_snapshot()?;
 
@@ -1049,8 +1049,17 @@ fn exec_func(cmd: Pair<Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
 
 fn exec_cmd<'a>(cmd: Pair<Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = cmd.clone();
-	let argv = cmd.process_args(ctx);
+	let mut argv = helper::prepare_argv(cmd);
+	argv.retain(|arg| !arg.is_empty());
+
+	if helper::validate_autocd(&argv)? {
+		let arg = argv.pop_front().unwrap();
+		let dir = PathBuf::from(&arg);
+		return autocd(dir)
+	}
+
 	let argv = argv.into_iter().map(|arg| CString::new(arg).unwrap()).collect::<Vec<_>>();
+
 
 	let command = argv.first().unwrap().clone();
 
@@ -1148,6 +1157,15 @@ impl CmdRedirs {
 	}
 }
 
+fn autocd(dir: PathBuf) -> LashResult<()> {
+	let cwd = env::var("PWD").map_err(|_| Low(LashErrLow::from_io()))?;
+	write_vars(|v| v.export_var("OLDPWD", &cwd))?;
+	env::set_current_dir(&dir).map_err(|_| Low(LashErrLow::from_io()))?;
+	let cwd = env::current_dir().map_err(|_| Low(LashErrLow::from_io()))?;
+	write_vars(|v| v.export_var("PWD", cwd.to_str().unwrap()))?;
+	Ok(())
+}
+
 fn exec_external(command: CString, argv: Vec<CString>, envp: Vec<CString>,blame: Pair<Rule>) -> ! {
 	let Err(e) = execvpe(&command, &argv, &envp);
 	match e {
@@ -1155,7 +1173,7 @@ fn exec_external(command: CString, argv: Vec<CString>, envp: Vec<CString>,blame:
 			let error = High(LashErrHigh::cmd_not_found(command.to_str().unwrap(), blame));
 			eprintln!("{}",error);
 		}
-		Errno::EPERM => {
+		Errno::EACCES => {
 			let error = High(LashErrHigh::no_permission(command.to_str().unwrap(), blame));
 			eprintln!("{}",error);
 		}

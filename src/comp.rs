@@ -310,6 +310,7 @@ fn save_whitespace(input: &str) -> (String,String,String) {
 
 fn highlight_struct<'a>(pair: Pair<'a,Rule>, mut buffer: String) -> String {
 	let struct_pair = pair.into_inner().next().unwrap();
+	let span = struct_pair.as_span();
 	match struct_pair.as_rule() {
 		Rule::r#for |
 		Rule::r#if |
@@ -325,12 +326,10 @@ fn highlight_struct<'a>(pair: Pair<'a,Rule>, mut buffer: String) -> String {
 		Rule::in_kw => style_text(KEYWORD, struct_pair.as_str()),
 		Rule::hl_subshell => {
 			let body = struct_pair.scry(Rule::subsh_body).unwrap();
-			let span = struct_pair.as_span();
 			let highlighted = highlight_input(body.as_str()).fill_from(body.as_str());
 			let sub_left = style_text(STRING,"(");
 			let sub_right = style_text(STRING,")");
 			let subsh = format!("{sub_left}{highlighted}{sub_right}");
-			println!("{}",subsh);
 			buffer = replace_span(buffer, span, &subsh);
 			buffer
 		}
@@ -365,7 +364,9 @@ fn highlight_struct<'a>(pair: Pair<'a,Rule>, mut buffer: String) -> String {
 		Rule::func_name => {
 			let stripped = struct_pair.as_str().strip_suffix("()").unwrap();
 			let styled = style_text(FUNCNAME, stripped);
-			format!("{}()",styled)
+			let display = format!("{}()",styled);
+			buffer = replace_span(buffer, span, &display);
+			buffer
 		}
 		_ => unreachable!("Unexpected rule: {:?}",struct_pair.as_rule())
 	}
@@ -513,9 +514,16 @@ fn highlight_words<'a>(pair: Pair<'a,Rule>, mut buffer: String, path: &str) -> S
 
 fn highlight_pair<'a>(pair: Pair<'a,Rule>, mut buffer: String) -> String {
 	let path = env::var("PATH").unwrap_or_default();
+	let span = pair.as_span();
 	match pair.as_rule() {
-		Rule::loud_sep => buffer = style_text(RESET, &buffer),
-		Rule::loud_operator => buffer = style_text(OPERATOR, &buffer),
+		Rule::loud_sep => {
+			let hl = style_text(RESET, &pair.as_str());
+			buffer = replace_span(buffer, span, &hl)
+		}
+		Rule::loud_operator => {
+			let hl = style_text(OPERATOR, &pair.as_str());
+			buffer = replace_span(buffer, span, &hl)
+		}
 		Rule::words => buffer = highlight_words(pair, buffer, &path),
 		Rule::shell_struct => buffer = highlight_struct(pair, buffer),
 		_ => unreachable!("Reached highlight pair with this unexpected rule: {:?}",pair.as_rule())
