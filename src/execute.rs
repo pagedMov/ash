@@ -1,9 +1,10 @@
 use core::fmt;
-use std::{collections::{HashMap, HashSet, VecDeque}, env, ffi::CString, fmt::Display, io::{self, Write}, os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd}, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard}};
+use std::{collections::{HashMap, HashSet, VecDeque}, env, ffi::CString, fmt::Display, io::{self, Write}, mem::take, os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd}, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard}};
 
 use libc::MFD_CLOEXEC;
 use nix::{errno::Errno, fcntl::{fcntl, open, FcntlArg::F_GETFD, OFlag}, sys::{memfd::{memfd_create, MemFdCreateFlag}, signal::Signal, stat::{fstat, Mode}, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
 use pest::{iterators::Pair, Parser};
+use rayon::iter::IntoParallelRefIterator;
 
 use crate::{builtin::{self, BUILTINS}, error::LashErrHigh, exec_input, helper::{handle_fg, proc_res, StrExtension}, shellenv::{read_logic, read_meta, EnvFlags, SavedEnv}, pair::OptPairExt};
 use crate::error::LashErrLow::*;
@@ -30,7 +31,6 @@ bitflags::bitflags! {
 
 #[derive(Debug,Clone)]
 pub struct ExecCtx {
-	io: ProcIO,
 	redir_queue: VecDeque<Redir>,
 	flags: ExecFlags,
 	last_status: i32,
@@ -43,7 +43,6 @@ impl ExecCtx {
 	pub fn new() -> Self {
 		let last_status = shellenv::check_status().unwrap().parse::<i32>().unwrap();
 		Self {
-			io: ProcIO::new(),
 			redir_queue: VecDeque::new(),
 			flags: ExecFlags::empty(),
 			last_status,
@@ -56,27 +55,33 @@ impl ExecCtx {
 	/// Used in shell structures like `if` and `while` to direct input to the condition
 	pub fn as_cond(&self) -> Self {
 		let mut clone = self.clone();
-		let io = clone.io_mut();
-		*io = ProcIO::from(io.stdin.clone(), None, None);
-		clone.redir_queue.retain(|rdr| {
-			matches!(rdr.redir_type(), Rule::r#in | Rule::herestring | Rule::heredoc)
-		});
+		let (cond_redirs,_) = self.sort_redirs();
+		clone.redir_queue = cond_redirs.into();
 		clone
 	}
 	/// Creates a new instance of ExecCtx which retains only the stdout and stderr of the original
 	/// Used in shell structures like `if` and `while` to direct output from the body
 	pub fn as_body(&self) -> Self {
 		let mut clone = self.clone();
-		let io = clone.io_mut();
-		*io = ProcIO::from(None, io.stdout.clone(), io.stderr.clone());
-		clone.redir_queue.retain(|rdr| {
-			!matches!(rdr.redir_type(), Rule::r#in | Rule::herestring | Rule::heredoc)
-		});
+		let (_,body_redirs) = self.sort_redirs();
+		clone.redir_queue = body_redirs.into();
 		clone
 	}
 	pub fn refresh(&mut self) -> LashResult<()> {
 		*self = ExecCtx::new();
 		Ok(())
+	}
+	pub fn sort_redirs(&self) -> (Vec<Redir>,Vec<Redir>) {
+		let mut in_redirs = vec![];
+		let mut out_redirs = vec![];
+		for redir in self.redir_queue.clone() {
+			match redir.redir_type {
+				Rule::r#in => in_redirs.push(redir.clone()),
+				Rule::out | Rule::append => out_redirs.push(redir.clone()),
+				_ => unimplemented!()
+			}
+		}
+		(in_redirs,out_redirs)
 	}
 	pub fn push_state(&mut self) -> LashResult<()> {
 		let saved_state = Box::new(self.clone());
@@ -88,9 +93,6 @@ impl ExecCtx {
 			*self = *state;
 		}
 		Ok(())
-	}
-	pub fn set_io(&mut self, io: ProcIO) {
-		self.io = io
 	}
 	pub fn ascend(&mut self) -> LashResult<()> {
 		self.pop_state()?;
@@ -115,9 +117,6 @@ impl ExecCtx {
 	pub fn flags(&self) -> ExecFlags {
 		self.flags
 	}
-	pub fn io_mut(&mut self) -> &mut ProcIO {
-		&mut self.io
-	}
 	pub fn set_redirs(&mut self, redirs: VecDeque<Redir>) {
 		self.redir_queue = redirs
 	}
@@ -130,10 +129,15 @@ impl ExecCtx {
 	pub fn pop_redir(&mut self) -> Option<Redir> {
 		self.redir_queue.pop_back()
 	}
-	pub fn redirs(&mut self) -> Vec<Redir> {
-		let redirs = self.redir_queue.clone();
-		// Let's reverse it so that pop() takes them in the right order
-		redirs.into_iter().rev().collect::<Vec<_>>()
+	pub fn take_redirs(&mut self) -> VecDeque<Redir> {
+		take(&mut self.redir_queue)
+	}
+	pub fn consume_redirs(&mut self) -> CmdRedirs {
+		CmdRedirs::new(self.take_redirs())
+	}
+	pub fn activate_redirs(&mut self) -> LashResult<()> {
+		let mut redirs = self.consume_redirs();
+		redirs.activate()
 	}
 	pub fn update_status(&mut self) -> LashResult<()> {
 		let status = shellenv::check_status()?;
@@ -145,8 +149,8 @@ impl ExecCtx {
 #[derive(Debug,Clone)]
 pub struct Redir {
 	redir_type: Rule,
-	source: i32,
-	fd_target: Option<i32>,
+	our_fd: i32,
+	their_fd: Option<i32>,
 	file_target: Option<PathBuf>
 }
 
@@ -155,14 +159,14 @@ impl Redir {
 		if let Rule::redir = pair.as_rule() {
 			let mut inner = pair.into_inner();
 			let mut redir_type = None;
-			let mut source = None;
-			let mut fd_target = None;
+			let mut our_fd = None;
+			let mut their_fd = None;
 			let mut file_target = None;
 			while let Some(pair) = inner.next() {
 				match pair.as_rule() {
 					Rule::fd_out => {
 						let fd = pair.as_str().parse::<i32>().unwrap();
-						source = Some(fd);
+						our_fd = Some(fd);
 					}
 					Rule::file => {
 						let path = PathBuf::from(pair.as_str());
@@ -170,7 +174,7 @@ impl Redir {
 					}
 					Rule::fd_target => {
 						let fd = pair.as_str().parse::<i32>().unwrap();
-						fd_target = Some(fd);
+						their_fd = Some(fd);
 					}
 					Rule::r#in |
 					Rule::out |
@@ -182,7 +186,7 @@ impl Redir {
 					_ => unreachable!()
 				}
 			}
-			let source = source.unwrap_or(match redir_type.unwrap() {
+			let our_fd = our_fd.unwrap_or(match redir_type.unwrap() {
 				Rule::r#in |
 				Rule::herestring |
 				Rule::heredoc => 0,
@@ -192,14 +196,21 @@ impl Redir {
 			Ok(
 				Self {
 					redir_type: redir_type.unwrap(),
-					source,
-					fd_target,
+					our_fd,
+					their_fd,
 					file_target
 				}
 			)
 		} else {
 			Err(Low(LashErrLow::InternalErr(format!("Expected a redir rule in redir construction got this: {:?}", pair.as_rule()))))
 		}
+	}
+	pub fn from_raw(our_fd: RawFd, their_fd: RawFd) -> Self {
+		let redir_type = match our_fd {
+			0 => Rule::r#in,
+			_ => Rule::out
+		};
+		Self { redir_type, our_fd, their_fd: Some(their_fd), file_target: None }
 	}
 	fn redir_type(&self) -> Rule {
 		self.redir_type
@@ -390,7 +401,7 @@ impl<'a> RustFd {
 		Ok((r_fd,w_fd))
 	}
 
-	/// Produce a `RustFd` that points to the same resource as the 'self' `RustFd`
+	/// Produce a `RustFd` that points to the same reour_fd as the 'self' `RustFd`
 	pub fn dup(&self) -> LashResult<Self> {
 		if !self.is_valid() {
 			return Err(LashErr::Low(LashErrLow::BadFD("Attempted to call `dup()` on an invalid RustFd".into())))
@@ -454,21 +465,13 @@ impl<'a> RustFd {
 	}
 
 	pub fn is_valid(&self) -> bool {
-		self.fd > 0
+		self.fd >= 0
 	}
 }
 
 impl Display for RustFd {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(f, "{}", self.fd)
-	}
-}
-
-impl Drop for RustFd {
-	#[track_caller]
-	fn drop(&mut self) {
-		if self.fd >= 0 && self.close().is_err() {
-		}
 	}
 }
 
@@ -728,7 +731,7 @@ pub fn exec_subshell<'a>(subsh: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<
 	let argv = helper::prepare_argv(subsh.clone());
 	let redirs = helper::prepare_redirs(subsh)?;
 
-	ctx.set_redirs(redirs);
+	ctx.extend_redirs(redirs);
 	if let Some(shebang) = shebang {
 		let script = format!("{}{}",shebang,body);
 		handle_external_subshell(script,argv,ctx)?;
@@ -747,9 +750,7 @@ fn handle_external_subshell(script: String, argv: VecDeque<String>, ctx: &mut Ex
 	write!(memfd,"{}",script)?;
 
 	let fd_path = CString::new(format!("/proc/self/fd/{memfd}")).unwrap();
-	let io = ctx.io_mut();
-
-	io.route_io()?;
+	ctx.activate_redirs()?;
 
 	if shellenv::in_pipe()? {
 		execve(&fd_path, &argv, &envp).unwrap();
@@ -773,12 +774,13 @@ fn handle_external_subshell(script: String, argv: VecDeque<String>, ctx: &mut Ex
 		}
 		Err(e) => panic!("Encountered fork error: {}",e)
 	}
-	io.restore_fildescs()?;
+	memfd.close()?;
 	Ok(())
 }
 
 fn handle_internal_subshell(body: String, argv: VecDeque<String>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let snapshot = SavedEnv::get_snapshot()?;
+	ctx.activate_redirs()?;
 	write_vars(|v| {
 		v.reset_params();
 		for arg in argv {
@@ -792,6 +794,9 @@ fn handle_internal_subshell(body: String, argv: VecDeque<String>, ctx: &mut Exec
 
 fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = pipeline.clone();
+	let (in_redirs,out_redirs) = ctx.sort_redirs();
+	let _ = ctx.take_redirs();
+
 	let mut inner = pipeline.into_inner().peekable();
 	let mut prev_read_pipe: Option<RustFd> = None;
 	let mut pgid: Option<Pid> = None;
@@ -808,65 +813,40 @@ fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 		};
 
 		let cmd_check = node.clone();
-		match cmd_check.as_rule() {
-			Rule::simple_cmd => {
-				let mut argv = cmd_check.into_inner();
-				let cmd = argv.next().unwrap();
-				cmds.push(cmd.as_str().to_string())
-			}
-			Rule::shell_cmd => {
-				let shell_cmd = cmd_check.step(1).unpack()?;
-				match shell_cmd.as_rule() {
-					Rule::for_cmd => cmds.push("for".into()),
-					Rule::if_cmd => cmds.push("if".into()),
-					Rule::match_cmd => cmds.push("match".into()),
-					Rule::loop_cmd => {
-						let mut inner = shell_cmd.into_inner();
-						let loop_kind = inner.next().unpack()?.as_str();
-						cmds.push(loop_kind.into());
-					}
-					Rule::subshell => cmds.push("anonymous subshell".into()),
-					_ => todo!()
-				}
-			}
-			_ => unreachable!()
-		}
-
-		let io = ctx.io_mut();
-		let pipe_io = ProcIO::from(
-			prev_read_pipe.take().map(|pipe| pipe.mk_shared()),
-			w_pipe.take().map(|pipe| pipe.mk_shared()),
-			io.stderr.clone(), // TODO: implement stderr piping
-		);
+		cmds.push(helper::get_pipeline_cmd(cmd_check)?);
 
 		match unsafe { fork() } {
 			Ok(ForkResult::Child) => {
+				if let Some(mut pipe) = r_pipe {
+					pipe.close()?
+				}
+				let _ = prev_read_pipe.as_ref()
+					.map(|r| Redir::from_raw(0, r.as_raw_fd()))
+					.and_then(|redir| Some(ctx.push_redir(redir)));
+				let _ = w_pipe.as_ref()
+					.map(|w| Redir::from_raw(1, w.as_raw_fd()))
+					.and_then(|redir| Some(ctx.push_redir(redir)));
+				*ctx.flags_mut() |= ExecFlags::NO_FORK;
+				// These two if statements handle the case of existing i/o for the pipeline
+				// Stuff like shell functions in the middle of pipelines
 				if first {
-					io.route_input().unwrap();
-				} else if inner.peek().is_none() {
-					io.route_output().unwrap();
+					// If the pipeline started with input, redirect it here
+					ctx.extend_redirs(in_redirs.into());
 				}
-				if let Some(mut pipe) = prev_read_pipe {
-					pipe.close().unwrap()
-				}
-				if let Some(mut pipe) = w_pipe {
-					pipe.close().unwrap()
+				if inner.peek().is_none() {
+					// If the pipeline ends with output, redirect it here
+					ctx.extend_redirs(out_redirs.into());
 				}
 
-				write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::IN_SUB_PROC)).unwrap();
-				*io = pipe_io;
 				dispatch_exec(node, ctx)?;
 				std::process::exit(1)
 			}
 			Ok(ForkResult::Parent { child }) => {
-				pids.push(child);
-				if let Some(ref mut read_pipe) = prev_read_pipe {
-					read_pipe.close()?;
-				}
-				if let Some(mut write_pipe) = w_pipe {
-					write_pipe.close()?;
+				if let Some(mut pipe) = w_pipe {
+					pipe.close()?
 				}
 				prev_read_pipe = r_pipe;
+				pids.push(child);
 				if pgid.is_none() {
 					pgid = Some(child);
 				}
@@ -882,7 +862,6 @@ fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 						.with_pgid(pgid.unwrap())
 						.with_children(children)
 						.build();
-
 
 					handle_fg(job)?;
 				}
@@ -916,8 +895,7 @@ fn exec_assignment<'a>(ass: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> 
 }
 
 fn exec_for_cmd<'a>(cmd: Pair<'a,Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
-	let io = ctx.io_mut();
-	*io = ProcIO::from(None, io.stdout.clone(), io.stderr.clone());
+	let ctx = &mut ctx.as_body();
 	let mut saved_vars = HashMap::new();
 	let loop_body_pair = cmd.scry(Rule::loop_body).unpack()?;
 	let loop_vars = cmd.scry(Rule::for_vars)
@@ -984,10 +962,6 @@ fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 
 	let mut cond_ctx = ctx.as_cond();
 	let mut body_ctx = ctx.as_body();
-	let cond_io = cond_ctx.io_mut();
-	*cond_io = ProcIO::from(cond_io.stdin.clone(), None, None);
-	let body_io = body_ctx.io_mut();
-	*body_io = ProcIO::from(None, body_io.stdout.clone(), body_io.stderr.clone());
 
 	let in_pipe = shellenv::in_pipe()?;
 	if in_pipe {
@@ -1039,11 +1013,6 @@ fn exec_loop_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let loop_body_pair = cmd.scry(Rule::loop_body).unpack()?;
 	let mut cond_ctx = ctx.as_cond();
 	let mut body_ctx = ctx.as_body();
-	let cond_io = cond_ctx.io_mut();
-	*cond_io = ProcIO::from(cond_io.stdin.clone(), None, None);
-	let body_io = body_ctx.io_mut();
-	*body_io = ProcIO::from(None, body_io.stdout.clone(), body_io.stderr.clone());
-
 
 	loop {
 		let loop_cond = expand::expand_list(loop_cond_pair.clone())?;
@@ -1161,7 +1130,7 @@ fn exec_cmd<'a>(cmd: Pair<Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = cmd.clone();
 	let mut argv = helper::prepare_argv(cmd.clone());
 	let mut redirs = helper::prepare_redirs(cmd)?;
-	redirs.extend(ctx.redirs());
+	ctx.extend_redirs(redirs);
 	argv.retain(|arg| !arg.is_empty() && arg != "\"\"" && arg != "''");
 
 	if helper::validate_autocd(&argv)? {
@@ -1175,9 +1144,6 @@ fn exec_cmd<'a>(cmd: Pair<Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 
 	let command = argv.first().unwrap().clone();
 
-	let io = ctx.io_mut();
-	io.route_io()?;
-
 
 	if SHELL_CMDS.contains(&command.to_str().unwrap()) {
 		return Err(High(LashErrHigh::exec_err(format!("This shell command appears malformed"), blame)))
@@ -1186,8 +1152,7 @@ fn exec_cmd<'a>(cmd: Pair<Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let env_vars = env::vars().into_iter().collect::<Vec<(String,String)>>();
 	let envp = env_vars.iter().map(|var| CString::new(format!("{}={}",var.0,var.1)).unwrap()).collect::<Vec<_>>();
 
-	let mut redirs = CmdRedirs::new(Vec::from(redirs));
-	proc_res(redirs.activate(),blame.clone())?;
+	ctx.activate_redirs()?;
 
 	if ctx.flags().contains(ExecFlags::NO_FORK) {
 		exec_external(command, argv, envp, blame);
@@ -1199,7 +1164,6 @@ fn exec_cmd<'a>(cmd: Pair<Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 		}
 		Ok(ForkResult::Parent { child }) => {
 			handle_parent_process(child, command.to_str().unwrap().to_string())?;
-			redirs.close_all()?;
 		}
 		Err(_) => todo!()
 	}
@@ -1215,12 +1179,12 @@ pub struct CmdRedirs {
 }
 
 impl CmdRedirs {
-	pub fn new(mut redirs: Vec<Redir>) -> Self {
+	pub fn new(mut redirs: VecDeque<Redir>) -> Self {
 		let mut targets_fd = vec![];
 		let mut targets_file = vec![];
-		while let Some(redir) = redirs.pop() {
-			let Redir { redir_type: _, source: _, fd_target, file_target: _ } = &redir;
-			if fd_target.is_some() {
+		while let Some(redir) = redirs.pop_back() {
+			let Redir { redir_type: _, our_fd: _, their_fd, file_target: _ } = &redir;
+			if their_fd.is_some() {
 				targets_fd.push(redir);
 			} else {
 				targets_file.push(redir);
@@ -1230,7 +1194,7 @@ impl CmdRedirs {
 	}
 	pub fn activate(&mut self) -> LashResult<()> {
 		self.open_file_targets()?;
-		self.open_fd_targets()?;
+		self.open_their_fds()?;
 		Ok(())
 	}
 	pub fn close_all(mut self) -> LashResult<()> {
@@ -1241,8 +1205,8 @@ impl CmdRedirs {
 	}
 	pub fn open_file_targets(&mut self) -> LashResult<()> {
 		for redir in &self.targets_file {
-			let Redir { redir_type, source, fd_target: _, file_target } = redir;
-			let src_fd = RustFd::new(*source)?;
+			let Redir { redir_type, our_fd, their_fd: _, file_target } = redir;
+			let src_fd = RustFd::new(*our_fd)?;
 			let path = file_target.as_ref().unwrap(); // We know that there's a file target so unwrap is safe
 			let flags = match redir_type {
 				Rule::r#in => OFlag::O_RDONLY,
@@ -1257,11 +1221,11 @@ impl CmdRedirs {
 		}
 		Ok(())
 	}
-	pub fn open_fd_targets(&mut self) -> LashResult<()> {
+	pub fn open_their_fds(&mut self) -> LashResult<()> {
 		for redir in &self.targets_fd {
-			let Redir { redir_type: _, source, fd_target, file_target: _ } = redir;
-			let mut tgt_fd = RustFd::new(fd_target.unwrap())?;
-			let src_fd = RustFd::new(*source)?;
+			let Redir { redir_type: _, our_fd, their_fd, file_target: _ } = redir;
+			let mut tgt_fd = RustFd::new(their_fd.unwrap())?;
+			let src_fd = RustFd::new(*our_fd)?;
 			tgt_fd.dup2(&src_fd)?;
 			tgt_fd.close()?;
 			self.open_fds.push(src_fd);

@@ -5,41 +5,27 @@ use pest::{error::ErrorVariant, iterators::Pair, Span};
 
 use crate::{helper, Rule};
 
-// These error types represent different stages of the lash error reporting mechanism
-// A low error is thrown in deep contexts where there is no token to blame.
-// A mid error is created when a low error is caught in a context where there is a token to blame.
-// A high error is created when a mid error is caught in the top level context
-
-#[derive(Debug)]
-pub struct BlameSpan {
-	start: usize,
-	end: usize
+pub trait LashErrExt<T> {
+	/// Transforms a LashResult into an Option
+	/// If LashResult is an error, this function will display it before returning None
+	fn catch(self) -> Option<T>;
 }
 
-#[derive(Debug)]
-pub struct BlamePair {
-	input: String,
-	span: BlameSpan
-}
-
-impl BlamePair {
-	fn start(&self) -> usize {
-		self.span.start
-	}
-	fn end(&self) -> usize {
-		self.span.end
+impl<T> LashErrExt<T> for Result<T,LashErr> {
+	fn catch(self) -> Option<T> {
+		match self {
+			Err(err) => {
+				eprintln!("{}",err);
+				None
+			}
+			Ok(thing) => Some(thing)
+		}
 	}
 }
 
-impl BlamePair {
-	pub fn from(pair: Pair<Rule>) -> Self {
-		let input = pair.get_input().to_string();
-		let pair_span = pair.as_span();
-		let span = BlameSpan { start: pair_span.start(), end: pair_span.end() };
-		Self { input, span }
-	}
-}
-
+/// These error types represent different stages of the lash error reporting mechanism
+/// A low error is thrown in deep contexts where there is no token to blame.
+/// A high error is created when a low error is caught in a context where there is a token to blame.
 #[derive(Debug)]
 pub enum LashErr {
 	Low(LashErrLow),

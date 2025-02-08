@@ -1,8 +1,8 @@
 use std::{collections::VecDeque, env, path::PathBuf};
 
 use clap::{Arg, ArgAction, Command, Parser as ClapParser};
-use error::{LashErr, LashErrHigh, LashErrLow};
-use execute::{ExecCtx, ProcIO, Redir, SavedIO};
+use error::{LashErr, LashErrExt, LashErrHigh, LashErrLow};
+use execute::{ExecCtx, ProcIO, Redir, RustFd, SavedIO};
 use expand::expand_list;
 use helper::StrExtension;
 use pest::{iterators::{Pair, Pairs}, Parser, Span};
@@ -56,6 +56,24 @@ pub fn get_cmd_lists<'a>(input: &'a str) -> LashResult<Vec<String>> {
 	Ok(list_bodies)
 }
 
+pub fn save_fds() -> LashResult<(RustFd,RustFd,RustFd)> {
+	Ok((
+		RustFd::from_stdin()?,
+		RustFd::from_stdout()?,
+		RustFd::from_stderr()?
+	))
+}
+
+pub fn restore_fds(mut stdio: (RustFd,RustFd,RustFd)) -> LashResult<()> {
+	stdio.0.dup2(&0)?;
+	stdio.0.close()?;
+	stdio.1.dup2(&1)?;
+	stdio.1.close()?;
+	stdio.2.dup2(&2)?;
+	stdio.2.close()?;
+	Ok(())
+}
+
 pub fn exec_list<'a>(rule: Rule, input: String, ctx: &mut ExecCtx) -> LashResult<()> {
 	let ast = LashParse::parse(rule, &input).map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?;
 	let node_stack = ast.into_iter().collect::<VecDeque<_>>();
@@ -93,27 +111,29 @@ struct LashArgs {
 fn main() {
 	let mut ctx = ExecCtx::new();
 	loop {
-		let is_initialized = read_meta(|m| m.flags().contains(EnvFlags::INITIALIZED)).unwrap();
+		let is_initialized = read_meta(|m| m.flags().contains(EnvFlags::INITIALIZED)).catch();
 		let args = LashArgs::parse();
 		if args.no_rc {
 			env::set_var("PS1", "$> ");
-			write_vars(|v| v.export_var("PS1", "$> ")).unwrap();
+			write_vars(|v| v.export_var("PS1", "$> ")).catch();
 		}
-		if !is_initialized && !args.no_rc {
-			write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::INITIALIZED)).unwrap();
+		if is_initialized == Some(false) && !args.no_rc {
+			write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::INITIALIZED)).catch();
 			let home = env::var("HOME").unwrap();
 			if let Err(e) = shellenv::source_file(PathBuf::from(format!("{home}/.lashrc"))) {
-				shellenv::set_code(1);
+				shellenv::set_code(1).catch();
 				eprintln!("Failed to source lashrc: {}",e);
 			}
 		}
-		let input = prompt::run_prompt().unwrap();
-		write_meta(|m| m.start_timer()).unwrap();
-		ctx.push_state().unwrap();
-		let saved_fds = SavedIO::new().unwrap();
+		let input = prompt::run_prompt().catch().unwrap_or_default();
+		write_meta(|m| m.start_timer()).catch();
+		ctx.push_state().catch();
+
+		let saved_fds = save_fds().unwrap();
 		let result = exec_input(input, &mut ctx);
-		saved_fds.restore().unwrap();
-		ctx.pop_state().unwrap();
+		restore_fds(saved_fds).catch();
+
+		ctx.pop_state().catch();
 		match result {
 			Ok(_) => continue,
 			Err(e) => eprintln!("{}",e)

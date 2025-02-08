@@ -1,6 +1,6 @@
 use std::{io::Write,collections::VecDeque, env, ffi::CString, fs, os::{fd::AsRawFd, unix::fs::{FileTypeExt, MetadataExt}}, path::{Path, PathBuf}};
 
-use libc::STDOUT_FILENO;
+use libc::{STDERR_FILENO, STDOUT_FILENO};
 use nix::unistd::{access, fork, getegid, geteuid, isatty, setpgid, AccessFlags, ForkResult};
 use pest::iterators::Pair;
 
@@ -54,8 +54,8 @@ pub fn catstr(mut c_strings: VecDeque<CString>,newline: bool) -> CString {
 pub fn var_type<'a>(pair: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let mut argv = helper::prepare_argv(pair.clone());
 	let mut redirs = helper::prepare_redirs(pair.clone())?;
-	redirs.extend(ctx.redirs());
-	let mut redirs = CmdRedirs::new(Vec::from(redirs));
+	ctx.extend_redirs(redirs);
+	let mut redirs = ctx.consume_redirs();
 	redirs.activate()?;
 
 	let mut stdout = RustFd::new(STDOUT_FILENO)?;
@@ -393,9 +393,9 @@ pub fn alias<'a>(alias_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()>
 
 	ctx.extend_redirs(redirs);
 
-	let ctx_redirs = ctx.redirs();
+	let ctx_redirs = ctx.take_redirs();
 	if !ctx_redirs.is_empty() {
-		let mut redirs = CmdRedirs::new(ctx_redirs);
+		let mut redirs = ctx.consume_redirs();
 		redirs.activate()?;
 	}
 
@@ -441,9 +441,9 @@ pub fn pwd<'a>(pwd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 
 	ctx.extend_redirs(redirs);
 
-	let redirs = ctx.redirs();
+	let redirs = ctx.take_redirs();
 	if !redirs.is_empty() {
-		let mut redirs = CmdRedirs::new(redirs);
+		let mut redirs = ctx.consume_redirs();
 		redirs.activate()?;
 	}
 
@@ -483,8 +483,8 @@ pub fn echo<'a>(echo_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = echo_call.clone();
 	let mut echo_args = echo_call.filter(&ARG_RULES[..]);
 	let mut arg_buffer = vec![];
-	let mut redirs = helper::prepare_redirs(echo_call)?;
-	redirs.extend(ctx.redirs());
+	let redirs = helper::prepare_redirs(echo_call)?;
+	ctx.extend_redirs(redirs);
 
 	while let Some(arg) = echo_args.pop_front() {
 		if arg.as_str().starts_with('-') {
@@ -524,28 +524,13 @@ pub fn echo<'a>(echo_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 
 	let newline = !flags.contains(EchoFlags::NO_NEWLINE);
 
-	let io = ctx.io_mut();
 	let mut target_fd = if flags.contains(EchoFlags::STDERR) {
-		if let Some(ref err_fd) = io.stderr {
-			err_fd.lock().unwrap().dup().unwrap_or_else(|_| RustFd::from_stderr().unwrap())
-		} else {
-			RustFd::new(2)?
-		}
-	} else if let Some(ref out_fd) = io.stdout {
-			out_fd.lock().unwrap().dup().unwrap_or_else(|_| RustFd::from_stdout().unwrap())
-		} else {
-			RustFd::new(STDOUT_FILENO)?
+		RustFd::new(STDERR_FILENO)?
+	} else {
+		RustFd::new(STDOUT_FILENO)?
 	};
 
-	if let Some(ref fd) = io.stderr {
-		if !flags.contains(EchoFlags::STDERR) {
-			let fd = fd.lock().unwrap();
-			target_fd.dup2(&fd.as_raw_fd())?;
-		}
-	}
-
-	let mut redirs = CmdRedirs::new(Vec::from(redirs));
-	redirs.activate()?;
+	ctx.activate_redirs()?;
 
 	if ctx.flags().contains(ExecFlags::NO_FORK) {
 		if newline {
@@ -565,8 +550,6 @@ pub fn echo<'a>(echo_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 			std::process::exit(0);
 		}
 		Ok(ForkResult::Parent { child }) => {
-			redirs.close_all()?;
-
 			setpgid(child, child).map_err(|_| High(LashErrHigh::io_err(blame.clone())))?;
 			let children = vec![
 				ChildProc::new(child, Some("echo"), None)?

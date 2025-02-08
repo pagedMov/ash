@@ -1358,5 +1358,6 @@ pub fn source_file<'a>(path: PathBuf) -> LashResult<()> {
 	let mut ctx = ExecCtx::new();
 	let result = exec_input(buffer, &mut ctx);
 	write_meta(|m| m.flags &= !EnvFlags::SOURCING)?;
+	file.close()?;
 	result
 }

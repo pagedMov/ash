@@ -199,15 +199,12 @@ pub fn expand_cmd_sub(mut pair: Pair<Rule>) -> LashResult<String> {
 	let subshell = pair.step(1).unpack()?;
 	let body = subshell.step(1).unpack()?;
 
-	// Set up output redirection. I originally used ProcIO for this, but I had a hunch that turning it in a redir like this would be better.
-	// I don't really know why it would be, and it certainly looks goofier, but it works so whatever
 	let (mut r_pipe, mut w_pipe) = RustFd::pipe()?;
-	let redir = &format!("1>&{}",w_pipe.as_raw_fd().to_string());
-	let sub_redir = LashParse::parse(Rule::redir,redir).unwrap().next().unpack()?;
+	let redir = Redir::from_raw(1,w_pipe.as_raw_fd());
 	let mut ctx = ExecCtx::new();
 	let flags = ctx.flags_mut();
 	*flags |= ExecFlags::NO_FORK; // Tell the child proc to not fork since it's already in a fork
-	ctx.push_redir(Redir::from_pair(sub_redir)?);
+	ctx.push_redir(redir);
 
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {

@@ -121,6 +121,7 @@ redir_list =  { redir ~ (redir)* }
 fd_out     = @{ number }
 fd_target  = @{ number }
 file       = @{ word }
+pipe       =  { "|" }
 in         =  { "<" }
 out        =  { ">" }
 force_out  =  { ">|" }
@@ -248,6 +249,35 @@ loud_operator = {
   "}" | "=>" | "&&" | "|&" | ">" | "=" | "<" | "<<" | "<<<" | ">>" | ">|" | ">>|" | "<>" | "&") ~ WHITESPACE*
 }
 
+out_to_fd = { out ~ "&" }
+in_from_fd = { in ~ "&" }
+combine = { "&" ~ out }
+close_fd = { "&" ~ "-" }
+
+hl_redir      =  {
+    (out ~ file)
+  | (in ~ file)
+  | (fd_out ~ in ~ file)
+  | (fd_out ~ out ~ file)
+  | (append ~ file)
+  | (fd_out ~ append ~ file)
+  | (heredoc ~ file)
+  | (herestring ~ file)
+  | (fd_out ~ heredoc ~ file)
+  | (in_from_fd ~ fd_target)
+  | (fd_out ~ in_from_fd ~ fd_target)
+  | (out_to_fd ~ fd_target)
+  | (fd_out ~ out_to_fd ~ fd_target)
+  | (out ~ close_fd)
+  | (fd_out ~ out ~ close_fd)
+  | (fd_out ~ in ~ close_fd)
+  | (combine ~ file)
+  | (fd_out ~ in_out ~ file)
+  | (in_out ~ file)
+  | (force_out ~ file)
+  | (fd_out ~ force_out ~ file)
+}
+
 hl_word = ${
     dquoted
   | squoted
@@ -290,7 +320,7 @@ hl_brace_word = { loud_ident ~ brace_expand+ ~ loud_ident? | brace_expand+ ~ lou
 
 hl_brace_grp = { "{" ~ syntax_hl ~ "}" }
 
-words = { (!shell_struct ~ (hl_brace_word | hl_glob | hl_word))+ }
+words = { (!shell_struct ~ (hl_redir | hl_brace_word | hl_glob | hl_word))+ }
 
 syntax_hl = { (loud_sep | shell_struct | loud_operator | words)* }
 

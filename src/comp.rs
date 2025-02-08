@@ -422,7 +422,40 @@ impl LashHighlighter {
 		}
 	}
 
+	fn highlight_redir<'a>(&mut self, pair: Pair<'a,Rule>) -> String {
+		debug_assert!(pair.as_rule() == Rule::hl_redir);
+		let mut body = pair.as_str().to_string();
+
+		let redir = LashParse::parse(Rule::hl_redir, pair.as_str()).unwrap().into_iter().next().unwrap();
+		let mut inner = redir.into_inner().rev();
+		while let Some(part) = inner.next() {
+			let span = part.as_span();
+			match part.as_rule() {
+				Rule::file => { /* Don't highlight it */ }
+				Rule::fd_out | Rule::fd_target => {
+					// Validate fd
+					let fd = part.as_str();
+					let fd_path = format!("/proc/self/fd/{fd}");
+					let exists = Path::new(&fd_path).exists();
+					let styled = if exists {
+						self.style_text(COMMAND, fd)
+					} else {
+						self.style_text(ERROR, fd)
+					};
+					body = replace_span(body, span, &styled)
+				}
+				_ => {
+					let styled = self.style_text(OPERATOR, part.as_str());
+					body = replace_span(body, span, &styled)
+				}
+			}
+		}
+		body
+	}
+
 	fn highlight_dquote<'a>(&mut self,pair: Pair<'a,Rule>) -> String {
+		debug_assert!(pair.as_rule() == Rule::dquoted);
+
 		let body = pair.scry(Rule::dquote_body).unwrap().as_str();
 		let sub_parse = LashParse::parse(Rule::syntax_hl, body);
 		if let Ok(parse) = sub_parse {
@@ -465,6 +498,13 @@ impl LashHighlighter {
 		let mut is_cmd = true;
 		let mut words = pair.to_deque();
 		while let Some(word_pair) = words.pop_back() {
+			if word_pair.as_rule() == Rule::hl_redir {
+				let span = word_pair.as_span();
+				let styled = self.highlight_redir(word_pair);
+				buffer = replace_span(buffer,span,&styled);
+				continue
+			}
+
 			let sub_type = word_pair.clone().step(1);
 			if sub_type.clone().is_some_and(|pr| pr.as_rule() != Rule::tilde_sub) {
 				let sub_type = sub_type.unwrap();
@@ -473,6 +513,10 @@ impl LashHighlighter {
 					Rule::loud_ident => { /* Pass */ }
 					Rule::dquoted => {
 						let styled = self.highlight_dquote(sub_type);
+						buffer = replace_span(buffer,span,&styled);
+					}
+					Rule::hl_redir => {
+						let styled = self.highlight_redir(sub_type);
 						buffer = replace_span(buffer,span,&styled);
 					}
 					Rule::squoted => {

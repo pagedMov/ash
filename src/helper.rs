@@ -387,12 +387,38 @@ pub fn validate_autocd(argv: &VecDeque<String>) -> LashResult<bool> {
 pub fn prepare_argv<'a>(pair: Pair<'a,Rule>) -> VecDeque<String> {
 	let cmd_name = pair.scry(Rule::cmd_name);
 	if let Some(name) = cmd_name {
-		let mut args = pair.into_inner().filter(|pr| matches!(pr.as_rule(), Rule::arg_assign | Rule::word)).map(|pr| pr.as_str().to_string()).collect::<VecDeque<_>>();
-		args.push_front(name.as_str().to_string());
+		let mut args = pair.into_inner().filter(|pr| matches!(pr.as_rule(), Rule::arg_assign | Rule::word)).map(|pr| pr.as_str().trim_quotes()).collect::<VecDeque<_>>();
+		args.push_front(name.as_str().trim_quotes());
 		args
 	} else {
 		VecDeque::new()
 	}
+}
+
+pub fn get_pipeline_cmd<'a>(pair: Pair<'a,Rule>) -> LashResult<String> {
+	Ok(match pair.as_rule() {
+		Rule::simple_cmd => {
+			let mut argv = pair.into_inner();
+			let cmd = argv.next().unwrap();
+			cmd.as_str().to_string()
+		}
+		Rule::shell_cmd => {
+			let shell_cmd = pair.step(1).unpack()?;
+			match shell_cmd.as_rule() {
+				Rule::for_cmd => "for".into(),
+				Rule::if_cmd => "if".into(),
+				Rule::match_cmd => "match".into(),
+				Rule::loop_cmd => {
+					let mut inner = shell_cmd.into_inner();
+					let loop_kind = inner.next().unpack()?.as_str();
+					loop_kind.into()
+				}
+				Rule::subshell => "anonymous subshell".into(),
+				_ => todo!()
+			}
+		}
+		_ => unreachable!()
+	})
 }
 
 pub fn prepare_redirs<'a>(pair: Pair<'a,Rule>) -> LashResult<VecDeque<Redir>> {
