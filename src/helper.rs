@@ -1,5 +1,5 @@
 use nix::{sys::wait::WaitStatus, unistd::{dup2, getpgrp}, NixPath};
-use pest::{error::ErrorVariant, iterators::Pair, Parser, RuleType};
+use pest::{error::ErrorVariant, iterators::Pair, Parser, RuleType, Span};
 use regex::Regex;
 use serde_json::Value;
 use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, f32::INFINITY, fs, io::{self, Read}, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread, time::Duration};
@@ -669,24 +669,50 @@ pub fn handle_fg(job: Job) -> LashResult<()> {
 	enable_reaping()
 }
 
-pub fn handle_prompt_visgroup(pair: Pair<Rule>, buffer: &mut String) -> LashResult<String> {
+pub fn handle_prompt_visgroup(pair: Pair<Rule>) -> LashResult<String> {
 	let mut found = false;
 	let span = pair.as_span();
-	let mut result = String::new();
 	let mut visgroup = pair.as_str().to_string();
+	let visgrp_len = visgroup.len();
 	let mut ps1 = pair.get_input().to_string();
-	let mut inner = pair.into_inner().rev();
+	let mut inner = pair.clone().into_inner().rev();
+	let mut len_delta: isize = 0;
 	while let Some(esc) = inner.next() {
 		let span = esc.as_span();
-		let expanded = expand_esc(esc, buffer)?;
+		let rule = esc.clone().step(1).unwrap().as_rule();
+		match rule {
+			Rule::esc_bell |
+			Rule::esc_dquote |
+			Rule::esc_squote |
+			Rule::esc_return |
+			Rule::esc_ansi_seq |
+			Rule::esc_newline => {
+				let meta_char = expand_esc(esc)?;
+				let cur_len = ps1.len();
+				ps1 = replace_span(ps1, span, &meta_char);
+				len_delta += ps1.len() as isize - cur_len as isize;
+				continue
+			}
+			_ => { /* Pass */ }
+		}
+		let expanded = expand_esc(esc)?;
 		if !expanded.is_empty() {
 			found = true;
 		}
 
-		result = expanded;
+		let cur_len = ps1.len();
+		ps1 = replace_span(ps1, span, &expanded);
+		len_delta += ps1.len() as isize - cur_len as isize;
+
 	}
 	if found {
-		Ok(result)
+		let new_end = (span.end() as isize + len_delta as isize)
+			.clamp(span.start() as isize, ps1.len() as isize) as usize;
+		// Add two to the start and remove 2 from the end to slice off the \( and \) delimiters
+		let new_span = Span::new(pair.get_input(), span.start() + 2, new_end - 2).unwrap();
+		let new_slice = ps1[new_span.start()..new_span.end()].to_string();
+
+		Ok(new_slice)
 	} else {
 		Ok(String::new())
 	}

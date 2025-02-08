@@ -20,7 +20,7 @@ pub fn expand_list<'a>(list: Pair<'a,Rule>) -> LashResult<String> {
 	let slice = inner.clone().count() == 1;
 
 	for cmd in inner {
-		if matches!(cmd.as_rule(), Rule::shell_cmd) {
+		if matches!(cmd.as_rule(), Rule::shell_cmd) && !cmd.scry(Rule::assignment).is_some() {
 			result = list_body.clone();
 			continue
 		}
@@ -50,9 +50,9 @@ pub fn expand_cmd<'a>(cmd: Pair<'a,Rule>) -> LashResult<String> {
 		Rule::var_sub,
 		Rule::param_sub,
 		Rule::glob_word,
+		Rule::dquoted,
 		Rule::cmd_sub,
 		Rule::arr_index,
-		Rule::dquoted,
 		Rule::proc_sub,
 		Rule::brace_word,
 		Rule::tilde_sub
@@ -85,6 +85,10 @@ pub fn rule_pass<'a>(rule: Rule, buffer: String) -> LashResult<String> {
 	let mut list = LashParse::parse(Rule::find_expansions, &buffer).unwrap().next().unpack()?.to_vec();
 
 	while let Some(word) = list.pop() {
+		if matches!(word.as_rule(), Rule::assignment | Rule::arg_assign) {
+			list.extend(word.to_vec());
+			continue
+		}
 		if word.contains_rules(&[rule]) {
 			let span = word.as_span();
 			let expanded = match rule {
@@ -93,7 +97,6 @@ pub fn rule_pass<'a>(rule: Rule, buffer: String) -> LashResult<String> {
 				}
 				Rule::param_sub => {
 					let param = read_vars(|v| v.get_param(&word.as_str()[1..]))?.unwrap_or_default().to_string();
-					dbg!(&param);
 					param
 				}
 				Rule::dquoted => expand_string(word)?,
@@ -135,6 +138,10 @@ fn expand_string(pair: Pair<Rule>) -> LashResult<String> {
 				Rule::param_sub => {
 					let param = read_vars(|v| v.get_param(&word.as_str()[1..]))?.unwrap_or_default().to_string();
 					param
+				}
+				Rule::cmd_sub => {
+					let result = expand_cmd_sub(word)?;
+					result
 				}
 				Rule::arr_index => expand_index(word)?,
 				Rule::proc_sub => expand_proc_sub(word),
@@ -206,7 +213,7 @@ pub fn expand_cmd_sub(mut pair: Pair<Rule>) -> LashResult<String> {
 		Ok(ForkResult::Child) => {
 			r_pipe.close()?;
 			// Execute the subshell body with the ctx payload
-			exec_input(body.as_str().to_string(), &mut ctx)?;
+			exec_input(body.as_str().consume_escapes(), &mut ctx)?;
 			std::process::exit(1);
 		}
 		Ok(ForkResult::Parent { child: _ }) => {
@@ -215,7 +222,7 @@ pub fn expand_cmd_sub(mut pair: Pair<Rule>) -> LashResult<String> {
 		Err(_) => panic!()
 	}
 
-	let buffer = r_pipe.read()?;
+	let buffer = r_pipe.read()?.trim().to_string();
 	r_pipe.close()?;
 	Ok(buffer)
 }
@@ -257,7 +264,7 @@ pub fn expand_prompt(input: Option<&str>) -> LashResult<String> {
 
 	while let Some(esc) = prompt_parse.next() {
 		let span = esc.as_span();
-		let expanded = expand_esc(esc, &mut result)?;
+		let expanded = expand_esc(esc)?;
 		result = replace_span(result, span, &expanded);
 	}
 	Ok(result)
@@ -268,7 +275,7 @@ pub fn expand_time(fmt: &str) -> String {
 	right_here_right_now.format(fmt).to_string()
 }
 
-pub fn expand_esc<'a>(pair: Pair<'a,Rule>, buffer: &mut String) -> LashResult<String> {
+pub fn expand_esc<'a>(pair: Pair<'a,Rule>) -> LashResult<String> {
 	let pair = pair.step(1).unpack()?;
 	Ok(match pair.as_rule() {
 		Rule::esc_bell => "\x07".into(),
@@ -276,7 +283,7 @@ pub fn expand_esc<'a>(pair: Pair<'a,Rule>, buffer: &mut String) -> LashResult<St
 		Rule::esc_squote => "'".into(),
 		Rule::esc_return => "\r".into(),
 		Rule::esc_newline => "\n".into(),
-		Rule::esc_vis_grp => helper::handle_prompt_visgroup(pair, buffer)?,
+		Rule::esc_vis_grp => helper::handle_prompt_visgroup(pair)?,
 		Rule::esc_user_seq => {
 			let query = pair.step(1).unpack()?.as_str();
 			helper::escseq_custom(query)?

@@ -91,6 +91,7 @@ pub fn test<'a>(test_call: &mut VecDeque<Pair<Rule>>, ctx: &mut ExecCtx) -> Lash
 	if test_call.back().is_some_and(|arg| arg.as_str() == "]") {
 		test_call.pop_back();
 	}
+	dbg!(&test_call);
 	// Here we define some useful closures to use later
 	let is_int = |arg: &str| -> bool { arg.parse::<i32>().is_ok() };
 	let to_int = |arg: &str| -> LashResult<i32> {
@@ -193,7 +194,7 @@ pub fn test<'a>(test_call: &mut VecDeque<Pair<Rule>>, ctx: &mut ExecCtx) -> Lash
 			if word == "-a" || word == "-o" {
 				result = do_log_op(test_call, result, word, ctx)?;
 			} else {
-				return Err(Low(LashErrLow::InvalidSyntax("Unexpected extra argument found in test call".into())));
+				return Err(Low(LashErrLow::InvalidSyntax(format!("Unexpected extra argument found in test call: {}",word))));
 			}
 		}
 	}
@@ -462,6 +463,7 @@ pub fn echo<'a>(echo_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 
 	if ctx.flags().contains(ExecFlags::NO_FORK) {
 		target_fd.write(output.as_bytes())?;
+		std::process::exit(0);
 	}
 	match unsafe { fork() } {
 		Ok(ForkResult::Child) => {

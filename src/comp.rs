@@ -272,278 +272,329 @@ fn balance_keywords(haystack: &str) -> bool {
 	stack.is_empty() // Ensure all openers have been closed
 }
 
-pub fn validate_cmd(target: &str, path: &str) -> bool {
-	if target.is_empty() || path.is_empty() {
-		return false
+#[derive(Debug,Clone)]
+struct LashHighlighter {
+	expect: Vec<Vec<Rule>>
+}
+
+impl LashHighlighter {
+	pub fn new() -> Self {
+		Self { expect: vec![] }
 	}
-	let logic = read_logic(|l| l.clone()).unwrap();
-	let is_cmd = path.split(':')
+
+	pub fn then_expectation() -> Vec<Rule> {
+		vec![Rule::elif,Rule::r#else,Rule::fi]
+	}
+
+	pub fn expecting(&self, rule: Rule) -> bool {
+		self.expect.last().is_some_and(|expect| expect.contains(&rule))
+	}
+
+	pub fn validate_cmd(&self,target: &str, path: &str) -> bool {
+		if target.is_empty() || path.is_empty() {
+			return false
+		}
+		let logic = read_logic(|l| l.clone()).unwrap();
+		let is_cmd = path.split(':')
 			.map(Path::new)
 			.any(|p| p.join(target).exists());
-	let is_func = logic.get_func(target).is_some();
-	let is_alias = logic.get_alias(target).is_some();
-	let is_builtin = BUILTINS.contains(&target);
-	let is_file = {
-		let mut path_cand = target.to_string();
-		if path_cand.starts_with("~/") {
-			path_cand = path_cand.strip_prefix("~").unwrap().to_string();
-			let home = env::var("HOME").unwrap();
-			path_cand = format!("{home}{path_cand}");
-		}
-		let path = Path::new(&path_cand);
-		path.exists() && path.is_file()
-	};
-
-	is_cmd | is_func | is_alias | is_builtin | is_file
-}
-
-fn style_text(code: &str, text: &str) -> String {
-	format!("{code}{text}{RESET}")
-}
-
-fn save_whitespace(input: &str) -> (String,String,String) {
-	let leading = input.chars().take_while(|&c| c.is_whitespace()).collect();
-	let trailing = input.chars().rev().take_while(|&c| c.is_whitespace()).collect();
-	let trimmed = input.trim();
-	(leading,trimmed.to_string(),trailing)
-}
-
-fn highlight_struct<'a>(pair: Pair<'a,Rule>, mut buffer: String) -> String {
-	let struct_pair = pair.into_inner().next().unwrap();
-	let span = struct_pair.as_span();
-	match struct_pair.as_rule() {
-		Rule::r#for |
-		Rule::r#if |
-		Rule::fi |
-		Rule::then |
-		Rule::r#else |
-		Rule::r#match |
-		Rule::select |
-		Rule::until |
-		Rule::r#while |
-		Rule::done |
-		Rule::r#do |
-		Rule::in_kw => style_text(KEYWORD, struct_pair.as_str()),
-		Rule::hl_subshell => {
-			let body = struct_pair.scry(Rule::subsh_body).unwrap();
-			let highlighted = highlight_input(body.as_str()).fill_from(body.as_str());
-			let sub_left = style_text(STRING,"(");
-			let sub_right = style_text(STRING,")");
-			let subsh = format!("{sub_left}{highlighted}{sub_right}");
-			buffer = replace_span(buffer, span, &subsh);
-			buffer
-		}
-		Rule::hl_assign => {
-			let (var,val) = struct_pair.as_str().split_once('=').unwrap();
-			let styled_var = style_text(VARSUB,var);
-			let styled_val = style_text(STRING,val);
-			[styled_var,styled_val].join("=").to_string()
-		}
-		Rule::for_with_in | Rule::for_with_vars | Rule::in_with_vars => {
-			let mut inner = if let Rule::for_with_in = struct_pair.as_rule() {
-				let for_pair = struct_pair.scry(&[Rule::for_with_vars,Rule::r#for][..]).unwrap();
-				let in_pair = struct_pair.scry(&[Rule::in_with_vars,Rule::in_kw][..]).unwrap();
-				let mut for_deque = for_pair.to_deque();
-				let in_deque = in_pair.to_deque();
-				for_deque.extend(in_deque);
-				for_deque
-			} else {
-				struct_pair.to_deque()
+			let is_func = logic.get_func(target).is_some();
+			let is_alias = logic.get_alias(target).is_some();
+			let is_builtin = BUILTINS.contains(&target);
+			let is_file = {
+				let mut path_cand = target.to_string();
+				if path_cand.starts_with("~/") {
+					path_cand = path_cand.strip_prefix("~").unwrap().to_string();
+					let home = env::var("HOME").unwrap();
+					path_cand = format!("{home}{path_cand}");
+				}
+				let path = Path::new(&path_cand);
+				path.exists() && path.is_file()
 			};
-			while let Some(word) = inner.pop_back() {
-				let span = word.as_span();
-				let code = match word.as_rule() {
-					Rule::var => VARSUB,
-					_ => KEYWORD
-				};
-				let styled = style_text(code, word.as_str());
-				buffer = replace_span(buffer, span, &styled);
-			}
-			buffer
-		}
-		Rule::func_name => {
-			let stripped = struct_pair.as_str().strip_suffix("()").unwrap();
-			let styled = style_text(FUNCNAME, stripped);
-			let display = format!("{}()",styled);
-			buffer = replace_span(buffer, span, &display);
-			buffer
-		}
-		_ => unreachable!("Unexpected rule: {:?}",struct_pair.as_rule())
-	}
-}
 
-fn highlight_dquote<'a>(pair: Pair<'a,Rule>) -> String {
-	let body = pair.scry(Rule::dquote_body).unwrap().as_str();
-	let sub_parse = LashParse::parse(Rule::syntax_hl, body);
-	if let Ok(parse) = sub_parse {
-		let mut buffer = body.to_string();
-		let mut words = parse.into_iter().next().unwrap().to_deque();
-		while let Some(word) = words.pop_back() {
-			if word.as_rule() == Rule::words {
-				let mut inner_words = word.into_inner().collect::<VecDeque<_>>();
-				while let Some(in_wd) = inner_words.pop_back() {
-					let span = in_wd.as_span();
-					if in_wd.clone().step(1).is_some() {
-						let wd_type = in_wd.step(1).unwrap();
-						match wd_type.as_rule() {
-							Rule::cmd_sub => {
-								let body = wd_type.as_str().trim_start_matches("$(").trim_end_matches(')');
-								let highlighted = highlight_input(body).fill_from(body);
-								let sub_left = style_text(STRING,"$(");
-								let sub_right = format!("{}{}",STRING,")");
-								let cmd_sub = format!("{sub_left}{highlighted}{sub_right}");
-								buffer = replace_span(buffer, span, &cmd_sub);
-							}
-							Rule::var_sub | Rule::param_sub => {
-								let word = wd_type.as_str();
-								let styled = format!("{}{}{}",VARSUB,word,STRING);
-								buffer = replace_span(buffer, span, &styled);
-							}
-							_ => { /* Do nothing */ }
-						}
-					}
-				}
-			}
-		}
-		format!("\"{}{}{}\"",STRING,buffer,RESET)
-	} else {
-		pair.as_str().to_string()
+			is_cmd | is_func | is_alias | is_builtin | is_file
 	}
-}
 
-fn highlight_words<'a>(pair: Pair<'a,Rule>, mut buffer: String, path: &str) -> String {
-	let mut is_cmd = true;
-	let mut words = pair.to_deque();
-	while let Some(word_pair) = words.pop_back() {
-		let sub_type = word_pair.clone().step(1);
-		if sub_type.clone().is_some_and(|pr| pr.as_rule() != Rule::tilde_sub) {
-			let sub_type = sub_type.unwrap();
-			let span = sub_type.as_span();
-			match sub_type.as_rule() {
-				Rule::loud_ident => { /* Pass */ }
-				Rule::dquoted => {
-					let styled = highlight_dquote(sub_type);
-					buffer = replace_span(buffer,span,&styled);
-				}
-				Rule::squoted => {
-					let body = sub_type.as_str().trim_matches('\'');
-					let styled = style_text(STRING,body);
-					let squoted = format!("{}{}{}",'\'',styled,'\'');
-					buffer = replace_span(buffer,span,&squoted);
-				}
-				Rule::param_sub | Rule::var_sub => {
-					let word = sub_type.as_str();
-					let styled = style_text(VARSUB,word);
-					buffer = replace_span(buffer,span,&styled);
-				}
-				Rule::arr_index => {
-					// If it works, it works
-					let (left,right) = sub_type.as_str().split_once('[').unwrap();
-					let styled_name = style_text(VARSUB,&left);
-					let styled = [styled_name,right.to_string()].join("[").to_string();
-					buffer = replace_span(buffer,span,&styled);
-				}
-				Rule::cmd_sub => {
-					let body = sub_type.as_str().trim_start_matches("$(").trim_end_matches(')');
-					let highlighted = highlight_input(body).fill_from(body);
-					let sub_left = style_text(STRING,"$(");
-					let sub_right = style_text(STRING,")");
-					let cmd_sub = format!("{sub_left}{highlighted}{sub_right}");
-					buffer = replace_span(buffer, span, &cmd_sub);
-				}
-				Rule::proc_sub => {
-					let body = sub_type.as_str().trim_start_matches(">(").trim_start_matches("<(").trim_end_matches(')');
-					let highlighted = highlight_input(body).fill_from(body);
-					let sub_left = if sub_type.as_str().starts_with("<(") {
-						style_text(STRING,"<(")
-					} else {
-						style_text(STRING,">(")
-					};
-					let sub_right = style_text(STRING,")");
-					let proc_sub = format!("{sub_left}{highlighted}{sub_right}");
-					buffer = replace_span(buffer, span, &proc_sub);
-				}
-				Rule::hl_glob => {
-					let glob_kind = sub_type.scry(Rule::hl_globs).unwrap().step(1).unwrap();
-					let glob_span = glob_kind.as_span();
-					match glob_kind.as_rule() {
-						Rule::glob_opt | Rule::glob_wild => {
-							let styled = style_text(KEYWORD,glob_kind.as_str());
-							buffer = replace_span(buffer, glob_span, &styled);
-						}
-						Rule::glob_brackets => {
-							let body = glob_kind.as_str().trim_matches(['[',']']);
-							let left_brack = format!("{}{}{}",KEYWORD,'[',RESET);
-							let right_brack = format!("{}{}{}",KEYWORD,']',RESET);
-							let rebuilt = format!("{left_brack}{body}{right_brack}");
-							buffer = replace_span(buffer,glob_span,&rebuilt);
-						}
-						_ => unreachable!("Unexpected rule: {:?}",sub_type.as_rule())
-					}
-				}
-				Rule::hl_brace_word => {
-					let body = sub_type.scry(Rule::brace_expand).unwrap().as_str().trim_matches(['{','}']);
-					let left_brace = format!("{}{}{}",KEYWORD,'{',RESET);
-					let right_brace = format!("{}{}{}",KEYWORD,'}',RESET);
-					let rebuilt = format!("{left_brace}{body}{right_brace}");
-					buffer = replace_span(buffer,span,&rebuilt);
-				}
-				_ => unreachable!("Unexpected rule: {:?}",sub_type.as_rule())
+	fn style_text(&self,code: &str, text: &str) -> String {
+		format!("{code}{text}{RESET}")
+	}
+
+	fn highlight_struct<'a>(&mut self,pair: Pair<'a,Rule>, mut buffer: String) -> String {
+		let struct_pair = pair.into_inner().next().unwrap();
+		let span = struct_pair.as_span();
+		match struct_pair.as_rule() {
+			Rule::r#match |
+			Rule::select |
+			Rule::r#for => {
+				self.expect.push(vec![Rule::in_kw]);
+				self.style_text(KEYWORD, struct_pair.as_str())
 			}
-		} else {
-			let word = word_pair.as_str();
-			let span = word_pair.as_span();
-			if words.is_empty() {
-				let code = if validate_cmd(word, path) {
-					COMMAND
+			Rule::r#if | Rule::elif => {
+				self.expect.push(vec![Rule::r#then]);
+				self.style_text(KEYWORD, struct_pair.as_str())
+			}
+			Rule::then if self.expecting(Rule::then) => {
+				self.expect.pop();
+				self.expect.push(vec![Rule::elif,Rule::r#else,Rule::fi]);
+				self.style_text(KEYWORD, struct_pair.as_str())
+			}
+			Rule::r#else if self.expecting(Rule::r#else) => {
+				self.expect.pop();
+				self.expect.push(vec![Rule::fi]);
+				self.style_text(KEYWORD, struct_pair.as_str())
+			}
+			Rule::fi if self.expecting(Rule::fi) => {
+				self.expect.pop();
+				self.style_text(KEYWORD, struct_pair.as_str())
+			}
+			Rule::r#while |
+			Rule::until => {
+				self.expect.push(vec![Rule::r#do]);
+				self.style_text(KEYWORD, struct_pair.as_str())
+			}
+			Rule::r#do if self.expecting(Rule::r#do) => {
+				self.expect.pop();
+				self.expect.push(vec![Rule::done]);
+				self.style_text(KEYWORD, struct_pair.as_str())
+			}
+			Rule::done => {
+				self.expect.pop();
+				self.style_text(KEYWORD, struct_pair.as_str())
+			}
+			Rule::in_kw if self.expecting(Rule::in_kw) => {
+				self.expect.pop();
+				self.expect.push(vec![Rule::r#do]);
+				self.style_text(KEYWORD, struct_pair.as_str())
+			}
+			Rule::hl_subshell => {
+				let body = struct_pair.scry(Rule::subsh_body).unwrap();
+				let highlighted = self.highlight_input(body.as_str()).fill_from(body.as_str());
+				let sub_left = self.style_text(STRING,"(");
+				let sub_right = self.style_text(STRING,")");
+				let subsh = format!("{sub_left}{highlighted}{sub_right}");
+				buffer = replace_span(buffer, span, &subsh);
+				buffer
+				}
+			Rule::hl_assign => {
+				let (var,val) = struct_pair.as_str().split_once('=').unwrap();
+				let styled_var = self.style_text(VARSUB,var);
+				let styled_val = self.style_text(STRING,val);
+				let display = [styled_var,styled_val].join("=").to_string();
+				buffer = replace_span(buffer,span,&display);
+				buffer
+				}
+			Rule::for_with_in | Rule::for_with_vars | Rule::in_with_vars => {
+				match struct_pair.as_rule() {
+					Rule::for_with_in => self.expect.push(vec![Rule::r#do]),
+					Rule::for_with_vars => self.expect.push(vec![Rule::r#in]),
+					Rule::in_with_vars => self.expect.push(vec![Rule::r#do]),
+					_ => unreachable!()
+				}
+				let mut inner = if let Rule::for_with_in = struct_pair.as_rule() {
+					let for_pair = struct_pair.scry(&[Rule::for_with_vars,Rule::r#for][..]).unwrap();
+					let in_pair = struct_pair.scry(&[Rule::in_with_vars,Rule::in_kw][..]).unwrap();
+					let mut for_deque = for_pair.to_deque();
+					let in_deque = in_pair.to_deque();
+					for_deque.extend(in_deque);
+					for_deque
 				} else {
-					ERROR
+					struct_pair.to_deque()
 				};
-				let styled_word = style_text(code, word);
-				buffer = replace_span(buffer, span, &styled_word);
+				while let Some(word) = inner.pop_back() {
+					let span = word.as_span();
+					let code = match word.as_rule() {
+						Rule::var => VARSUB,
+						_ => KEYWORD
+					};
+					let styled = self.style_text(code, word.as_str());
+					buffer = replace_span(buffer, span, &styled);
+				}
+				buffer
+			}
+			Rule::func_name => {
+				let stripped = struct_pair.as_str().strip_suffix("()").unwrap();
+				let styled = self.style_text(FUNCNAME, stripped);
+				let display = format!("{}()",styled);
+				buffer = replace_span(buffer, span, &display);
+				buffer
+			}
+			_ => buffer
+		}
+	}
+
+	fn highlight_dquote<'a>(&mut self,pair: Pair<'a,Rule>) -> String {
+		let body = pair.scry(Rule::dquote_body).unwrap().as_str();
+		let sub_parse = LashParse::parse(Rule::syntax_hl, body);
+		if let Ok(parse) = sub_parse {
+			let mut buffer = body.to_string();
+			let mut words = parse.into_iter().next().unwrap().to_deque();
+			while let Some(word) = words.pop_back() {
+				if word.as_rule() == Rule::words {
+					let mut inner_words = word.into_inner().collect::<VecDeque<_>>();
+					while let Some(in_wd) = inner_words.pop_back() {
+						let span = in_wd.as_span();
+						if in_wd.clone().step(1).is_some() {
+							let wd_type = in_wd.step(1).unwrap();
+							match wd_type.as_rule() {
+								Rule::cmd_sub => {
+									let body = wd_type.as_str().trim_start_matches("$(").trim_end_matches(')');
+									let highlighted = self.highlight_input(body).fill_from(body);
+									let sub_left = self.style_text(STRING,"$(");
+									let sub_right = format!("{}{}",STRING,")");
+									let cmd_sub = format!("{sub_left}{highlighted}{sub_right}");
+									buffer = replace_span(buffer, span, &cmd_sub);
+								}
+								Rule::var_sub | Rule::param_sub => {
+									let word = wd_type.as_str();
+									let styled = format!("{}{}{}",VARSUB,word,STRING);
+									buffer = replace_span(buffer, span, &styled);
+								}
+								_ => { /* Do nothing */ }
+							}
+						}
+					}
+				}
+			}
+			format!("\"{}{}{}\"",STRING,buffer,RESET)
+		} else {
+			pair.as_str().to_string()
+		}
+	}
+
+	fn highlight_words<'a>(&mut self,pair: Pair<'a,Rule>, mut buffer: String, path: &str) -> String {
+		let mut is_cmd = true;
+		let mut words = pair.to_deque();
+		while let Some(word_pair) = words.pop_back() {
+			let sub_type = word_pair.clone().step(1);
+			if sub_type.clone().is_some_and(|pr| pr.as_rule() != Rule::tilde_sub) {
+				let sub_type = sub_type.unwrap();
+				let span = sub_type.as_span();
+				match sub_type.as_rule() {
+					Rule::loud_ident => { /* Pass */ }
+					Rule::dquoted => {
+						let styled = self.highlight_dquote(sub_type);
+						buffer = replace_span(buffer,span,&styled);
+					}
+					Rule::squoted => {
+						let body = sub_type.as_str().trim_matches('\'');
+						let styled = self.style_text(STRING,body);
+						let squoted = format!("{}{}{}",'\'',styled,'\'');
+						buffer = replace_span(buffer,span,&squoted);
+					}
+					Rule::param_sub | Rule::var_sub => {
+						let word = sub_type.as_str();
+						let styled = self.style_text(VARSUB,word);
+						buffer = replace_span(buffer,span,&styled);
+					}
+					Rule::arr_index => {
+						// If it works, it works
+						let (left,right) = sub_type.as_str().split_once('[').unwrap();
+						let styled_name = self.style_text(VARSUB,&left);
+						let styled = [styled_name,right.to_string()].join("[").to_string();
+						buffer = replace_span(buffer,span,&styled);
+					}
+					Rule::cmd_sub => {
+						let body = sub_type.as_str().trim_start_matches("$(").trim_end_matches(')');
+						let highlighted = self.highlight_input(body).fill_from(body);
+						let sub_left = self.style_text(STRING,"$(");
+						let sub_right = self.style_text(STRING,")");
+						let cmd_sub = format!("{sub_left}{highlighted}{sub_right}");
+						buffer = replace_span(buffer, span, &cmd_sub);
+					}
+					Rule::proc_sub => {
+						let body = sub_type.as_str().trim_start_matches(">(").trim_start_matches("<(").trim_end_matches(')');
+						let highlighted = self.highlight_input(body).fill_from(body);
+						let sub_left = if sub_type.as_str().starts_with("<(") {
+							self.style_text(STRING,"<(")
+						} else {
+							self.style_text(STRING,">(")
+						};
+						let sub_right = self.style_text(STRING,")");
+						let proc_sub = format!("{sub_left}{highlighted}{sub_right}");
+						buffer = replace_span(buffer, span, &proc_sub);
+					}
+					Rule::hl_glob => {
+						let glob_kind = sub_type.scry(Rule::hl_globs).unwrap().step(1).unwrap();
+						let glob_span = glob_kind.as_span();
+						match glob_kind.as_rule() {
+							Rule::glob_opt | Rule::glob_wild => {
+								let styled = self.style_text(KEYWORD,glob_kind.as_str());
+								buffer = replace_span(buffer, glob_span, &styled);
+							}
+							Rule::glob_brackets => {
+								let body = glob_kind.as_str().trim_matches(['[',']']);
+								let left_brack = format!("{}{}{}",KEYWORD,'[',RESET);
+								let right_brack = format!("{}{}{}",KEYWORD,']',RESET);
+								let rebuilt = format!("{left_brack}{body}{right_brack}");
+								buffer = replace_span(buffer,glob_span,&rebuilt);
+							}
+							_ => unreachable!("Unexpected rule: {:?}",sub_type.as_rule())
+						}
+					}
+					Rule::hl_brace_word => {
+						let body = sub_type.scry(Rule::brace_expand).unwrap().as_str().trim_matches(['{','}']);
+						let left_brace = format!("{}{}{}",KEYWORD,'{',RESET);
+						let right_brace = format!("{}{}{}",KEYWORD,'}',RESET);
+						let rebuilt = format!("{left_brace}{body}{right_brace}");
+						buffer = replace_span(buffer,span,&rebuilt);
+					}
+					_ => unreachable!("Unexpected rule: {:?}",sub_type.as_rule())
+				}
 			} else {
-				let code = RESET;
-				let styled_word = style_text(code, word);
-				buffer = replace_span(buffer, span, &styled_word);
+				let word = word_pair.as_str();
+				let span = word_pair.as_span();
+				if words.is_empty() {
+					let code = if self.validate_cmd(word, path) {
+						COMMAND
+					} else {
+						ERROR
+					};
+					let styled_word = self.style_text(code, word);
+					buffer = replace_span(buffer, span, &styled_word);
+				} else {
+					let code = RESET;
+					let styled_word = self.style_text(code, word);
+					buffer = replace_span(buffer, span, &styled_word);
+				}
+
 			}
-
 		}
+		buffer.to_string()
 	}
-	buffer.to_string()
-}
 
-fn highlight_pair<'a>(pair: Pair<'a,Rule>, mut buffer: String) -> String {
-	let path = env::var("PATH").unwrap_or_default();
-	let span = pair.as_span();
-	match pair.as_rule() {
-		Rule::loud_sep => {
-			let hl = style_text(RESET, &pair.as_str());
-			buffer = replace_span(buffer, span, &hl)
-		}
-		Rule::loud_operator => {
-			let hl = style_text(OPERATOR, &pair.as_str());
-			buffer = replace_span(buffer, span, &hl)
-		}
-		Rule::words => buffer = highlight_words(pair, buffer, &path),
-		Rule::shell_struct => buffer = highlight_struct(pair, buffer),
-		_ => unreachable!("Reached highlight pair with this unexpected rule: {:?}",pair.as_rule())
-	}
-	buffer
-}
-
-fn highlight_input(input: &str) -> String {
-	let parsed_input = LashParse::parse(Rule::syntax_hl, input);
-	match parsed_input {
-		Ok(parsed_input) => {
-			let mut buffer = parsed_input.as_str().to_string().fill_from(input);
-			let mut inner = parsed_input.into_iter().next().unwrap().to_vec();
-			while let Some(pair) = inner.pop() {
-				buffer = highlight_pair(pair, buffer);
+	fn highlight_pair<'a>(&mut self,pair: Pair<'a,Rule>, mut buffer: String) -> String {
+		let path = env::var("PATH").unwrap_or_default();
+		let span = pair.as_span();
+		match pair.as_rule() {
+			Rule::loud_sep => {
+				let hl = self.style_text(RESET, &pair.as_str());
+				buffer = replace_span(buffer, span, &hl)
 			}
-			buffer
+			Rule::loud_operator => {
+				let hl = self.style_text(OPERATOR, &pair.as_str());
+				buffer = replace_span(buffer, span, &hl)
+			}
+			Rule::words => buffer = self.highlight_words(pair, buffer, &path),
+			Rule::shell_struct => buffer = self.highlight_struct(pair, buffer),
+			_ => unreachable!("Reached highlight pair with this unexpected rule: {:?}",pair.as_rule())
 		}
-		Err(_) => {
-			input.to_string()
+		buffer
+	}
+
+	fn highlight_input(&mut self,input: &str) -> String {
+		let parsed_input = LashParse::parse(Rule::syntax_hl, input);
+		match parsed_input {
+			Ok(parsed_input) => {
+				let mut buffer = parsed_input.as_str().to_string().fill_from(input);
+				let mut inner = parsed_input.into_iter().next().unwrap().to_vec();
+				while let Some(pair) = inner.pop() {
+					buffer = self.highlight_pair(pair, buffer);
+				}
+				buffer
+			}
+			Err(_) => {
+				input.to_string()
+			}
 		}
 	}
 }
@@ -576,6 +627,7 @@ impl Hint for LashHint {
 #[derive(Helper)]
 pub struct LashHelper {
 	filename_comp: FilenameCompleter,
+	highlighter: LashHighlighter,
 	commands: Vec<String>
 }
 
@@ -601,7 +653,8 @@ impl Hinter for LashHelper {
 impl Highlighter for LashHelper {
 	fn highlight<'l>(&self, line: &'l str, pos: usize) -> std::borrow::Cow<'l, str> {
 		let _ = pos;
-		std::borrow::Cow::Owned(highlight_input(line))
+		let mut highlighter = self.highlighter.clone();
+		std::borrow::Cow::Owned(highlighter.highlight_input(line))
 	}
 
 	fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
@@ -655,6 +708,7 @@ impl LashHelper {
 
 		let mut helper = LashHelper {
 			filename_comp: FilenameCompleter::new(),
+			highlighter: LashHighlighter::new(),
 			commands,
 		};
 		helper.update_commands_from_path();

@@ -33,7 +33,7 @@ operator = _{
 	) ~ WHITESPACE*
 }
 // Just finds all of the words. Probably fails to certain edge cases, but works for now
-find_expansions = { (WHITESPACE|NEWLINE|word|operator)* }
+find_expansions = { (WHITESPACE|NEWLINE|assignment|word|operator)* }
 glob_word = @{ ident ~ glob_pat+ ~ ident? | glob_pat+ ~ ident? }
 tilde_sub = @{ pwd | prev_pwd | (home ~ path_seg?) }
 brace_word = @{ ident ~ brace_expand+ ~ ident? | brace_expand+ ~ ident? }
@@ -52,7 +52,7 @@ sqt = _{ "'" }
 home = { "~" }
 pwd = { "~+" }
 prev_pwd = { "~-" }
-word_bound = _{ !ident } // in case you need to explicitly mark where a word ends
+word_bound = _{ (WHITESPACE|sep)+ } // in case you need to explicitly mark where a word ends
                          // necessary with shell constructs, for some reason
 dquote_body = { ("\\\""|!"\"" ~ ANY)* }
 squote_body = { ("\\'"|!"'" ~ ANY)* }
@@ -258,23 +258,23 @@ esc_vis_grp = { "\\(" ~ (raw_text|esc_sequence)* ~ "\\)" }
 // Syntax Highlighting
 
 
-for = { "for" }
+for = @{ "for" ~ word_bound }
 var = { !loud_operator ~ word }
 for_with_vars = { for ~ (!"in" ~ var)+ }
 in_kw = { WHITESPACE* ~ "in" ~ WHITESPACE* }
 in_with_vars = { in_kw ~ var+ }
 for_with_in = { (for_with_vars|for) ~ (in_with_vars|in_kw) }
-if = { "if" }
-then = { "then" }
-else = { "else" }
-elif = { "elif" }
-fi = { "fi" }
-match = { "match" }
-select = { "select" }
-until = { "until" }
-while = { "while" }
-do = { "do" }
-done = { "done" }
+if = @{ "if" ~ word_bound }
+then = @{ "then" ~ word_bound }
+else = @{ "else" ~ word_bound }
+elif = @{ "elif" ~ word_bound }
+fi = @{ "fi" ~ word_bound }
+match = @{ "match" ~ word_bound }
+select = @{ "select" ~ word_bound }
+until = @{ "until" ~ word_bound }
+while = @{ "while" ~ word_bound }
+do = @{ "do" ~ word_bound }
+done = @{ "done" ~ word_bound }
 hl_assign = { var_ident ~ "=" ~ word? }
 hl_subshell = { "(" ~ subshebang? ~ subsh_body ~ ")" }
 

@@ -688,7 +688,7 @@ fn handle_internal_subshell(body: String, argv: VecDeque<String>, ctx: &mut Exec
 			v.pos_param_pushback(&arg);
 		}
 	})?;
-	exec_input(body, ctx)?;
+	exec_input(body.consume_escapes(), ctx)?;
 	snapshot.restore_snapshot()?;
 	Ok(())
 }
@@ -1050,7 +1050,7 @@ fn exec_func(cmd: Pair<Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
 fn exec_cmd<'a>(cmd: Pair<Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = cmd.clone();
 	let mut argv = helper::prepare_argv(cmd);
-	argv.retain(|arg| !arg.is_empty());
+	argv.retain(|arg| !arg.is_empty() && arg != "\"\"" && arg != "''");
 
 	if helper::validate_autocd(&argv)? {
 		let arg = argv.pop_front().unwrap();

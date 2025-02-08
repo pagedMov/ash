@@ -2,10 +2,11 @@ use std::{collections::VecDeque, env, path::PathBuf};
 
 use error::{LashErr, LashErrHigh, LashErrLow};
 use execute::{ExecCtx, ProcIO, Redir, SavedIO};
+use expand::expand_list;
 use helper::StrExtension;
 use pest::{iterators::{Pair, Pairs}, Parser, Span};
 use pest_derive::Parser;
-use shellenv::{read_meta, write_meta, EnvFlags};
+use shellenv::{read_meta, write_meta, write_vars, EnvFlags};
 
 pub mod prompt;
 pub mod execute;
@@ -30,12 +31,20 @@ fn main() {
 	let mut ctx = ExecCtx::new();
 	loop {
 		let is_initialized = read_meta(|m| m.flags().contains(EnvFlags::INITIALIZED)).unwrap();
-		if !is_initialized {
+		let mut args = env::args().collect::<Vec<_>>();
+		if args.contains(&"--no-rc".into()) {
+			env::set_var("PS1", "$> ");
+			write_vars(|v| v.export_var("PS1", "$> ")).unwrap();
+		}
+		if !is_initialized && !args.contains(&"--no-rc".into()) {
 			write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::INITIALIZED)).unwrap();
 			let home = env::var("HOME").unwrap();
-			shellenv::source_file(PathBuf::from(format!("{home}/.lashrc"))).unwrap();
+			if let Err(e) = shellenv::source_file(PathBuf::from(format!("{home}/.lashrc"))) {
+				eprintln!("Failed to source lashrc: {}",e);
+			}
 		}
 		let input = prompt::run_prompt().unwrap();
+		write_meta(|m| m.start_timer()).unwrap();
 		ctx.push_state().unwrap();
 		let saved_fds = SavedIO::new().unwrap();
 		let result = exec_input(input, &mut ctx);
@@ -48,13 +57,13 @@ fn main() {
 	}
 }
 
-pub fn exec_input(input: String, ctx: &mut ExecCtx) -> LashResult<()> {
-	let lists = get_cmd_lists(&input);
-	if let Err(e) = lists {
-		return Err(LashErr::Low(LashErrLow::Parse(e.to_string())))
-	}
-	for list in lists.unwrap() {
-		exec_list(Rule::cmd_list, list, ctx)?;
+pub fn exec_input(mut input: String, ctx: &mut ExecCtx) -> LashResult<()> {
+	let mut lists = LashParse::parse(Rule::main, &input).map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?.next().unwrap().into_inner().collect::<VecDeque<_>>();
+	lists.pop_back();
+	// Chew through the input one list at a time
+	while let Some(list) = lists.pop_front() {
+		let expanded = expand_list(list)?;
+		exec_list(Rule::cmd_list, expanded, ctx)?;
 	}
 	Ok(())
 }
