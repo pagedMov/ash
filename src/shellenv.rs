@@ -1140,6 +1140,10 @@ impl EnvMeta {
 	}
 }
 
+pub fn set_code(code: isize) -> LashResult<()> {
+	write_vars(|v| v.set_param("?".into(), code.to_string()))
+}
+
 pub fn disable_reaping() {
 	unsafe { signal(Signal::SIGCHLD, SigHandler::Handler(crate::signal::ignore_sigchld)) }.unwrap();
 }

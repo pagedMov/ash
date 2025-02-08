@@ -619,6 +619,7 @@ fn exec_func_def<'a>(func_def: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 	let func_name = func_def.scry(Rule::func_name).unpack()?;
 	let body = func_def.scry(Rule::brace_grp).unpack()?;
 	helper::write_func(func_name.as_str().trim_end_matches("()"), body.as_str().trim_matches(['{','}']).trim())?;
+	shellenv::set_code(0)?;
 	Ok(())
 }
 
@@ -641,6 +642,7 @@ pub fn exec_subshell<'a>(subsh: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<
 		handle_internal_subshell(body.to_string(),argv,ctx)?;
 	}
 
+	shellenv::set_code(0)?;
 	Ok(())
 }
 
@@ -796,6 +798,7 @@ fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 			first = false;
 		}
 	}
+	shellenv::set_code(0)?;
 	Ok(())
 }
 
@@ -813,6 +816,7 @@ fn exec_assignment<'a>(ass: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> 
 		// If there are no commands attached, just set the variable
 		write_vars(|v| v.set_var(var_name, var_val))?;
 	}
+	shellenv::set_code(0)?;
 	Ok(())
 }
 
@@ -849,6 +853,7 @@ fn exec_for_cmd<'a>(cmd: Pair<'a,Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
 		let saved_val = saved_vars.remove(var).unwrap_or_default();
 		write_vars(|v| v.set_var(var, saved_val))?;
 	}
+	shellenv::set_code(0)?;
 	Ok(())
 }
 
@@ -872,6 +877,7 @@ fn exec_match_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 			break
 		}
 	}
+	shellenv::set_code(0)?;
 	Ok(())
 }
 
@@ -928,6 +934,7 @@ fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 		// If we don't do this, the program will exit after executing the first condition
 		write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::IN_SUB_PROC))?;
 	}
+	shellenv::set_code(0)?;
 	Ok(())
 }
 
@@ -981,6 +988,7 @@ fn exec_loop_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 			Ok(_) => continue,
 		}
 	}
+	shellenv::set_code(0)?;
 	Ok(())
 }
 
@@ -1006,6 +1014,7 @@ fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()
 		"echo" => builtin::echo(cmd, ctx)?,
 		_ => unimplemented!("Have not implemented support for builtin `{}` yet",name)
 	};
+	shellenv::set_code(0)?;
 	Ok(())
 }
 
@@ -1027,14 +1036,17 @@ fn exec_func(cmd: Pair<Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
 
 	// Let's check to see if the function was cut by the return command
 	match &result {
-		Ok(()) => Ok(()),
+		Ok(()) => {
+			shellenv::set_code(0)?;
+			Ok(())
+		}
 		Err(e) => {
 			match e {
 				High(high) => Err(High(high.clone())),
 				Low(low) => {
 					match low {
 						FuncReturn(code) => {
-							write_vars(|v| v.set_param("?".into(), code.to_string()))?;
+							shellenv::set_code(*code as isize)?;
 							Ok(())
 						}
 						_ => {
@@ -1049,7 +1061,9 @@ fn exec_func(cmd: Pair<Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
 
 fn exec_cmd<'a>(cmd: Pair<Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = cmd.clone();
-	let mut argv = helper::prepare_argv(cmd);
+	let mut argv = helper::prepare_argv(cmd.clone());
+	let mut redirs = helper::prepare_redirs(cmd)?;
+	redirs.extend(ctx.redirs());
 	argv.retain(|arg| !arg.is_empty() && arg != "\"\"" && arg != "''");
 
 	if helper::validate_autocd(&argv)? {
@@ -1074,7 +1088,7 @@ fn exec_cmd<'a>(cmd: Pair<Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let env_vars = env::vars().into_iter().collect::<Vec<(String,String)>>();
 	let envp = env_vars.iter().map(|var| CString::new(format!("{}={}",var.0,var.1)).unwrap()).collect::<Vec<_>>();
 
-	let mut redirs = CmdRedirs::new(ctx.redirs());
+	let mut redirs = CmdRedirs::new(Vec::from(redirs));
 	proc_res(redirs.activate(),blame.clone())?;
 
 	if ctx.flags().contains(ExecFlags::NO_FORK) {
@@ -1095,6 +1109,7 @@ fn exec_cmd<'a>(cmd: Pair<Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	Ok(())
 }
 
+#[derive(Debug)]
 pub struct CmdRedirs {
 	open_fds: Vec<RustFd>,
 	targets_fd: Vec<Redir>,

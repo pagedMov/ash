@@ -91,7 +91,6 @@ pub fn test<'a>(test_call: &mut VecDeque<Pair<Rule>>, ctx: &mut ExecCtx) -> Lash
 	if test_call.back().is_some_and(|arg| arg.as_str() == "]") {
 		test_call.pop_back();
 	}
-	dbg!(&test_call);
 	// Here we define some useful closures to use later
 	let is_int = |arg: &str| -> bool { arg.parse::<i32>().is_ok() };
 	let to_int = |arg: &str| -> LashResult<i32> {
@@ -399,7 +398,8 @@ pub fn echo<'a>(echo_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = echo_call.clone();
 	let mut echo_args = echo_call.filter(&ARG_RULES[..]);
 	let mut os_args = VecDeque::new();
-	let redirs = helper::prepare_redirs(echo_call)?;
+	let mut redirs = helper::prepare_redirs(echo_call)?;
+	redirs.extend(ctx.redirs());
 
 	while let Some(arg) = echo_args.pop_front() {
 		if arg.as_str().starts_with('-') {
@@ -458,7 +458,7 @@ pub fn echo<'a>(echo_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 		}
 	}
 
-	let mut redirs = CmdRedirs::new(ctx.redirs());
+	let mut redirs = CmdRedirs::new(Vec::from(redirs));
 	redirs.activate()?;
 
 	if ctx.flags().contains(ExecFlags::NO_FORK) {
