@@ -205,8 +205,7 @@ pub fn expand_cmd_sub(mut pair: Pair<Rule>) -> LashResult<String> {
 	}
 	assert!(pair.as_rule() == Rule::cmd_sub);
 	// Get the subshell token
-	let subshell = pair.step(1).unpack()?;
-	let body = subshell.step(1).unpack()?;
+	let body = pair.step(1).unpack()?;
 
 	let (mut r_pipe, mut w_pipe) = RustFd::pipe()?;
 	let redir = Redir::from_raw(1,w_pipe.as_raw_fd());
@@ -260,6 +259,7 @@ pub fn expand_shebang(shebang: &str) -> String {
 
 pub fn expand_prompt(input: Option<&str>) -> LashResult<String> {
 	let mut prompt = read_vars(|v| v.get_evar("PS1"))?.unwrap_or_default();
+	prompt = prompt.replace("\n", "");
 	let mut result = prompt.clone();
 	let mut prompt_parse = LashParse::parse(Rule::prompt, &prompt)
 		.map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?

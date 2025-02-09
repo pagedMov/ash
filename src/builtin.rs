@@ -425,7 +425,7 @@ pub fn source<'a>(src_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> 
 		if arg.as_rule() == Rule::word {
 			let path = PathBuf::from(arg.as_str());
 			if path.exists() && path.is_file() {
-				shellenv::source_file(path)?;
+				shellenv::source_file(arg.as_str())?;
 			} else {
 				let msg = String::from("source failed: File not found");
 				return Err(High(LashErrHigh::exec_err(msg, arg)))

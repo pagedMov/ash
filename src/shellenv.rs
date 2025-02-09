@@ -1398,7 +1398,7 @@ pub fn source_rc(path: Option<PathBuf>) -> LashResult<()> {
 		let home = env::var("HOME").unwrap();
 		PathBuf::from(format!("{home}/.lashrc"))
 	};
-	if let Err(e) = source_file(path) {
+	if let Err(e) = source_file(path.to_str().unwrap()) {
 		set_code(1)?;
 		eprintln!("Failed to source lashrc: {}",e);
 	}
@@ -1420,7 +1420,7 @@ pub fn get_cstring_evars<'a>() -> LashResult<Vec<CString>> {
 	Ok(env)
 }
 
-pub fn source_file<'a>(path: PathBuf) -> LashResult<()> {
+pub fn source_file<'a>(path: &str) -> LashResult<()> {
 	let mut file = RustFd::std_open(&path)?;
 	let mut buffer = String::new();
 	file.read_to_string(&mut buffer).map_err(|_| LashErr::Low(LashErrLow::from_io()))?;

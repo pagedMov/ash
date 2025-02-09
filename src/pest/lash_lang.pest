@@ -28,7 +28,7 @@ index           =  { ASCII_DIGIT+ }
 slice           = ${ index ~ ".." ~ index }
 key             =  { dquoted | squoted }
 arr_index       =  { !"\\$" ~ "$" ~ var_ident ~ ("[" ~ (key | slice | index) ~ "]")+ }
-cmd_sub         = ${ !"\\$" ~ "$" ~ subshell }
+cmd_sub         = ${ !"\\$" ~ "$(" ~ subsh_body ~ ")" }
 param_sub       =  { !"\\$" ~ "$" ~ parameter }
 
 // Types of generic words

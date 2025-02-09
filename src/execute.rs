@@ -1,7 +1,7 @@
 use core::fmt;
-use std::{collections::{HashMap, HashSet, VecDeque}, env, ffi::CString, fmt::Display, io::{self, Write}, mem::take, os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd}, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard}};
+use std::{collections::{HashMap, HashSet, VecDeque}, env, ffi::{c_void, CString}, fmt::Display, io::{self, Write}, mem::take, os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd}, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard}};
 
-use libc::MFD_CLOEXEC;
+use libc::{iovec, mode_t, MFD_CLOEXEC, O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
 use nix::{errno::Errno, fcntl::{fcntl, open, FcntlArg::F_GETFD, OFlag}, sys::{memfd::{memfd_create, MemFdCreateFlag}, signal::Signal, stat::{fstat, Mode}, wait::WaitStatus}, unistd::{close, dup, dup2, execve, execvpe, fork, pipe, ForkResult, Pid}};
 use pest::{iterators::Pair, Parser};
 use rayon::iter::IntoParallelRefIterator;
@@ -212,9 +212,6 @@ impl Redir {
 		};
 		Self { redir_type, our_fd, their_fd: Some(their_fd), file_target: None }
 	}
-	fn redir_type(&self) -> Rule {
-		self.redir_type
-	}
 }
 
 #[derive(Hash, Eq, PartialEq, Debug)]
@@ -254,7 +251,7 @@ impl io::Write for RustFd {
 	}
 	fn write_fmt(&mut self, fmt: std::fmt::Arguments<'_>) -> io::Result<()> {
 		let mut formatted = String::new();
-		fmt::write(&mut formatted, fmt).unwrap(); // FIXME: do not leave this unwrap unhandled for long
+		fmt::write(&mut formatted, fmt).map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to write formatted string"))?;
 
 		self.write(formatted.as_bytes())?;
 		Ok(())
@@ -267,10 +264,18 @@ impl io::Read for RustFd {
 			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
 		}
 
-		match nix::unistd::read(self.as_raw_fd(), buf) {
-			Ok(num_bytes) => Ok(num_bytes), // Return the number of bytes read
-			Err(nix::errno::Errno::EINTR) => self.read(buf), // Retry if interrupted
-			Err(_) => Err(io::Error::last_os_error()), // Convert other errors
+		let result = unsafe { libc::read(self.as_raw_fd(), buf.as_ptr() as *mut c_void, buf.len()) };
+
+		if result < 0 {
+			let err = io::Error::last_os_error();
+			let no = err.raw_os_error().unwrap();
+			if no != 4 { // EINTR
+				return Err(err);
+			} else {
+				return self.read(buf);
+			}
+		} else {
+			return Ok(result as usize)
 		}
 	}
 	fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
@@ -282,16 +287,31 @@ impl io::Read for RustFd {
 		let mut total_read = 0;
 
 		loop {
-			match nix::unistd::read(self.as_raw_fd(), &mut temp_buf) {
-				Ok(0) => break,
-				Ok(n) => {
+			let result = unsafe { libc::read(self.as_raw_fd(), temp_buf.as_mut_ptr() as *mut c_void, temp_buf.len()) };
+
+			match result {
+				0 => break,
+
+				n if n > 0 => {
+					let n = n as usize;
 					buf.extend_from_slice(&temp_buf[..n]);
+					dbg!(&buf);
 					total_read += n;
 				}
-				Err(nix::errno::Errno::EINTR) => continue,
-				Err(_) => return Err(io::Error::last_os_error())
+
+				n if n < 0 => {
+					let err = io::Error::last_os_error();
+					let no = err.raw_os_error().unwrap();
+					if no != 4 { // EINTR
+						return Err(err);
+					} else {
+						continue;
+					}
+				}
+				_ => unreachable!(),
 			}
 		}
+
 		Ok(total_read)
 	}
 	fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
@@ -303,19 +323,33 @@ impl io::Read for RustFd {
 		let mut total_read = 0;
 
 		loop {
-			match nix::unistd::read(self.as_raw_fd(), &mut temp_buf) {
-				Ok(0) => break,
-				Ok(n) => {
+			let result = unsafe { libc::read(self.as_raw_fd(), temp_buf.as_mut_ptr() as *mut c_void, temp_buf.len()) };
+
+			match result {
+				0 => break,
+
+				n if n > 0 => {
+					let n = n as usize;
 					match std::str::from_utf8(&temp_buf[..n]) {
 						Ok(valid) => buf.push_str(valid),
 						Err(_) => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid UTF-8"))
 					}
 					total_read += n;
 				}
-				Err(nix::errno::Errno::EINTR) => continue,
-				Err(_) => return Err(io::Error::last_os_error())
+
+				n if n < 0 => {
+					let err = io::Error::last_os_error();
+					let no = err.raw_os_error().unwrap();
+					if no != 4 { // EINTR
+						return Err(err);
+					} else {
+						continue;
+					}
+				}
+				_ => unreachable!(),
 			}
 		}
+
 		Ok(total_read)
 	}
 	fn read_vectored(&mut self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
@@ -323,11 +357,23 @@ impl io::Read for RustFd {
 			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
 		}
 
-		match nix::sys::uio::readv(&mut *self, bufs) {
-			Ok(n) => Ok(n),
-			Err(nix::errno::Errno::EINTR) => self.read_vectored(bufs),
-			Err(_) => Err(io::Error::last_os_error())
+		let iovcnt = bufs.len() as i32;
+		let mut iovecs: Vec<iovec> = Vec::with_capacity(iovcnt as usize);
+
+		for buf in bufs {
+			iovecs.push(iovec {
+				iov_base: buf.as_mut_ptr() as *mut c_void,
+				iov_len: buf.len()
+			});
 		}
+
+		let result = unsafe { libc::readv(self.as_raw_fd(), iovecs.as_mut_ptr(), iovcnt) };
+
+		if result < 0 {
+			return Err(io::Error::last_os_error())
+		}
+
+		Ok(result as usize)
 	}
 }
 
@@ -338,7 +384,7 @@ impl AsFd for RustFd {
 }
 
 impl<'a> RustFd {
-	pub fn new(fd: RawFd) -> LashResult<Self> {
+	pub fn new(fd: RawFd) -> io::Result<Self> {
 		if fd < 0 {
 			panic!()
 		}
@@ -346,107 +392,114 @@ impl<'a> RustFd {
 	}
 
 	/// Create a `RustFd` from a duplicate of `stdin` (FD 0)
-	pub fn from_stdin() -> LashResult<Self> {
-		let fd = dup(0).map_err(|_| LashErr::Low(LashErrLow::from_io()))?;
-		Ok(Self { fd })
+	pub fn from_stdin() -> io::Result<Self> {
+		let fd = unsafe { libc::dup(0) };
+		if fd < 0 {
+			Err(io::Error::last_os_error())
+		} else {
+			Ok(Self::new(fd)?)
+		}
 	}
 
 	/// Create a `RustFd` from a duplicate of `stdout` (FD 1)
-	pub fn from_stdout() -> LashResult<Self> {
-		let fd = dup(1).map_err(|_| LashErr::Low(LashErrLow::from_io()))?;
-		Ok(Self { fd })
+	pub fn from_stdout() -> io::Result<Self> {
+		let fd = unsafe { libc::dup(1) };
+		if fd < 0 {
+			Err(io::Error::last_os_error())
+		} else {
+			Ok(Self::new(fd)?)
+		}
 	}
 
 	/// Create a `RustFd` from a duplicate of `stderr` (FD 2)
-	pub fn from_stderr() -> LashResult<Self> {
-		let fd = dup(2).map_err(|_| LashErr::Low(LashErrLow::from_io()))?;
-		Ok(Self { fd })
+	pub fn from_stderr() -> io::Result<Self> {
+		let fd = unsafe { libc::dup(2) };
+		if fd < 0 {
+			Err(io::Error::last_os_error())
+		} else {
+			Ok(Self::new(fd)?)
+		}
 	}
 
 	/// Create a `RustFd` from a type that provides an owned or borrowed FD
-	pub fn from_fd<T: AsFd>(fd: T) -> LashResult<Self> {
+	pub fn from_fd<T: AsFd>(fd: T) -> io::Result<Self> {
 		let raw_fd = fd.as_fd().as_raw_fd();
 		if raw_fd < 0 {
-			return Err(LashErr::Low(LashErrLow::BadFD("Attempted to create a RustFd from a negative int".into())))
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
 		}
-		Ok(RustFd { fd: raw_fd })
+		Ok(RustFd::new(raw_fd)?)
 	}
 
 	/// Create a `RustFd` by consuming ownership of an FD
-	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> LashResult<Self> {
+	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> io::Result<Self> {
 		let raw_fd = fd.into_raw_fd(); // Consumes ownership
 		if raw_fd < 0 {
-			return Err(LashErr::Low(LashErrLow::BadFD("Attempted to create a RustFd from a negative int".into())))
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
 		}
-		Ok(RustFd { fd: raw_fd })
+		Ok(RustFd::new(raw_fd)?)
 	}
 
 	/// Create a new `RustFd` that points to an in-memory file descriptor. In-memory file descriptors can be interacted with as though they were normal files.
-	pub fn new_memfd(name: &str, executable: bool) -> LashResult<Self> {
+	pub fn memfd_create(name: &str, flags: u32) -> io::Result<Self> {
 		let c_name = CString::new(name).unwrap();
-		let flags = if executable {
-			MemFdCreateFlag::empty()
-		} else {
-			MemFdCreateFlag::MFD_CLOEXEC
-		};
-		let fd = memfd_create(&c_name, flags).map_err(|_| LashErr::Low(LashErrLow::from_io()))?;
-		Ok(RustFd { fd: fd.as_raw_fd() })
+		let fd = unsafe { libc::memfd_create(c_name.as_ptr(), flags) };
+		Ok(RustFd::new(fd)?)
 	}
 
 	/// Wrapper for nix::unistd::pipe(), simply produces two `RustFds` that point to a read and write pipe respectfully
-	pub fn pipe() -> LashResult<(Self,Self)> {
-		let (r_pipe,w_pipe) = pipe().map_err(|_| LashErr::Low(LashErrLow::from_io()))?;
-		let r_fd = RustFd::from_owned_fd(r_pipe)?;
-		let w_fd = RustFd::from_owned_fd(w_pipe)?;
+	pub fn pipe() -> io::Result<(Self,Self)> {
+		let mut fds = [0;2];
+		let result = unsafe { libc::pipe(fds.as_mut_ptr()) };
+
+		if result == -1 {
+			return Err(io::Error::last_os_error())
+		}
+		let r_fd = RustFd::new(fds[0])?;
+		let w_fd = RustFd::new(fds[1])?;
 		Ok((r_fd,w_fd))
 	}
 
 	/// Produce a `RustFd` that points to the same reour_fd as the 'self' `RustFd`
-	pub fn dup(&self) -> LashResult<Self> {
+	pub fn dup(&self) -> io::Result<Self> {
 		if !self.is_valid() {
-			return Err(LashErr::Low(LashErrLow::BadFD("Attempted to call `dup()` on an invalid RustFd".into())))
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
 		}
-		let new_fd = dup(self.fd).unwrap();
-		Ok(RustFd { fd: new_fd })
+		let duped = unsafe { libc::dup(self.as_raw_fd()) };
+		Ok(RustFd::new(duped)?)
 	}
 
 	/// A wrapper for nix::unistd::dup2(), 'self' is duplicated to the given target file descriptor.
-	pub fn dup2<T: AsRawFd>(&self, target: &T) -> LashResult<()> {
+	pub fn dup2<T: AsRawFd>(&self, target: &T) -> io::Result<()> {
 		let target_fd = target.as_raw_fd();
 		if self.fd == target_fd {
 			// Nothing to do here
 			return Ok(())
 		}
 		if !self.is_valid() || target_fd < 0 {
-			return Err(LashErr::Low(LashErrLow::BadFD("Attempted to call `dup2()` on an invalid RustFd".into())))
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
 		}
 
-		dup2(self.fd, target_fd).unwrap();
+		unsafe { libc::dup2(self.as_raw_fd(), target_fd) };
 		Ok(())
 	}
 
 	/// Open a file using a file descriptor, with the given OFlags and Mode bits
-	pub fn open(path: &Path, flags: OFlag, mode: Mode) -> LashResult<Self> {
-		let file_fd = open(path, flags, mode);
-		if let Ok(file_fd) = file_fd {
-			Ok(Self { fd: file_fd })
-		} else {
-			return Err(Low(LashErrLow::BadFD(format!("Attempted to open non-existant file '{}'",path.to_str().unwrap()))))
+	pub fn open(path: &str, mode: mode_t) -> io::Result<Self> {
+		let c_path = CString::new(path)
+			.map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid path: {}", e)))?;
+		let file_fd = unsafe { libc::open(c_path.as_ptr(), mode as i32) };
+		if file_fd < 0 {
+			return Err(io::Error::last_os_error())
 		}
+		Ok(Self::new(file_fd)?)
 	}
 
-	pub fn std_open(path: &Path) -> LashResult<Self> {
-		let flags = OFlag::O_RDWR;
-		let mode = Mode::from_bits(0o644).unwrap();
-		let fd = open(path, flags, mode);
-		if let Ok(file) = fd {
-			Ok(Self { fd: file})
-		} else {
-			return Err(Low(LashErrLow::BadFD(format!("Attempted to open non-existant file '{}'",path.to_str().unwrap()))))
-		}
+	pub fn std_open(path: &str) -> io::Result<Self> {
+		let mode: u32 = 0o644 | O_RDWR as u32;
+		Self::open(path, mode)
 	}
 
-	pub fn close(&mut self) -> LashResult<()> {
+	pub fn close(&mut self) -> io::Result<()> {
 		if !self.is_valid() {
 			return Ok(())
 		}
@@ -455,13 +508,14 @@ impl<'a> RustFd {
 			return Ok(())
 		}
 
-		close(self.fd).unwrap();
-		self.fd = -1;
-		Ok(())
-	}
-
-	pub fn mk_shared(self) -> Arc<Mutex<Self>> {
-		Arc::new(Mutex::new(self))
+		let result = unsafe { libc::close(self.as_raw_fd()) };
+		if result < 0 {
+			self.fd = -1;
+			return Err(io::Error::last_os_error())
+		} else {
+			self.fd = -1;
+			Ok(())
+		}
 	}
 
 	pub fn is_valid(&self) -> bool {
@@ -746,7 +800,7 @@ pub fn exec_subshell<'a>(subsh: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<
 fn handle_external_subshell(script: String, argv: VecDeque<String>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let argv = argv.into_iter().map(|arg| CString::new(arg).unwrap()).collect::<Vec<_>>();
 	let envp = shellenv::get_cstring_evars()?;
-	let mut memfd = RustFd::new_memfd("anonymous_subshell", true)?;
+	let mut memfd = RustFd::memfd_create("anonymous_subshell", 1)?;
 	write!(memfd,"{}",script)?;
 
 	let fd_path = CString::new(format!("/proc/self/fd/{memfd}")).unwrap();
@@ -805,8 +859,8 @@ fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 
 	let mut first = true;
 	while let Some(node) = inner.next() {
-		let (r_pipe,mut w_pipe) = if inner.peek().is_some() {
-			let (r_pipe,w_pipe) = proc_res(RustFd::pipe(),blame.clone())?;
+		let (r_pipe,w_pipe) = if inner.peek().is_some() {
+			let (r_pipe,w_pipe) = RustFd::pipe()?;
 			(Some(r_pipe),Some(w_pipe))
 		} else {
 			(None,None)
@@ -1142,6 +1196,7 @@ fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()
 		}
 		"string" | "float" | "int" | "arr" | "bool" => builtin::assign_builtin(cmd, ctx)?,
 		"pushd" => builtin::pushd(cmd, ctx)?,
+		"source" => builtin::source(cmd, ctx)?,
 		"popd" => builtin::popd(cmd, ctx)?,
 		"type" => builtin::var_type(cmd, ctx)?,
 		"setopt" => builtin::setopt(cmd, ctx)?,
@@ -1280,12 +1335,12 @@ impl CmdRedirs {
 			let src_fd = RustFd::new(*our_fd)?;
 			let path = file_target.as_ref().unwrap(); // We know that there's a file target so unwrap is safe
 			let flags = match redir_type {
-				Rule::r#in => OFlag::O_RDONLY,
-				Rule::out => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
-				Rule::append => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_APPEND,
+				Rule::r#in => O_RDONLY,
+				Rule::out => O_WRONLY | O_CREAT | O_TRUNC,
+				Rule::append => O_WRONLY | O_CREAT | O_APPEND,
 				_ => unreachable!(),
 			};
-			let mut file_fd = RustFd::open(path, flags, Mode::from_bits(0o644).unwrap())?;
+			let mut file_fd = RustFd::open(path.to_str().unwrap(), flags as u32)?;
 			file_fd.dup2(&src_fd)?;
 			file_fd.close()?;
 			self.open_fds.push(src_fd);
