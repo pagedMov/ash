@@ -327,44 +327,62 @@ impl LashHighlighter {
 			Rule::select |
 			Rule::r#for => {
 				self.expect.push(vec![Rule::in_kw]);
-				self.style_text(KEYWORD, struct_pair.as_str())
+				let kw = self.style_text(KEYWORD, struct_pair.as_str());
+				buffer = replace_span(buffer,span,&kw);
+				buffer
 			}
 			Rule::r#if | Rule::elif => {
 				self.expect.push(vec![Rule::r#then]);
-				self.style_text(KEYWORD, struct_pair.as_str())
+				let kw = self.style_text(KEYWORD, struct_pair.as_str());
+				buffer = replace_span(buffer,span,&kw);
+				buffer
 			}
 			Rule::then if self.expecting(Rule::then) => {
 				self.expect.pop();
 				self.expect.push(vec![Rule::elif,Rule::r#else,Rule::fi]);
-				self.style_text(KEYWORD, struct_pair.as_str())
+				let kw = self.style_text(KEYWORD, struct_pair.as_str());
+				buffer = replace_span(buffer,span,&kw);
+				buffer
 			}
 			Rule::r#else if self.expecting(Rule::r#else) => {
 				self.expect.pop();
 				self.expect.push(vec![Rule::fi]);
-				self.style_text(KEYWORD, struct_pair.as_str())
+				let kw = self.style_text(KEYWORD, struct_pair.as_str());
+				buffer = replace_span(buffer,span,&kw);
+				buffer
 			}
 			Rule::fi if self.expecting(Rule::fi) => {
 				self.expect.pop();
-				self.style_text(KEYWORD, struct_pair.as_str())
+				let kw = self.style_text(KEYWORD, struct_pair.as_str());
+				buffer = replace_span(buffer,span,&kw);
+				buffer
 			}
 			Rule::r#while |
 			Rule::until => {
 				self.expect.push(vec![Rule::r#do]);
-				self.style_text(KEYWORD, struct_pair.as_str())
+				let kw = self.style_text(KEYWORD, struct_pair.as_str());
+				buffer = replace_span(buffer,span,&kw);
+				buffer
 			}
 			Rule::r#do if self.expecting(Rule::r#do) => {
 				self.expect.pop();
 				self.expect.push(vec![Rule::done]);
-				self.style_text(KEYWORD, struct_pair.as_str())
+				let kw = self.style_text(KEYWORD, struct_pair.as_str());
+				buffer = replace_span(buffer,span,&kw);
+				buffer
 			}
 			Rule::done => {
 				self.expect.pop();
-				self.style_text(KEYWORD, struct_pair.as_str())
+				let kw = self.style_text(KEYWORD, struct_pair.as_str());
+				buffer = replace_span(buffer,span,&kw);
+				buffer
 			}
 			Rule::in_kw if self.expecting(Rule::in_kw) => {
 				self.expect.pop();
 				self.expect.push(vec![Rule::r#do]);
-				self.style_text(KEYWORD, struct_pair.as_str())
+				let kw = self.style_text(KEYWORD, struct_pair.as_str());
+				buffer = replace_span(buffer,span,&kw);
+				buffer
 			}
 			Rule::hl_subshell => {
 				let body = struct_pair.scry(Rule::subsh_body).unwrap();

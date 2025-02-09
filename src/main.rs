@@ -5,6 +5,7 @@ use error::{LashErr, LashErrExt, LashErrHigh, LashErrLow};
 use execute::{ExecCtx, ProcIO, Redir, RustFd, SavedIO};
 use expand::expand_list;
 use helper::StrExtension;
+use pair::{OptPairExt, PairExt};
 use pest::{iterators::{Pair, Pairs}, Parser, Span};
 use pest_derive::Parser as PestParser;
 use shellenv::{read_meta, write_meta, write_vars, EnvFlags};
@@ -28,32 +29,44 @@ pub type LashResult<T> = Result<T,error::LashErr>;
 #[grammar = "pest/lash_lang.pest"]
 pub struct LashParse;
 
-
 pub fn exec_input(mut input: String, ctx: &mut ExecCtx) -> LashResult<()> {
 	let mut lists = LashParse::parse(Rule::main, &input).map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?.next().unwrap().into_inner().collect::<VecDeque<_>>();
 	lists.pop_back();
 	// Chew through the input one list at a time
 	while let Some(list) = lists.pop_front() {
-		let expanded = expand_list(list)?;
-		exec_list(Rule::cmd_list, expanded, ctx)?;
+		let mut cmds = list.into_inner();
+		while let Some(cmd) = cmds.next() {
+			if cmd.as_rule() == Rule::op {
+				let op = cmd.scry(&[Rule::and,Rule::or][..]).unpack()?;
+				match op.as_rule() {
+					Rule::and => {
+						if shellenv::check_status()? != "0" {
+							break
+						} else {
+							continue
+						}
+					}
+					Rule::or => {
+						if shellenv::check_status()? == "0" {
+							break
+						} else {
+							continue
+						}
+					}
+					_ => unreachable!()
+				}
+			}
+			let cmd_rule = cmd.as_rule();
+			let blame = cmd.clone();
+			let expanded = expand::expand_cmd(cmd)?;
+			let re_parse = LashParse::parse(cmd_rule, &expanded)
+				.map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?
+				.next().unwrap();
+			let node_stack = VecDeque::from([re_parse]);
+			helper::proc_res(execute::descend(node_stack, ctx), blame)?;
+		}
 	}
 	Ok(())
-}
-
-/// Separate and expand logical blocks
-/// This function parses the input, and then processes each command list
-/// Each list is then expanded by expand_list, which covers each kind of text expansion
-pub fn get_cmd_lists<'a>(input: &'a str) -> LashResult<Vec<String>> {
-	let ast = LashParse::parse(Rule::main, &input).map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?;
-	let mut lists = ast.into_iter().next().unwrap().into_inner();
-	let mut list_bodies = vec![];
-	while let Some(list) = lists.next() {
-		if list.as_rule() == Rule::EOI { break };
-		let expanded = expand::expand_list(list)?;
-		list_bodies.push(expanded);
-	}
-
-	Ok(list_bodies)
 }
 
 pub fn save_fds() -> LashResult<(RustFd,RustFd,RustFd)> {
@@ -74,15 +87,6 @@ pub fn restore_fds(mut stdio: (RustFd,RustFd,RustFd)) -> LashResult<()> {
 	Ok(())
 }
 
-pub fn exec_list<'a>(rule: Rule, input: String, ctx: &mut ExecCtx) -> LashResult<()> {
-	let ast = LashParse::parse(rule, &input).map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?;
-	let node_stack = ast.into_iter().collect::<VecDeque<_>>();
-	if node_stack.is_empty() {
-		return Ok(())
-	}
-	let blame_target = node_stack.front().unwrap().clone();
-	helper::proc_res(execute::descend(node_stack, ctx), blame_target)
-}
 
 #[derive(Debug,ClapParser)]
 #[command(name = "lash")]
@@ -118,12 +122,7 @@ fn main() {
 			write_vars(|v| v.export_var("PS1", "$> ")).catch();
 		}
 		if is_initialized == Some(false) && !args.no_rc {
-			write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::INITIALIZED)).catch();
-			let home = env::var("HOME").unwrap();
-			if let Err(e) = shellenv::source_file(PathBuf::from(format!("{home}/.lashrc"))) {
-				shellenv::set_code(1).catch();
-				eprintln!("Failed to source lashrc: {}",e);
-			}
+			shellenv::source_rc(args.rc_path).catch();
 		}
 		let input = prompt::run_prompt().catch().unwrap_or_default();
 		write_meta(|m| m.start_timer()).catch();

@@ -8,7 +8,7 @@ use pest::Parser;
 use serde_json::Value;
 use std::{fs::File, sync::RwLock};
 
-use crate::{error::{LashErr, LashErrLow}, exec_input, exec_list, execute::{ExecCtx, RustFd}, helper::{self, VecDequeExtension}, pair::OptPairExt, shopt::ShOpts, LashParse, LashResult, Rule};
+use crate::{error::{LashErr, LashErrLow}, exec_input, execute::{ExecCtx, RustFd}, helper::{self, VecDequeExtension}, pair::OptPairExt, shopt::ShOpts, LashParse, LashResult, Rule};
 
 
 #[derive(Debug)]
@@ -766,6 +766,60 @@ impl LashVal {
 		}
 	}
 
+	pub fn operate<F: FnOnce(&mut LashVal) -> LashVal>(&mut self, operation: F) -> LashResult<()> {
+		*self = operation(self);
+		Ok(())
+	}
+
+	pub fn increment(&mut self) -> LashResult<()> {
+		match *self {
+			Self::Int(i) => {
+				self.operate(|_| Self::Int(i + 1))?
+			}
+			_ => return Err(LashErr::Low(LashErrLow::InternalErr("Expected an integer in increment call".into()))),
+		}
+		Ok(())
+	}
+
+	pub fn decrement(&mut self) -> LashResult<()> {
+		match *self {
+			Self::Int(i) => {
+				self.operate(|_| Self::Int(i - 1))?
+			}
+			_ => return Err(LashErr::Low(LashErrLow::InternalErr("Expected an integer in decrement call".into()))),
+		}
+		Ok(())
+	}
+
+	pub fn concat(&mut self, val: LashVal) -> LashResult<()> {
+		match self {
+			LashVal::String(ref mut word) => {
+				*word = format!("{}{}",word,val);
+			}
+			_ => return Err(LashErr::Low(LashErrLow::InternalErr("Expected an array in append call".into()))),
+		}
+		Ok(())
+	}
+
+	pub fn push(&mut self, val: LashVal) -> LashResult<()> {
+		match self {
+			LashVal::Array(ref mut arr) => {
+				arr.push(val);
+			}
+			_ => return Err(LashErr::Low(LashErrLow::InternalErr("Expected an array in append call".into()))),
+		}
+		Ok(())
+	}
+
+	pub fn pop(&mut self) -> LashResult<Option<LashVal>> {
+		match self {
+			LashVal::Array(ref mut arr) => {
+				Ok(arr.pop())
+			}
+			_ => return Err(LashErr::Low(LashErrLow::InternalErr("Expected an array in pop call".into()))),
+		}
+	}
+
 	pub fn as_string(&self) -> Option<&String> {
 		if let LashVal::String(s) = self {
 			Some(s)
@@ -976,6 +1030,9 @@ impl VarTable {
 			let var = self.env.get(key).cloned().map(LashVal::String);
 			var
 		}
+	}
+	pub fn get_var_mut(&mut self, key: &str) -> Option<&mut LashVal> {
+		self.vars.get_mut(key)
 	}
 
 	pub fn index_arr(&self, key: &str, index: usize) -> LashResult<LashVal> {
@@ -1331,6 +1388,21 @@ fn init_env_vars(clean: bool) -> HashMap<String,String> {
 	env::set_var("HIST_FILE",format!("{}/.lash_hist",home));
 
 	env_vars
+}
+
+pub fn source_rc(path: Option<PathBuf>) -> LashResult<()> {
+	write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::INITIALIZED))?;
+	let path = if let Some(path) = path {
+		path
+	} else {
+		let home = env::var("HOME").unwrap();
+		PathBuf::from(format!("{home}/.lashrc"))
+	};
+	if let Err(e) = source_file(path) {
+		set_code(1)?;
+		eprintln!("Failed to source lashrc: {}",e);
+	}
+	Ok(())
 }
 
 pub fn is_func(name: &str) -> LashResult<bool> {

@@ -6,10 +6,10 @@ use nix::{errno::Errno, fcntl::{fcntl, open, FcntlArg::F_GETFD, OFlag}, sys::{me
 use pest::{iterators::Pair, Parser};
 use rayon::iter::IntoParallelRefIterator;
 
-use crate::{builtin::{self, BUILTINS}, error::LashErrHigh, exec_input, helper::{handle_fg, proc_res, StrExtension}, shellenv::{read_logic, read_meta, EnvFlags, SavedEnv}, pair::OptPairExt};
+use crate::{builtin::{self, BUILTINS}, error::{LashErrExt, LashErrHigh}, exec_input, helper::{handle_fg, proc_res, StrExtension}, pair::OptPairExt, shellenv::{read_logic, read_meta, EnvFlags, SavedEnv}};
 use crate::error::LashErrLow::*;
 use crate::error::LashErr::*;
-use crate::{error::{LashErr, LashErrLow}, exec_list, expand, helper, shellenv::{self, read_vars, write_meta, write_vars, ChildProc, JobBuilder, LashVal}, LashParse, LashResult, pair::PairExt, Rule};
+use crate::{error::{LashErr, LashErrLow}, expand, helper, shellenv::{self, read_vars, write_meta, write_vars, ChildProc, JobBuilder, LashVal}, LashParse, LashResult, pair::PairExt, Rule};
 
 const SHELL_CMDS: [&str;6] = [
 	"for",
@@ -877,18 +877,89 @@ fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 }
 
 fn exec_assignment<'a>(ass: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
-	let var_name = ass.scry(Rule::var_ident).unpack()?.as_str().trim_matches(['{','}']);
-	let var_val = LashVal::parse(ass.scry(Rule::word).unpack()?.as_str()).unwrap();
+	let cmd = ass.scry(Rule::cmd_list);
+	let blame = ass.clone();
+	let var_name: String = ass.scry(Rule::var_ident).unpack()?.as_str().to_string();
+	let assign_type = ass.scry(&[
+		Rule::increment,
+		Rule::decrement,
+		Rule::plus_assign,
+		Rule::minus_assign,
+		Rule::std_assign][..]).unpack()?;
+	let mut var_val: LashVal = LashVal::default();
+	match assign_type.as_rule() {
+		Rule::increment => {
+			write_vars(|v| {
+				if let Some(val) = v.get_var_mut(&var_name) {
+					proc_res(val.increment(), blame).catch(); //proc_res and catch() together can throw an error in places like this
+				}
+			})?;
+		}
+		Rule::decrement => {
+			write_vars(|v| {
+				if let Some(val) = v.get_var_mut(&var_name) {
+					proc_res(val.decrement(), blame).catch();
+				}
+			})?;
+		}
+		Rule::plus_assign => {
+			let rhs = LashVal::parse(ass.scry(Rule::word).unpack()?.as_str())?;
+			let var_val = read_vars(|v| v.get_var(&var_name))?;
+			if var_val.clone().is_some_and(|val| &val.fmt_type() == "int") {
+				if let LashVal::Int(lhs) = var_val.unwrap() {
+					if let LashVal::Int(rhs) = rhs {
+						let value = LashVal::Int(lhs + rhs);
+						write_vars(|v| v.set_var(&var_name, LashVal::Int(lhs + rhs)))?;
+					} else {
+						let msg = "The right side of this assignment is invalid; expected an integer";
+						return Err(High(LashErrHigh::syntax_err(msg, blame)))
+					}
+				} else {
+					let msg = "The left side of this assignment is invalid; expected an integer";
+					return Err(High(LashErrHigh::syntax_err(msg, blame)))
+				}
+			} else {
+				let msg = "The variable in this assignment is unset";
+				return Err(High(LashErrHigh::syntax_err(msg, blame)))
+			}
+		}
+		Rule::minus_assign => {
+			let rhs = LashVal::parse(ass.scry(Rule::word).unpack()?.as_str())?;
+			let var_val = read_vars(|v| v.get_var(&var_name))?;
+			if var_val.clone().is_some_and(|val| &val.fmt_type() == "int") {
+				if let LashVal::Int(lhs) = var_val.unwrap() {
+					if let LashVal::Int(rhs) = rhs {
+						write_vars(|v| v.set_var(&var_name, LashVal::Int(lhs - rhs)))?;
+					} else {
+						let msg = "The right side of this assignment is invalid; expected an integer";
+						return Err(High(LashErrHigh::syntax_err(msg, blame)))
+					}
+				} else {
+					let msg = "The left side of this assignment is invalid; expected an integer";
+					return Err(High(LashErrHigh::syntax_err(msg, blame)))
+				}
+			} else {
+				let msg = "The variable in this assignment is unset";
+				return Err(High(LashErrHigh::syntax_err(msg, blame)))
+			}
+		}
+		Rule::std_assign => {
+			var_val = LashVal::parse(ass.scry(Rule::word).unpack()?.as_str())?;
+			write_vars(|v| {
+				v.set_var(&var_name, var_val.clone());
+			})?;
+		}
+		Rule::cmd_list => {}
+		_ => unreachable!()
+	}
 
-	if let Some(cmd) = ass.scry(Rule::cmd_list) {
+	// TODO: cleanup this logic, it currently doesn't isolate the variable setting to the execution context
+	if let Some(cmd) = cmd {
 		// If there are commands attached, export the variables, then execute, then restore environment state
 		let saved_vars = read_vars(|v| v.clone())?;
-		write_vars(|v| v.export_var(var_name, &var_val.to_string()))?;
-		exec_list(Rule::cmd_list, cmd.as_str().to_string(), ctx)?;
+		write_vars(|v| v.export_var(&var_name, &var_val.to_string()))?;
+		exec_input(cmd.as_str().to_string(), ctx)?;
 		write_vars(|v| *v = saved_vars)?;
-	} else {
-		// If there are no commands attached, just set the variable
-		write_vars(|v| v.set_var(var_name, var_val))?;
 	}
 	shellenv::set_code(0)?;
 	Ok(())
@@ -920,7 +991,7 @@ fn exec_for_cmd<'a>(cmd: Pair<'a,Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
 		let var_index = i % vars_len;
 		write_vars(|v| v.set_var(loop_vars[var_index], element.clone()))?;
 		let loop_body = expand::expand_list(loop_body_pair.clone())?;
-		exec_list(Rule::cmd_list, loop_body, ctx)?;
+		exec_input(loop_body, ctx)?;
 	}
 	for var in &loop_vars {
 		let saved_val = saved_vars.remove(var).unwrap_or_default();
@@ -946,7 +1017,7 @@ fn exec_match_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 
 		if arm_pat.as_str().trim() == match_pat.as_str().trim() {
 			let arm_body = expand::expand_list(arm_body_pair)?;
-			exec_list(Rule::cmd_list, arm_body.trim_end_matches(',').to_string(), ctx)?;
+			exec_input(arm_body.trim_end_matches(',').to_string(), ctx)?;
 			break
 		}
 	}
@@ -971,10 +1042,10 @@ fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	}
 
 	let if_cond = expand::expand_list(if_cond_pair)?;
-	exec_list(Rule::cmd_list, if_cond, &mut cond_ctx)?;
+	exec_input(if_cond, &mut cond_ctx)?;
 	if &shellenv::check_status()? == "0" {
 		let if_body = expand::expand_list(if_body_pair)?;
-		exec_list(Rule::cmd_list, if_body, &mut body_ctx)?;
+		exec_input(if_body, &mut body_ctx)?;
 		return Ok(())
 	}
 
@@ -984,10 +1055,10 @@ fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 		let elif_body_pair = inner.next().unpack()?;
 
 		let elif_cond = expand::expand_list(elif_cond_pair)?;
-		exec_list(Rule::cmd_list, elif_cond, &mut cond_ctx)?;
+		exec_input(elif_cond, &mut cond_ctx)?;
 		if &shellenv::check_status()? == "0" {
 			let elif_body = expand::expand_list(elif_body_pair)?;
-			exec_list(Rule::cmd_list, elif_body, &mut body_ctx)?;
+			exec_input(elif_body, &mut body_ctx)?;
 			return Ok(())
 		}
 	}
@@ -995,7 +1066,7 @@ fn exec_if_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	if let Some(else_block) = else_block {
 		let else_body_pair = else_block.step(1).unpack()?;
 		let else_body = expand::expand_list(else_body_pair)?;
-		exec_list(Rule::cmd_list, else_body, &mut body_ctx)?;
+		exec_input(else_body, &mut body_ctx)?;
 	}
 
 	if in_pipe {
@@ -1016,7 +1087,7 @@ fn exec_loop_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 
 	loop {
 		let loop_cond = expand::expand_list(loop_cond_pair.clone())?;
-		exec_list(Rule::cmd_list, loop_cond, &mut cond_ctx)?;
+		exec_input(loop_cond, &mut cond_ctx)?;
 		let is_success = shellenv::check_status()? == "0";
 		match loop_kind.as_str() {
 			"while" => {
@@ -1036,7 +1107,7 @@ fn exec_loop_cmd<'a>(cmd: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 			_ => unreachable!()
 		}
 		let loop_body = expand::expand_list(loop_body_pair.clone())?;
-		let result = exec_list(Rule::cmd_list, loop_body, &mut body_ctx);
+		let result = exec_input(loop_body, &mut body_ctx);
 		match result {
 			Err(LashErr::High(err)) => {
 				match err.get_err() {
@@ -1064,9 +1135,9 @@ fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()
 			argv.pop_front(); // Ignore the command name
 			let result = proc_res(builtin::test(&mut argv, ctx), blame)?;
 			if result {
-				write_vars(|v| v.set_param("?".into(), "0".into()))?;
+				return shellenv::set_code(0)
 			} else {
-				write_vars(|v| v.set_param("?".into(), "1".into()))?;
+				return shellenv::set_code(1)
 			}
 		}
 		"string" | "float" | "int" | "arr" | "bool" => builtin::assign_builtin(cmd, ctx)?,

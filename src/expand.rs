@@ -83,9 +83,18 @@ pub fn rule_pass<'a>(rule: Rule, buffer: String) -> LashResult<String> {
 	// Need to clone buffer here to detach 'result' from the lifetime of 'list'
 	let mut result = buffer.clone();
 	let mut list = LashParse::parse(Rule::find_expansions, &buffer).unwrap().next().unpack()?.to_vec();
+	const BREAKER_RULES: &[Rule] = &[
+		Rule::assignment, // These rules signal the expansion logic to break up the pair
+		Rule::arg_assign, // and push the inner pairs back onto the stack
+		Rule::std_assign,
+		Rule::plus_assign,
+		Rule::minus_assign,
+		Rule::increment,
+		Rule::decrement
+	];
 
 	while let Some(word) = list.pop() {
-		if matches!(word.as_rule(), Rule::assignment | Rule::arg_assign) {
+		if BREAKER_RULES.contains(&word.as_rule()) {
 			list.extend(word.to_vec());
 			continue
 		}

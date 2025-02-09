@@ -83,7 +83,13 @@ pub fn run_prompt() -> LashResult<String> {
 		format!("{}/.lash_hist",home)
 	});
 	write_meta(|m| m.stop_timer())??;
-	let prompt = expand::expand_prompt(None)?;
+	let prompt = match expand::expand_prompt(None) {
+		Ok(expanded) => expanded,
+		Err(e) => {
+			eprintln!("Prompt Expansion Error: {}",e);
+			"$> ".into()
+		}
+	};
 
 	match rl.readline(&prompt) {
 		Ok(line) => {
