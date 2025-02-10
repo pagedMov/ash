@@ -14,55 +14,66 @@ path_seg          = @{ path_root | path_rel }
 path_root         =  { ("/" ~ ident)+ }
 path_rel          =  { (ident ~ "/")+ }
 
+// in case you need to explicitly mark where a word ends
+// necessary with shell constructs, for some reason
+word_bound = _{ (WHITESPACE | sep)+ }
+
 // Rules for the expansion phase of the parsing
 operator = _{
     WHITESPACE* ~ ("|" | "&&" | "|&" | ">" | "<" | "<<" | "<<<" | ">>" | ">|" | ">>|" | "<>" | "&") ~ WHITESPACE*
 }
 // Just finds all of the words. Probably fails to certain edge cases, but works for now
 find_expansions =  { (WHITESPACE | NEWLINE | assignment | word | operator)* }
-glob_word       = @{ ident ~ glob_pat+ ~ ident? | glob_pat+ ~ ident? }
+glob_word       = @{ ident? ~ glob_pat+ ~ ident? }
 tilde_sub       = @{ pwd | prev_pwd | (home ~ path_seg?) }
-brace_word      = @{ ident ~ brace_expand+ ~ ident? | brace_expand+ ~ ident? }
-var_sub         = ${ !"\\$" ~ "$" ~ var_ident }
+brace_word      = @{ ident? ~ brace_expand+ ~ ident? }
+var_sub         = @{ !"\\$" ~ "$" ~ var_ident }
 index           =  { ASCII_DIGIT+ }
 slice           = ${ index ~ ".." ~ index }
 key             =  { dquoted | squoted }
-arr_index       =  { !"\\$" ~ "$" ~ var_ident ~ ("[" ~ (key | slice | index) ~ "]")+ }
-cmd_sub         = ${ !"\\$" ~ "$(" ~ subsh_body ~ ")" }
-param_sub       =  { !"\\$" ~ "$" ~ parameter }
+arr_index       = @{ !"\\$" ~ "$" ~ var_ident ~ ("[" ~ (key | slice | index) ~ "]")+ }
+cmd_sub         = @{ !"\\$" ~ "$(" ~ subsh_body ~ ")" }
+param_sub       = @{ !"\\$" ~ "$" ~ parameter }
+expansion       =  {
+    glob_word
+  | tilde_sub
+  | brace_word
+  | var_sub
+  | arr_index
+  | cmd_sub
+  | param_sub
+}
+
+// A silent version for the first pass
+// A loud version for extracting the exact expansion types
+expand_word = @{ (ident? ~ expansion+ ~ ident?)+ }
+expand_word_loud = { ((ident? ~ NEWLINE*) ~ expansion+ ~ (NEWLINE* ~ ident?))+ }
 
 // Types of generic words
-dqt        = _{ "\"" }
-sqt        = _{ "'" }
-home       =  { "~" }
-pwd        =  { "~+" }
-prev_pwd   =  { "~-" }
-word_bound = _{ (WHITESPACE | sep)+ }
-// in case you need to explicitly mark where a word ends
-// necessary with shell constructs, for some reason
+dqt      = _{ "\"" }
+sqt      = _{ "'" }
+home     =  { "~" }
+pwd      =  { "~+" }
+prev_pwd =  { "~-" }
+
 dquote_body        =  { ("\\\"" | !"\"" ~ ANY)* }
 squote_body        =  { ("\\'" | !"'" ~ ANY)* }
 dquoted            =  { dqt ~ dquote_body ~ dqt }
 squoted            =  { sqt ~ squote_body ~ sqt }
 var_ident_plain    = @{ NEWLINE* ~ !parameter ~ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "." | "_")* }
-var_ident_brackets = ${ !"\\{" ~ "{" ~ var_ident_plain ~ !"\\}" ~ "}" }
+var_ident_brackets = @{ !"\\{" ~ "{" ~ var_ident_plain ~ !"\\}" ~ "}" }
 var_ident          =  { var_ident_brackets | var_ident_plain }
 ident              = _{
+	"[" |
+    "]" |
     (("\\" ~ ANY) | // 'out' and 'in' refer to redir operators '>' and '<'
-  (!out ~ !in ~ ASCII_ALPHANUMERIC | "\"" | "[" | "]" | "'" | "_" | "-" | "!" | "%" | "+" | "=" | "\\" | "/" | "," | "." | ":" | "@"))+
+  	(!out ~ !in ~ ASCII_ALPHANUMERIC | "\"" | "'" | "_" | "-" | "!" | "%" | "+" | "=" | "\\" | "/" | "," | "." | ":" | "@"))+
 }
 cmd_name           = @{ word }
 word               = ${
     dquoted
   | squoted
-  | param_sub
-  | arr_index
-  | var_sub
-  | cmd_sub
-  | proc_sub
-  | glob_word
-  | brace_word
-  | tilde_sub
+  | expand_word
   | ident
 }
 array_elem         =  { array | (("\\," | "\\]") | !("]" | ",") ~ ANY)+ }
@@ -70,8 +81,8 @@ array              =  { "[" ~ (array_elem ~ ("," ~ array_elem)*)? ~ "]" }
 word_list          =  { word ~ (NEWLINE* ~ word)* }
 std_assign         =  { var_ident ~ "=" ~ word? ~ (!sep ~ cmd_list)? }
 plus_assign        =  { var_ident ~ "+=" ~ word? ~ (!sep ~ cmd_list)? }
-increment          =  { var_ident ~ "++" ~ (!sep ~ cmd_list)? }
-decrement          =  { var_ident ~ "--" ~ (!sep ~ cmd_list)? }
+increment          =  @{ var_ident ~ "++" ~ (!sep ~ WHITESPACE+ ~ cmd_list)? }
+decrement          =  @{ var_ident ~ "--" ~ (!sep ~ WHITESPACE+ ~ cmd_list)? }
 minus_assign       =  { var_ident ~ "-=" ~ word? ~ (!sep ~ cmd_list)? }
 assignment         =  { increment | decrement | std_assign | plus_assign | minus_assign }
 arg_assign         = ${ var_ident ~ "=" ~ (array | word)? }
@@ -79,7 +90,7 @@ sep                = _{ (";" | NEWLINE)+ }
 
 // Types of commands
 cmd_list   =  { (bg_cmd | expr) ~ (#op = op ~ (bg_cmd | expr))* }
-simple_cmd =  { (redir | cmd_name) ~ (redir | (arg_assign | word | redir))* }
+simple_cmd =  { (redir | cmd_name) ~ (arg_assign | word | redir)* }
 bg_cmd     =  { expr ~ !"&&" ~ "&" ~ word_bound }
 pipeline   =  { (shell_cmd | simple_cmd) ~ ("|" ~ (shell_cmd | simple_cmd))+ }
 expr       = _{ pipeline | shell_cmd | assignment | simple_cmd }
@@ -320,8 +331,8 @@ shell_struct = {
 glob_opt      = { !"\\?" ~ "?" }
 glob_wild     = { "\\*" ~ "*" }
 hl_globs      = { glob_opt | glob_wild | glob_brackets }
-hl_glob       = { loud_ident ~ hl_globs+ ~ loud_ident? | hl_globs+ ~ loud_ident? }
-hl_brace_word = { loud_ident ~ brace_expand+ ~ loud_ident? | brace_expand+ ~ loud_ident? }
+hl_glob       = { loud_ident? ~ hl_globs+ ~ loud_ident? }
+hl_brace_word = { loud_ident? ~ brace_expand+ ~ loud_ident? }
 
 hl_brace_grp = { "{" ~ syntax_hl ~ "}" }
 

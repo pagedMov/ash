@@ -30,6 +30,7 @@ pub type LashResult<T> = Result<T,error::LashErr>;
 pub struct LashParse;
 
 pub fn exec_input(mut input: String, ctx: &mut ExecCtx) -> LashResult<()> {
+	input = expand::expand_aliases(input, 0, vec![])?;
 	let mut lists = LashParse::parse(Rule::main, &input).map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?.next().unwrap().into_inner().collect::<VecDeque<_>>();
 	lists.pop_back();
 	// Chew through the input one list at a time
@@ -56,13 +57,8 @@ pub fn exec_input(mut input: String, ctx: &mut ExecCtx) -> LashResult<()> {
 					_ => unreachable!()
 				}
 			}
-			let cmd_rule = cmd.as_rule();
 			let blame = cmd.clone();
-			let expanded = expand::expand_cmd(cmd)?;
-			let re_parse = LashParse::parse(cmd_rule, &expanded)
-				.map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?
-				.next().unwrap();
-			let node_stack = VecDeque::from([re_parse]);
+			let node_stack = VecDeque::from([cmd]);
 			helper::proc_res(execute::descend(node_stack, ctx), blame)?;
 		}
 	}

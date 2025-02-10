@@ -253,7 +253,6 @@ pub fn execute(input: &str, flags: NdFlags, redirs: Option<VecDeque<Node>>, io: 
 		loop {
 			let next_input = tokenizer.prepare_input(true)?;
 			let result = LashPest::parse(Rule::main, &next_input);
-			dbg!(&result);
 			/*
 			match result {
 				Ok(mut ast) => {

@@ -38,6 +38,12 @@ impl From<std::io::Error> for LashErr {
 	}
 }
 
+impl From<pest::error::Error<Rule>> for LashErr {
+	fn from(value: pest::error::Error<Rule>) -> Self {
+		Self::Low(LashErrLow::Parse(value.to_string()))
+	}
+}
+
 impl Display for LashErr {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {

@@ -31,10 +31,12 @@ impl<'a> OptPairExt<'a> for Option<Pair<'a,Rule>> {
 	/// However, if we are wrong for whatever reason, it's probably better to not crash the program by calling unwrap()
 	///
 	/// This function is essentially a safe unwrap that returns our error type instead of panicking
+	#[track_caller]
 	fn unpack(self) -> LashResult<Pair<'a,Rule>> {
 		if let Some(pair) = self {
 			Ok(pair)
 		} else {
+			dbg!(std::panic::Location::caller());
 			Err(LashErr::Low(LashErrLow::InternalErr("Called unpack() on a None value".into())))
 		}
 	}
@@ -43,9 +45,10 @@ impl<'a> OptPairExt<'a> for Option<Pair<'a,Rule>> {
 pub trait PairExt<'a> {
 	fn to_vec(self) -> Vec<Pair<'a,Rule>>;
 	fn to_deque(self) -> VecDeque<Pair<'a,Rule>>;
-	fn contains_rules(&self, rule: &[Rule]) -> bool;
+	fn contains_rules<R: Rules>(&self, rule: R) -> bool;
 	fn process_args(&self, ctx: &mut ExecCtx) -> Vec<String>;
 	fn filter<R: Rules>(&self, rules: R) -> VecDeque<Pair<'a,Rule>>;
+	fn seek_all<R: Rules>(&self, rules: R) -> VecDeque<Pair<'a,Rule>>;
 	fn scry<R: Rules>(&self, rules: R) -> Option<Pair<'a,Rule>>;
 	fn step(self, count: usize) -> Option<Pair<'a,Rule>>;
 }
@@ -65,6 +68,19 @@ impl<'a> PairExt<'a> for Pair<'a,Rule> {
 	/// Filter inner pairs by a rule type
 	fn filter<R: Rules>(&self, rules: R) -> VecDeque<Pair<'a,Rule>> {
 		self.clone().into_inner().filter(|pr| rules.matches(pr.as_rule())).collect::<VecDeque<_>>()
+	}
+	fn seek_all<R: Rules>(&self, rules: R) -> VecDeque<Pair<'a,Rule>> {
+		let mut matches = VecDeque::new();
+		let mut stack = self.clone().to_deque();
+		while let Some(pair) = stack.pop_front() {
+			if rules.matches(pair.as_rule()) {
+				matches.push_front(pair);
+			} else {
+				let pair_inner = pair.to_deque();
+				stack.extend(pair_inner);
+			}
+		}
+		matches
 	}
 	/// Traverse the pair and return the first pair that contains the given rule
 	fn scry<R: Rules>(&self, rules: R) -> Option<Pair<'a,Rule>> {
@@ -101,11 +117,11 @@ impl<'a> PairExt<'a> for Pair<'a,Rule> {
 		}
 		argv
 	}
-	fn contains_rules(&self, rules: &[Rule]) -> bool {
+	fn contains_rules<R: Rules>(&self, rules: R) -> bool {
 	  let clone = self.clone();
 		let mut stack = clone.to_deque();
 		while let Some(pair) = stack.pop_front() {
-			if rules.contains(&pair.as_rule()) {
+			if rules.matches(pair.as_rule()) {
 				return true;
 			}
 			let inner = pair.to_deque();

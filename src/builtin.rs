@@ -4,7 +4,7 @@ use libc::{STDERR_FILENO, STDOUT_FILENO};
 use nix::unistd::{access, fork, getegid, geteuid, isatty, setpgid, AccessFlags, ForkResult};
 use pest::iterators::Pair;
 
-use crate::{error::{LashErr::*, LashErrHigh, LashErrLow}, execute::{CmdRedirs, ExecCtx, ExecFlags, Redir, RustFd}, helper::{self, StrExtension}, pair::{OptPairExt, PairExt, ARG_RULES}, shellenv::{self, read_logic, read_meta, read_vars, write_jobs, write_meta, write_vars, ChildProc, HashFloat, JobBuilder, LashVal}, LashResult, Rule};
+use crate::{error::{LashErr::*, LashErrHigh, LashErrLow}, execute::{CmdRedirs, ExecCtx, ExecFlags, Redir, RustFd}, helper::{self, StrExtension}, pair::{OptPairExt, PairExt, ARG_RULES}, shellenv::{self, read_jobs, read_logic, read_meta, read_vars, write_jobs, write_meta, write_vars, ChildProc, HashFloat, JobBuilder, LashVal}, LashResult, Rule};
 
 pub const BUILTINS: [&str; 43] = [
 	"try", "except", "return", "break", "continue", "exit", "command", "pushd", "popd", "setopt", "getopt", "type", "string", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
@@ -52,7 +52,7 @@ pub fn catstr(mut c_strings: VecDeque<CString>,newline: bool) -> CString {
 }
 
 pub fn var_type<'a>(pair: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
-	let mut argv = helper::prepare_argv(pair.clone());
+	let mut argv = helper::prepare_argv(pair.clone())?;
 	let mut redirs = helper::prepare_redirs(pair.clone())?;
 	ctx.extend_redirs(redirs);
 	let mut redirs = ctx.consume_redirs();
@@ -68,7 +68,7 @@ pub fn var_type<'a>(pair: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	Ok(())
 }
 
-pub fn run_test<T,F1,F2>(arg: Option<Pair<Rule>>,alter: F1,check_property: F2) -> LashResult<bool>
+pub fn run_test<T,F1,F2>(arg: Option<String>,alter: F1,check_property: F2) -> LashResult<bool>
 where F1: FnOnce(&str) -> LashResult<T>, F2: FnOnce(&T) -> bool {
 	if arg.is_none() {
 		return Err(Low(LashErrLow::ExecFailed("Missing operand in this test call".into())))
@@ -80,7 +80,7 @@ where F1: FnOnce(&str) -> LashResult<T>, F2: FnOnce(&T) -> bool {
 	Ok(check_property(&altered.unwrap()))
 }
 
-pub fn do_cmp<T,F1,F2>(lhs: &str, rhs: Option<Pair<Rule>>, alter: F1, cmp: F2) -> LashResult<bool>
+pub fn do_cmp<T,F1,F2>(lhs: &str, rhs: Option<String>, alter: F1, cmp: F2) -> LashResult<bool>
 where F1: Fn(&str) -> LashResult<T>, F2: FnOnce(&T,&T) -> bool {
 	if rhs.is_none() {
 		return Err(Low(LashErrLow::ExecFailed("Missing operand in this test call".into())))
@@ -93,7 +93,7 @@ where F1: Fn(&str) -> LashResult<T>, F2: FnOnce(&T,&T) -> bool {
 	Ok(cmp(&lhs.unwrap(),&rhs.unwrap()))
 }
 
-fn do_log_op<'a>(args: &mut VecDeque<Pair<'a,Rule>>, result: bool, operator: &str, ctx: &mut ExecCtx) -> LashResult<bool> {
+fn do_log_op<'a>(args: &mut VecDeque<String>, result: bool, operator: &str, ctx: &mut ExecCtx) -> LashResult<bool> {
 	let rec_result = test(args,ctx)?;
 	match operator {
 		"!" => Ok(!rec_result),
@@ -105,7 +105,7 @@ fn do_log_op<'a>(args: &mut VecDeque<Pair<'a,Rule>>, result: bool, operator: &st
 
 /// The test function is a special snowflake and takes a mutable reference to an already prepared arg vector
 /// instead of a raw pair like the other builtins. This is to make recursion with -a/-o flags easier
-pub fn test<'a>(test_call: &mut VecDeque<Pair<Rule>>, ctx: &mut ExecCtx) -> LashResult<bool> {
+pub fn test<'a>(test_call: &mut VecDeque<String>, ctx: &mut ExecCtx) -> LashResult<bool> {
 	if test_call.back().is_some_and(|arg| arg.as_str() == "]") {
 		test_call.pop_back();
 	}
@@ -228,9 +228,11 @@ pub fn assign_builtin<'a>(assign: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResul
 			Rule::arg_assign => {
 				let var_name = arg.scry(Rule::var_ident).unpack()?;
 				if let Some(val) = arg.scry(Rule::word) {
+					let rule = val.as_rule();
+					let val = helper::try_expansion(val)?;
 					let lash_val = match cmd_name.as_str() {
 						"string" => {
-							LashVal::String(val.as_str().to_string())
+							LashVal::String(val)
 						}
 						"int" => {
 							let lash_int = val.as_str().parse::<i32>();
@@ -257,7 +259,7 @@ pub fn assign_builtin<'a>(assign: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResul
 							LashVal::Float(HashFloat(lash_float.unwrap()))
 						}
 						"arr" => {
-							if let Rule::array = val.as_rule() {
+							if let Rule::array = rule {
 								LashVal::parse(val.as_str())?
 							} else {
 								let msg = format!("Expected an array in `array` assignment");
@@ -286,8 +288,11 @@ pub fn setopt<'a>(setopt_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 	while let Some(arg) = argv.pop_front() {
 		if arg.as_rule() == Rule::arg_assign {
 			let opt_path = arg.scry(Rule::var_ident).unpack()?.as_str();
-			let val = arg.scry(Rule::word).map(|val| val.as_str()).unwrap_or_default();
-			write_meta(|m| m.set_shopt(opt_path, val))??;
+			let val = match arg.scry(Rule::word) {
+				Some(pair) => helper::try_expansion(pair)?,
+				None => String::new()
+			};
+			write_meta(|m| m.set_shopt(opt_path, &val))??;
 		} else {
 			let msg = "Expected an assignment in setopt args";
 			return Err(High(LashErrHigh::syntax_err(msg, arg)))
@@ -297,7 +302,7 @@ pub fn setopt<'a>(setopt_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 }
 
 pub fn popd<'a>(popd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
-	let mut argv = helper::prepare_argv(popd_call.clone());
+	let mut argv = helper::prepare_argv(popd_call.clone())?;
 	argv.pop_front();
 	let arg = argv.pop_front();
 	let mut path = None;
@@ -340,10 +345,11 @@ pub fn popd<'a>(popd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 }
 
 pub fn pushd<'a>(pushd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
-	let arg = pushd_call.scry(&ARG_RULES[..]);
-	match arg {
+	let blame = pushd_call.clone();
+	let mut argv = helper::prepare_argv(pushd_call)?;
+	argv.pop_front();
+	match argv.pop_front() {
 		Some(arg) => {
-			let blame = arg.clone();
 			let path = Path::new(arg.as_str());
 			if path.exists() {
 				if path.is_dir() {
@@ -358,16 +364,17 @@ pub fn pushd<'a>(pushd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()>
 				return Err(High(LashErrHigh::syntax_err("Path does not exist", blame)))
 			}
 		}
-		None => return Err(High(LashErrHigh::syntax_err("Expected a directory path in pushd args", pushd_call)))
+		None => return Err(High(LashErrHigh::syntax_err("Expected a directory path in pushd args", blame)))
 	}
 	Ok(())
 }
 
 pub fn cd<'a>(cd_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = cd_call.clone();
-	let arg = cd_call.scry(&ARG_RULES[..]);
+	let mut argv = helper::prepare_argv(cd_call)?;
+	argv.pop_front();
 	let new_pwd;
-	match arg {
+	match argv.pop_front() {
 		Some(arg) => {
 			if arg.as_str() == "-" {
 				new_pwd = read_vars(|vars| vars.get_evar("OLDPWD").unwrap_or("/".into()))?;
@@ -420,16 +427,16 @@ pub fn alias<'a>(alias_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()>
 }
 
 pub fn source<'a>(src_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
-	let mut args = src_call.filter(&ARG_RULES[..]);
-	while let Some(arg) = args.pop_front() {
-		if arg.as_rule() == Rule::word {
-			let path = PathBuf::from(arg.as_str());
-			if path.exists() && path.is_file() {
-				shellenv::source_file(arg.as_str())?;
-			} else {
-				let msg = String::from("source failed: File not found");
-				return Err(High(LashErrHigh::exec_err(msg, arg)))
-			}
+	let blame = src_call.clone();
+	let mut argv = helper::prepare_argv(src_call)?;
+	argv.pop_front();
+	while let Some(arg) = argv.pop_front() {
+		let path = PathBuf::from(arg.as_str());
+		if path.exists() && path.is_file() {
+			shellenv::source_file(arg.as_str())?;
+		} else {
+			let msg = String::from("source failed: File not found");
+			return Err(High(LashErrHigh::exec_err(msg, blame)))
 		}
 	}
 	Ok(())
@@ -465,8 +472,11 @@ pub fn export<'a>(export_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 			Rule::arg_assign => {
 				let mut assign_inner = arg.into_inner();
 				let var_name = assign_inner.next().unpack()?.as_str();
-				let val = assign_inner.next().map(|pair| pair.as_str()).unwrap_or_default();
-				write_vars(|v| v.export_var(var_name, val))?;
+				let val = match assign_inner.next() {
+					Some(pair) => helper::try_expansion(pair)?,
+					None => String::new()
+				};
+				write_vars(|v| v.export_var(var_name, &val))?;
 			}
 			_ => {
 				let msg = String::from("Expected an assignment in export args, got this");
@@ -478,15 +488,26 @@ pub fn export<'a>(export_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<(
 	Ok(())
 }
 
+pub fn fg<'a>(fg_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
+	let mut argv = helper::prepare_argv(fg_call)?;
+	argv.pop_front();
+	let jobs = read_jobs(|j| j.clone())?;
+
+	let curr_job_id = jobs.curr_job();
+
+	Ok(())
+}
+
 pub fn echo<'a>(echo_call: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let mut flags = EchoFlags::empty();
 	let blame = echo_call.clone();
-	let mut echo_args = echo_call.filter(&ARG_RULES[..]);
+	let mut argv = helper::prepare_argv(echo_call.clone())?;
+	argv.pop_front();
 	let mut arg_buffer = vec![];
 	let redirs = helper::prepare_redirs(echo_call)?;
 	ctx.extend_redirs(redirs);
 
-	while let Some(arg) = echo_args.pop_front() {
+	while let Some(arg) = argv.pop_front() {
 		if arg.as_str().starts_with('-') {
 			let mut options = arg.as_str().strip_prefix('-').unwrap().chars();
 			let mut new_flags = EchoFlags::empty();

@@ -7,7 +7,7 @@ use regex::Regex;
 use rustyline::{completion::{Candidate, Completer, FilenameCompleter}, error::ReadlineError, highlight::Highlighter, hint::{Hint, Hinter}, history::History, validate::Validator, Context, Helper};
 use skim::{prelude::{Key, SkimItemReader, SkimOptionsBuilder}, Skim};
 
-use crate::{builtin::BUILTINS, expand::{self, replace_span}, helper::{self, StrExtension}, shellenv::{read_logic, read_vars}, LashParse, LashResult, pair::OptPairExt, pair::PairExt, Rule};
+use crate::{builtin::BUILTINS, helper::{self, StrExtension, StringExt}, pair::{OptPairExt, PairExt}, shellenv::{read_logic, read_vars}, LashParse, LashResult, Rule};
 
 
 pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
@@ -328,60 +328,60 @@ impl LashHighlighter {
 			Rule::r#for => {
 				self.expect.push(vec![Rule::in_kw]);
 				let kw = self.style_text(KEYWORD, struct_pair.as_str());
-				buffer = replace_span(buffer,span,&kw);
+				buffer.replace_span(span,&kw);
 				buffer
 			}
 			Rule::r#if | Rule::elif => {
 				self.expect.push(vec![Rule::r#then]);
 				let kw = self.style_text(KEYWORD, struct_pair.as_str());
-				buffer = replace_span(buffer,span,&kw);
+				buffer.replace_span(span,&kw);
 				buffer
 			}
 			Rule::then if self.expecting(Rule::then) => {
 				self.expect.pop();
 				self.expect.push(vec![Rule::elif,Rule::r#else,Rule::fi]);
 				let kw = self.style_text(KEYWORD, struct_pair.as_str());
-				buffer = replace_span(buffer,span,&kw);
+				buffer.replace_span(span,&kw);
 				buffer
 			}
 			Rule::r#else if self.expecting(Rule::r#else) => {
 				self.expect.pop();
 				self.expect.push(vec![Rule::fi]);
 				let kw = self.style_text(KEYWORD, struct_pair.as_str());
-				buffer = replace_span(buffer,span,&kw);
+				buffer.replace_span(span,&kw);
 				buffer
 			}
 			Rule::fi if self.expecting(Rule::fi) => {
 				self.expect.pop();
 				let kw = self.style_text(KEYWORD, struct_pair.as_str());
-				buffer = replace_span(buffer,span,&kw);
+				buffer.replace_span(span,&kw);
 				buffer
 			}
 			Rule::r#while |
 			Rule::until => {
 				self.expect.push(vec![Rule::r#do]);
 				let kw = self.style_text(KEYWORD, struct_pair.as_str());
-				buffer = replace_span(buffer,span,&kw);
+				buffer.replace_span(span,&kw);
 				buffer
 			}
 			Rule::r#do if self.expecting(Rule::r#do) => {
 				self.expect.pop();
 				self.expect.push(vec![Rule::done]);
 				let kw = self.style_text(KEYWORD, struct_pair.as_str());
-				buffer = replace_span(buffer,span,&kw);
+				buffer.replace_span(span,&kw);
 				buffer
 			}
 			Rule::done => {
 				self.expect.pop();
 				let kw = self.style_text(KEYWORD, struct_pair.as_str());
-				buffer = replace_span(buffer,span,&kw);
+				buffer.replace_span(span,&kw);
 				buffer
 			}
 			Rule::in_kw if self.expecting(Rule::in_kw) => {
 				self.expect.pop();
 				self.expect.push(vec![Rule::r#do]);
 				let kw = self.style_text(KEYWORD, struct_pair.as_str());
-				buffer = replace_span(buffer,span,&kw);
+				buffer.replace_span(span,&kw);
 				buffer
 			}
 			Rule::hl_subshell => {
@@ -390,7 +390,7 @@ impl LashHighlighter {
 				let sub_left = self.style_text(STRING,"(");
 				let sub_right = self.style_text(STRING,")");
 				let subsh = format!("{sub_left}{highlighted}{sub_right}");
-				buffer = replace_span(buffer, span, &subsh);
+				buffer.replace_span( span, &subsh);
 				buffer
 				}
 			Rule::hl_assign => {
@@ -398,7 +398,7 @@ impl LashHighlighter {
 				let styled_var = self.style_text(VARSUB,var);
 				let styled_val = self.style_text(STRING,val);
 				let display = [styled_var,styled_val].join("=").to_string();
-				buffer = replace_span(buffer,span,&display);
+				buffer.replace_span(span,&display);
 				buffer
 				}
 			Rule::for_with_in | Rule::for_with_vars | Rule::in_with_vars => {
@@ -425,7 +425,7 @@ impl LashHighlighter {
 						_ => KEYWORD
 					};
 					let styled = self.style_text(code, word.as_str());
-					buffer = replace_span(buffer, span, &styled);
+					buffer.replace_span( span, &styled);
 				}
 				buffer
 			}
@@ -433,7 +433,7 @@ impl LashHighlighter {
 				let stripped = struct_pair.as_str().strip_suffix("()").unwrap();
 				let styled = self.style_text(FUNCNAME, stripped);
 				let display = format!("{}()",styled);
-				buffer = replace_span(buffer, span, &display);
+				buffer.replace_span( span, &display);
 				buffer
 			}
 			_ => buffer
@@ -460,11 +460,11 @@ impl LashHighlighter {
 					} else {
 						self.style_text(ERROR, fd)
 					};
-					body = replace_span(body, span, &styled)
+					body.replace_span(span, &styled)
 				}
 				_ => {
 					let styled = self.style_text(OPERATOR, part.as_str());
-					body = replace_span(body, span, &styled)
+					body.replace_span(span, &styled)
 				}
 			}
 		}
@@ -493,12 +493,12 @@ impl LashHighlighter {
 									let sub_left = self.style_text(STRING,"$(");
 									let sub_right = format!("{}{}",STRING,")");
 									let cmd_sub = format!("{sub_left}{highlighted}{sub_right}");
-									buffer = replace_span(buffer, span, &cmd_sub);
+									buffer.replace_span(span, &cmd_sub);
 								}
 								Rule::var_sub | Rule::param_sub => {
 									let word = wd_type.as_str();
 									let styled = format!("{}{}{}",VARSUB,word,STRING);
-									buffer = replace_span(buffer, span, &styled);
+									buffer.replace_span(span, &styled);
 								}
 								_ => { /* Do nothing */ }
 							}
@@ -519,7 +519,7 @@ impl LashHighlighter {
 			if word_pair.as_rule() == Rule::hl_redir {
 				let span = word_pair.as_span();
 				let styled = self.highlight_redir(word_pair);
-				buffer = replace_span(buffer,span,&styled);
+				buffer.replace_span(span,&styled);
 				continue
 			}
 
@@ -531,29 +531,29 @@ impl LashHighlighter {
 					Rule::loud_ident => { /* Pass */ }
 					Rule::dquoted => {
 						let styled = self.highlight_dquote(sub_type);
-						buffer = replace_span(buffer,span,&styled);
+						buffer.replace_span(span,&styled);
 					}
 					Rule::hl_redir => {
 						let styled = self.highlight_redir(sub_type);
-						buffer = replace_span(buffer,span,&styled);
+						buffer.replace_span(span,&styled);
 					}
 					Rule::squoted => {
 						let body = sub_type.as_str().trim_matches('\'');
 						let styled = self.style_text(STRING,body);
 						let squoted = format!("{}{}{}",'\'',styled,'\'');
-						buffer = replace_span(buffer,span,&squoted);
+						buffer.replace_span(span,&squoted);
 					}
 					Rule::param_sub | Rule::var_sub => {
 						let word = sub_type.as_str();
 						let styled = self.style_text(VARSUB,word);
-						buffer = replace_span(buffer,span,&styled);
+						buffer.replace_span(span,&styled);
 					}
 					Rule::arr_index => {
 						// If it works, it works
 						let (left,right) = sub_type.as_str().split_once('[').unwrap();
 						let styled_name = self.style_text(VARSUB,&left);
 						let styled = [styled_name,right.to_string()].join("[").to_string();
-						buffer = replace_span(buffer,span,&styled);
+						buffer.replace_span(span,&styled);
 					}
 					Rule::cmd_sub => {
 						let body = sub_type.as_str().trim_start_matches("$(").trim_end_matches(')');
@@ -561,7 +561,7 @@ impl LashHighlighter {
 						let sub_left = self.style_text(STRING,"$(");
 						let sub_right = self.style_text(STRING,")");
 						let cmd_sub = format!("{sub_left}{highlighted}{sub_right}");
-						buffer = replace_span(buffer, span, &cmd_sub);
+						buffer.replace_span(span, &cmd_sub);
 					}
 					Rule::proc_sub => {
 						let body = sub_type.as_str().trim_start_matches(">(").trim_start_matches("<(").trim_end_matches(')');
@@ -573,7 +573,7 @@ impl LashHighlighter {
 						};
 						let sub_right = self.style_text(STRING,")");
 						let proc_sub = format!("{sub_left}{highlighted}{sub_right}");
-						buffer = replace_span(buffer, span, &proc_sub);
+						buffer.replace_span(span, &proc_sub);
 					}
 					Rule::hl_glob => {
 						let glob_kind = sub_type.scry(Rule::hl_globs).unwrap().step(1).unwrap();
@@ -581,14 +581,14 @@ impl LashHighlighter {
 						match glob_kind.as_rule() {
 							Rule::glob_opt | Rule::glob_wild => {
 								let styled = self.style_text(KEYWORD,glob_kind.as_str());
-								buffer = replace_span(buffer, glob_span, &styled);
+								buffer.replace_span(glob_span, &styled);
 							}
 							Rule::glob_brackets => {
 								let body = glob_kind.as_str().trim_matches(['[',']']);
 								let left_brack = format!("{}{}{}",KEYWORD,'[',RESET);
 								let right_brack = format!("{}{}{}",KEYWORD,']',RESET);
 								let rebuilt = format!("{left_brack}{body}{right_brack}");
-								buffer = replace_span(buffer,glob_span,&rebuilt);
+								buffer.replace_span(glob_span,&rebuilt);
 							}
 							_ => unreachable!("Unexpected rule: {:?}",sub_type.as_rule())
 						}
@@ -598,7 +598,7 @@ impl LashHighlighter {
 						let left_brace = format!("{}{}{}",KEYWORD,'{',RESET);
 						let right_brace = format!("{}{}{}",KEYWORD,'}',RESET);
 						let rebuilt = format!("{left_brace}{body}{right_brace}");
-						buffer = replace_span(buffer,span,&rebuilt);
+						buffer.replace_span(span,&rebuilt);
 					}
 					_ => unreachable!("Unexpected rule: {:?}",sub_type.as_rule())
 				}
@@ -612,11 +612,11 @@ impl LashHighlighter {
 						ERROR
 					};
 					let styled_word = self.style_text(code, word);
-					buffer = replace_span(buffer, span, &styled_word);
+					buffer.replace_span(span, &styled_word);
 				} else {
 					let code = RESET;
 					let styled_word = self.style_text(code, word);
-					buffer = replace_span(buffer, span, &styled_word);
+					buffer.replace_span(span, &styled_word);
 				}
 
 			}
@@ -630,11 +630,11 @@ impl LashHighlighter {
 		match pair.as_rule() {
 			Rule::loud_sep => {
 				let hl = self.style_text(RESET, &pair.as_str());
-				buffer = replace_span(buffer, span, &hl)
+				buffer.replace_span(span, &hl)
 			}
 			Rule::loud_operator => {
 				let hl = self.style_text(OPERATOR, &pair.as_str());
-				buffer = replace_span(buffer, span, &hl)
+				buffer.replace_span( span, &hl)
 			}
 			Rule::words => buffer = self.highlight_words(pair, buffer, &path),
 			Rule::shell_struct => buffer = self.highlight_struct(pair, buffer),

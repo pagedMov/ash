@@ -4,7 +4,7 @@ use regex::Regex;
 use serde_json::Value;
 use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, f32::INFINITY, fs, io::{self, Read}, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread, time::Duration};
 
-use crate::{comp::REGEX, error::{LashErr, LashErrHigh, LashErrLow}, execute::Redir, expand::{self, expand_esc, expand_time, replace_span}, shellenv::{self, attach_tty, disable_reaping, enable_reaping, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, HashFloat, Job, LashVal}, LashParse, LashResult, pair::OptPairExt, pair::PairExt, Rule};
+use crate::{comp::REGEX, error::{LashErr, LashErrHigh, LashErrLow}, execute::Redir, expand::{self, expand_esc, expand_time}, shellenv::{self, attach_tty, disable_reaping, enable_reaping, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, HashFloat, Job, LashVal}, LashParse, LashResult, pair::OptPairExt, pair::PairExt, Rule};
 
 
 #[macro_export]
@@ -54,6 +54,16 @@ impl<T> VecDequeExtension<T> for VecDeque<T> {
 		while let Some(element) = buffer.pop_front() {
 			self.push_back(element);
 		}
+	}
+}
+
+pub trait StringExt<'a> {
+	fn replace_span(&mut self, span: Span<'a>, other: &str);
+}
+
+impl<'a> StringExt<'a> for String {
+	fn replace_span(&mut self, span: Span<'a>, other: &str) {
+	  self.replace_range(span.start()..span.end(), other);
 	}
 }
 
@@ -384,15 +394,30 @@ pub fn validate_autocd(argv: &VecDeque<String>) -> LashResult<bool> {
 	}
 }
 
-pub fn prepare_argv<'a>(pair: Pair<'a,Rule>) -> VecDeque<String> {
-	let cmd_name = pair.scry(Rule::cmd_name);
-	if let Some(name) = cmd_name {
-		let mut args = pair.into_inner().filter(|pr| matches!(pr.as_rule(), Rule::arg_assign | Rule::word)).map(|pr| pr.as_str().trim_quotes()).collect::<VecDeque<_>>();
-		args.push_front(name.as_str().trim_quotes());
-		args
+pub fn try_expansion<'a>(pair: Pair<'a,Rule>) -> LashResult<String> {
+	if pair.contains_rules(&[Rule::expand_word,Rule::dquoted][..]) {
+		expand::expand_word(pair)
 	} else {
-		VecDeque::new()
+		Ok(pair.as_str().to_string())
 	}
+}
+
+pub fn prepare_argv<'a>(pair: Pair<'a,Rule>) -> LashResult<VecDeque<String>> {
+	let mut args = VecDeque::new();
+	let mut inner = pair.into_inner().filter(|pr| matches!(pr.as_rule(), Rule::cmd_name | Rule::arg_assign | Rule::word));
+	while let Some(pair) = inner.next() {
+		if pair.as_rule() == Rule::cmd_name {
+			match read_logic(|l| l.get_alias(pair.as_str()))? {
+				Some(alias) => {
+
+				}
+				None => { /* Pass */ }
+			}
+		}
+		let word = try_expansion(pair)?;
+		args.push_back(word.trim_quotes());
+	}
+	Ok(args)
 }
 
 pub fn get_pipeline_cmd<'a>(pair: Pair<'a,Rule>) -> LashResult<String> {
@@ -414,7 +439,7 @@ pub fn get_pipeline_cmd<'a>(pair: Pair<'a,Rule>) -> LashResult<String> {
 					loop_kind.into()
 				}
 				Rule::subshell => "anonymous subshell".into(),
-				_ => todo!()
+				_ => todo!("shell cmd kind '{:?}'", shell_cmd.as_rule())
 			}
 		}
 		_ => unreachable!()
@@ -715,7 +740,7 @@ pub fn handle_prompt_visgroup(pair: Pair<Rule>) -> LashResult<String> {
 			Rule::esc_newline => {
 				let meta_char = expand_esc(esc)?;
 				let cur_len = ps1.len();
-				ps1 = replace_span(ps1, span, &meta_char);
+				ps1.replace_span(span, &meta_char);
 				len_delta += ps1.len() as isize - cur_len as isize;
 				continue
 			}
@@ -727,7 +752,7 @@ pub fn handle_prompt_visgroup(pair: Pair<Rule>) -> LashResult<String> {
 		}
 
 		let cur_len = ps1.len();
-		ps1 = replace_span(ps1, span, &expanded);
+		ps1.replace_span(span, &expanded);
 		len_delta += ps1.len() as isize - cur_len as isize;
 
 	}

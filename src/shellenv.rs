@@ -1,8 +1,8 @@
-use std::{collections::{BTreeMap, VecDeque}, env, ffi::{CString, OsStr}, fmt, hash::Hash, io::Read, mem::take, os::fd::BorrowedFd, path::{Path, PathBuf}, sync::{Arc, LazyLock}, time::{Duration, Instant}};
+use std::{collections::{BTreeMap, VecDeque}, env, ffi::{CString, OsStr}, fmt, hash::Hash, io::{self, Read}, mem::take, os::fd::BorrowedFd, path::{Path, PathBuf}, sync::{Arc, LazyLock}, time::{Duration, Instant}};
 use std::collections::HashMap;
 
 use bitflags::bitflags;
-use nix::{sys::{signal::{kill, killpg, signal, SigHandler, Signal}, wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{gethostname, getpgrp, isatty, setpgid, tcgetpgrp, tcsetpgrp, Pid, User}};
+use nix::{sys::{signal::{kill, killpg, signal, SigHandler, SigmaskHow, Signal::{self, SIGCHLD, SIGTSTP, SIGTTIN, SIGTTOU}}, wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{gethostname, getpgrp, isatty, setpgid, tcgetpgrp, tcsetpgrp, Pid, User}};
 use once_cell::sync::Lazy;
 use pest::Parser;
 use serde_json::Value;
@@ -1261,19 +1261,11 @@ where F: FnOnce(&mut EnvMeta) -> T {
 	Ok(f(&mut lock))
 }
 pub fn attach_tty<'a>(pgid: Pid) -> LashResult<()> {
-	// Ensure stdin (fd 0) is a tty before proceeding
-	if !isatty(0).unwrap_or(false) || !isatty(1).unwrap_or(false) || !isatty(2).unwrap_or(false) {
-		return Ok(())
-	}
 
-	// TODO: this guard condition was put here because something about rustyline
-	// really hates it when terminal control is passed around in a tty environment.
-	// This seems to only occur when lash is run as a login shell, for some reason.
-	// Figure out why that is instead of using this stupid workaround.
-	if let Ok(term) = std::env::var("TERM") {
-		if term == "linux" {
-			return Ok(())
-		}
+
+	// Ensure stdin (fd 0) is a tty before proceeding
+	if !isatty(0).unwrap_or(false) {
+		return Ok(())
 	}
 
 	if pgid == getpgrp() && read_meta(|m| m.flags().contains(EnvFlags::IN_SUBSH))? {
@@ -1284,6 +1276,17 @@ pub fn attach_tty<'a>(pgid: Pid) -> LashResult<()> {
 		kill(term_controller(), Signal::SIGTTOU).ok();
 	}
 
+	let mut new_mask = nix::sys::signal::SigSet::empty();
+	let mut mask_backup = nix::sys::signal::SigSet::empty();
+
+	new_mask.add(SIGTSTP);
+	new_mask.add(SIGTTIN);
+	new_mask.add(SIGTTOU);
+	new_mask.add(SIGCHLD);
+
+	nix::sys::signal::pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&mut new_mask), Some(&mut mask_backup))
+		.map_err(|_| io::Error::last_os_error())?;
+
 	if unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) == Ok(pgid) } {
 		return Ok(())
 	}
@@ -1291,10 +1294,15 @@ pub fn attach_tty<'a>(pgid: Pid) -> LashResult<()> {
 	// Attempt to set the process group for the terminal
 	// FIXME: If this fails, it fails silently. Consider finding a more robust way to do this.
 	let result = unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), pgid) };
+
+	nix::sys::signal::pthread_sigmask(SigmaskHow::SIG_SETMASK, Some(&mut mask_backup), Some(&mut new_mask))
+		.map_err(|_| io::Error::last_os_error())?;
+
 	match result {
 		Ok(_) => Ok(()),
 		Err(_) => {
-			unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), getpgrp()).unwrap(); }
+			// Something weird has probably happened - let's take back the terminal
+			unsafe { tcsetpgrp(BorrowedFd::borrow_raw(1), getpgrp()).ok(); }
 			Ok(())
 		}
 	}

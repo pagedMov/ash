@@ -4,8 +4,38 @@ use chrono::Local;
 use nix::unistd::{fork, ForkResult};
 use pest::{iterators::{Pair, Pairs}, Parser, Span};
 
-use crate::{error::LashErrLow, exec_input, execute::{exec_subshell, ExecCtx, ExecFlags, ProcIO, Redir, RustFd}, helper::{self, StrExtension}, shellenv::{read_logic, read_vars, LashVal, LogicTable, VarTable}, pair::OptPairExt, pair::PairExt};
+use crate::{error::LashErrLow, exec_input, execute::{exec_subshell, ExecCtx, ExecFlags, ProcIO, Redir, RustFd}, helper::{self, StrExtension, StringExt}, pair::{OptPairExt, PairExt}, shellenv::{read_logic, read_vars, LashVal, LogicTable, VarTable}};
 use crate::{error::LashErr, LashParse, LashResult, Rule};
+
+struct Expansion<'a> {
+	expanded: String,
+	span: Span<'a>
+}
+
+struct ExpansionIR<'a> {
+	input: String,
+	expansions: Vec<Expansion<'a>>
+}
+
+impl<'a> ExpansionIR<'a> {
+	pub fn new(input: &str) -> Self {
+		Self { input: input.to_string(), expansions: vec![] }
+	}
+	pub fn push_expansion(&mut self, exp: Expansion<'a>) {
+		self.expansions.push(exp)
+	}
+	pub fn sort_expansions(&mut self) {
+		self.expansions.sort_by(|a,b| a.span.start().cmp(&b.span.start()));
+	}
+	pub fn expand(mut self) -> String {
+		self.sort_expansions();
+		let mut result = self.input.clone();
+		while let Some(exp) = self.expansions.pop() {
+			result.replace_span(exp.span, &exp.expanded);
+		}
+		result
+	}
+}
 
 //FIXME: This function is most likely a structural weakness. It seems sound now, but something is off-putting about it.
 // This currently works by expanding words *before* execution, but looking into some kind of JIT method also seems reasonable
@@ -30,7 +60,7 @@ pub fn expand_list<'a>(list: Pair<'a,Rule>) -> LashResult<String> {
 		result = expand_cmd(cmd)?; // Expand it
 
 		// Reset the buffer with the newly expanded string
-		buffer = replace_span(buffer,span,&result);
+		buffer.replace_span(span,&result);
 
 	}
 	if slice {
@@ -73,10 +103,35 @@ pub fn alias_pass<'a>(buffer: String) -> LashResult<String> {
 	while let Some(word) = list.pop() {
 		if let Some(body) = logic.get_alias(word.as_str()) {
 			let span = word.as_span();
-			result = replace_span(result, span, &body);
+			result.replace_span(span, &body);
 		}
 	}
 	Ok(result)
+}
+
+pub fn expand_aliases(input: String, depth: usize, mut cached: Vec<String>) -> LashResult<String> {
+	if depth > 10 {
+		return Ok(input)
+	}
+	let mut result = input.clone();
+	let mut alias_pass = LashParse::parse(Rule::main, &input)?;
+	let logic = read_logic(|l| l.clone())?;
+
+	let mut cmd_names = alias_pass.next().unwrap().seek_all(Rule::cmd_name);
+	while let Some(cmd_name) = cmd_names.pop_back() {
+		if let Some(alias) = logic.get_alias(cmd_name.as_str()) {
+			if !cached.contains(&alias) {
+				let span = cmd_name.as_span();
+				result.replace_span(span,&alias);
+				cached.push(alias);
+			}
+		}
+	}
+	if result != input {
+		return expand_aliases(result, depth + 1, cached)
+	} else {
+		Ok(result)
+	}
 }
 
 pub fn rule_pass<'a>(rule: Rule, buffer: String) -> LashResult<String> {
@@ -98,7 +153,7 @@ pub fn rule_pass<'a>(rule: Rule, buffer: String) -> LashResult<String> {
 			list.extend(word.to_vec());
 			continue
 		}
-		if word.contains_rules(&[rule]) {
+		if word.contains_rules(rule) {
 			let span = word.as_span();
 			let expanded = match rule {
 				Rule::var_sub => {
@@ -117,9 +172,61 @@ pub fn rule_pass<'a>(rule: Rule, buffer: String) -> LashResult<String> {
 				Rule::tilde_sub => expand_tilde(word)?,
 				_ => unreachable!()
 			};
-			result = replace_span(result, span, &expanded);
+			result.replace_span(span, &expanded);
 		}
 	}
+
+	Ok(result)
+}
+
+pub fn rule_queue() -> Vec<Rule> {
+	vec![
+		Rule::glob_word,
+		Rule::cmd_sub,
+		Rule::param_sub,
+		Rule::var_sub,
+		Rule::tilde_sub,
+		Rule::brace_word,
+		Rule::dquoted
+	]
+}
+
+pub fn expand_word<'a>(pair: Pair<'a,Rule>) -> LashResult<String> {
+	let mut word = pair.as_str();
+	let mut rule_queue = rule_queue();
+	let mut expansions = match LashParse::parse(Rule::expand_word_loud, word) {
+		Ok(mut parsed) => parsed.next().unwrap(),
+		Err(_) => return Ok(word.to_string())
+	};
+	let mut exp_ir = ExpansionIR::new(&word);
+
+	while let Some(rule) = rule_queue.pop() {
+		let mut matches = expansions.seek_all(rule);
+		while let Some(pair) = matches.pop_front() {
+			let span = pair.as_span();
+			let expanded = match rule {
+				Rule::var_sub => {
+					let var_name = &pair.as_str()[1..];
+					let result = read_vars(|v| v.get_var(&pair.as_str()[1..]))?.unwrap_or_default().to_string();
+					result
+				}
+				Rule::param_sub => {
+					let param = read_vars(|v| v.get_param(&pair.as_str()[1..]))?.unwrap_or_default().to_string();
+					param
+				}
+				Rule::dquoted => expand_string(pair)?,
+				Rule::glob_word => expand_glob(pair),
+				Rule::cmd_sub => expand_cmd_sub(pair)?,
+				Rule::tilde_sub => expand_tilde(pair)?,
+				Rule::brace_word => expand_brace(pair),
+				_ => unreachable!()
+			};
+			let exp = Expansion { expanded, span };
+			exp_ir.push_expansion(exp);
+		}
+	}
+
+	let result = exp_ir.expand();
 
 	Ok(result)
 }
@@ -131,7 +238,7 @@ fn expand_string(pair: Pair<Rule>) -> LashResult<String> {
 	}
 	let body = body.unwrap();
 	// TODO: this is three unwraps in a row. One is guaranteed to work, but still
-	let mut sub_expansions = LashParse::parse(Rule::find_expansions, body.as_str()).unwrap().next().unwrap().to_vec();
+	let mut sub_expansions = LashParse::parse(Rule::find_expansions, body.as_str())?.next().unwrap().to_vec();
 	let mut result = body.as_str().to_string();
 	while let Some(word) = sub_expansions.pop() {
 		let span = word.as_span();
@@ -156,7 +263,7 @@ fn expand_string(pair: Pair<Rule>) -> LashResult<String> {
 				Rule::proc_sub => expand_proc_sub(word),
 				_ => continue
 			};
-			result = replace_span(result, span, &expanded);
+			result.replace_span(span, &expanded);
 		}
 	}
 	result = format!("\"{}\"",result);
@@ -195,6 +302,7 @@ fn expand_index(pair: Pair<Rule>) -> LashResult<String> {
 	Ok(cur_val.map_or_else(String::new, |val| val.to_string()))
 }
 
+
 fn expand_brace(pair: Pair<Rule>) -> String {
 	todo!()
 }
@@ -205,7 +313,8 @@ pub fn expand_cmd_sub(mut pair: Pair<Rule>) -> LashResult<String> {
 	}
 	assert!(pair.as_rule() == Rule::cmd_sub);
 	// Get the subshell token
-	let body = pair.step(1).unpack()?;
+	let body = pair.as_str();
+	let body = &body[2..body.len() - 1]; // From '$(this)' to 'this'
 
 	let (mut r_pipe, mut w_pipe) = RustFd::pipe()?;
 	let redir = Redir::from_raw(1,w_pipe.as_raw_fd());
@@ -218,7 +327,7 @@ pub fn expand_cmd_sub(mut pair: Pair<Rule>) -> LashResult<String> {
 		Ok(ForkResult::Child) => {
 			r_pipe.close()?;
 			// Execute the subshell body with the ctx payload
-			exec_input(body.as_str().consume_escapes(), &mut ctx)?;
+			exec_input(body.consume_escapes(), &mut ctx)?;
 			std::process::exit(1);
 		}
 		Ok(ForkResult::Parent { child: _ }) => {
@@ -233,14 +342,14 @@ pub fn expand_cmd_sub(mut pair: Pair<Rule>) -> LashResult<String> {
 	Ok(buffer.trim().to_string())
 }
 
+
 fn expand_proc_sub(pair: Pair<Rule>) -> String {
 	todo!()
 }
 
 fn expand_tilde(pair: Pair<Rule>) -> LashResult<String> {
-	let tilde_sub = pair.step(1).unpack()?;
-	debug_assert!(tilde_sub.as_rule() == Rule::tilde_sub, "Found this: {:?}",tilde_sub.as_rule());
-	let word = tilde_sub.as_str();
+	debug_assert!(pair.as_rule() == Rule::tilde_sub, "Found this: {:?}",pair.as_rule());
+	let word = pair.as_str();
 	let home = env::var("HOME").unwrap_or_default();
 	Ok(word.replacen("~", &home, 1))
 }
@@ -272,7 +381,7 @@ pub fn expand_prompt(input: Option<&str>) -> LashResult<String> {
 	while let Some(esc) = prompt_parse.next() {
 		let span = esc.as_span();
 		let expanded = expand_esc(esc)?;
-		result = replace_span(result, span, &expanded);
+		result.replace_span( span, &expanded);
 	}
 	Ok(result)
 }
@@ -357,14 +466,4 @@ pub fn replace_from_right(buffer: &str, pat: &str, new: &str) -> String {
 		}
 	}
 	result
-}
-
-#[track_caller]
-pub fn replace_span(buffer: String, pos: Span, replace: &str) -> String {
-	//dbg!(std::panic::Location::caller());
-	let start = pos.start();
-	let end = pos.end();
-	let left = &buffer[..start];
-	let right = &buffer[end..];
-	format!("{}{}{}",left,replace,right)
 }

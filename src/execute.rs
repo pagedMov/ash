@@ -295,7 +295,6 @@ impl io::Read for RustFd {
 				n if n > 0 => {
 					let n = n as usize;
 					buf.extend_from_slice(&temp_buf[..n]);
-					dbg!(&buf);
 					total_read += n;
 				}
 
@@ -689,10 +688,10 @@ fn dispatch_exec<'a>(node: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 		match node.as_rule() {
 			Rule::simple_cmd => {
 				let command_name = node.clone().into_inner().find(|pair| pair.as_rule() == Rule::cmd_name).unpack()?.as_str();
-				if BUILTINS.contains(&command_name) {
-					exec_builtin(node,command_name,ctx)?;
-				} else if shellenv::is_func(command_name)? {
+				if shellenv::is_func(command_name)? {
 					exec_func(node,ctx)?;
+				} else if BUILTINS.contains(&command_name) {
+					exec_builtin(node,command_name,ctx)?;
 				} else {
 					exec_cmd(node, ctx)?;
 				}
@@ -782,7 +781,7 @@ pub fn exec_subshell<'a>(subsh: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<
 		shebang = Some(expand::expand_shebang(&raw_shebang));
 	}
 
-	let argv = helper::prepare_argv(subsh.clone());
+	let argv = helper::prepare_argv(subsh.clone())?;
 	let redirs = helper::prepare_redirs(subsh)?;
 
 	ctx.extend_redirs(redirs);
@@ -940,7 +939,7 @@ fn exec_assignment<'a>(ass: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> 
 		Rule::plus_assign,
 		Rule::minus_assign,
 		Rule::std_assign][..]).unpack()?;
-	let mut var_val: LashVal = LashVal::default();
+	let val = ass.scry(Rule::word).map(|pr| helper::try_expansion(pr).unwrap_or_default()).unwrap_or_default();
 	match assign_type.as_rule() {
 		Rule::increment => {
 			write_vars(|v| {
@@ -998,9 +997,9 @@ fn exec_assignment<'a>(ass: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> 
 			}
 		}
 		Rule::std_assign => {
-			var_val = LashVal::parse(ass.scry(Rule::word).unpack()?.as_str())?;
+			let val = LashVal::parse(ass.scry(Rule::word).unpack()?.as_str())?;
 			write_vars(|v| {
-				v.set_var(&var_name, var_val.clone());
+				v.set_var(&var_name, val.clone());
 			})?;
 		}
 		Rule::cmd_list => {}
@@ -1011,7 +1010,7 @@ fn exec_assignment<'a>(ass: Pair<'a,Rule>, ctx: &mut ExecCtx) -> LashResult<()> 
 	if let Some(cmd) = cmd {
 		// If there are commands attached, export the variables, then execute, then restore environment state
 		let saved_vars = read_vars(|v| v.clone())?;
-		write_vars(|v| v.export_var(&var_name, &var_val.to_string()))?;
+		write_vars(|v| v.export_var(&var_name, &val.to_string()))?;
 		exec_input(cmd.as_str().to_string(), ctx)?;
 		write_vars(|v| *v = saved_vars)?;
 	}
@@ -1185,7 +1184,7 @@ fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()
 	let blame = cmd.clone();
 	match name {
 		"test" | "[" => {
-			let mut argv = cmd.to_deque();
+			let mut argv = helper::prepare_argv(cmd)?;
 			argv.pop_front(); // Ignore the command name
 			let result = proc_res(builtin::test(&mut argv, ctx), blame)?;
 			if result {
@@ -1205,6 +1204,40 @@ fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()
 		"pwd" => builtin::pwd(cmd, ctx)?,
 		"export" => builtin::export(cmd, ctx)?,
 		"echo" => builtin::echo(cmd, ctx)?,
+		"builtin" | "command" => {
+			let old_cmd = cmd.as_str();
+			let mut inner = cmd.into_inner();
+			let builtin_cmd = inner.next().unwrap(); // Cut off 'builtin'
+			let span = builtin_cmd.as_span();
+			let relative_span_end = span.end() - span.start();
+			let new_cmd = &old_cmd[relative_span_end..];
+			if new_cmd.trim().is_empty() {
+				return Err(High(LashErrHigh::exec_err("Expected a builtin command here", blame)))
+			}
+			let new_pair = LashParse::parse(Rule::cmd_list,new_cmd.trim_start())?
+				.next()
+				.unpack()?
+				.step(1)
+				.unpack()?;
+			let command_name = new_pair.clone().into_inner().find(|pair| pair.as_rule() == Rule::cmd_name).unpack()?.as_str();
+			match name {
+				"builtin" => {
+					if BUILTINS.contains(&command_name) {
+						exec_builtin(new_pair, command_name, ctx)?
+					} else {
+						return Err(High(LashErrHigh::exec_err("Expected a builtin command here", blame)))
+					}
+				}
+				"command" => {
+					if !BUILTINS.contains(&command_name) {
+						dispatch_exec(new_pair, ctx)?
+					} else {
+						return Err(High(LashErrHigh::exec_err("Expected a non-builtin command here", blame)))
+					}
+				}
+				_ => unreachable!()
+			}
+		}
 		_ => unimplemented!("Have not implemented support for builtin `{}` yet",name)
 	};
 	shellenv::set_code(0)?;
@@ -1213,8 +1246,9 @@ fn exec_builtin(cmd: Pair<Rule>, name: &str, ctx: &mut ExecCtx) -> LashResult<()
 
 fn exec_func(cmd: Pair<Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = cmd.clone();
-	let mut argv = helper::prepare_argv(cmd);
+	let mut argv = helper::prepare_argv(cmd)?;
 	let func_name = argv.pop_front().unwrap();
+	dbg!(&func_name);
 	let body = read_logic(|l| l.get_func(&func_name).unwrap())?;
 	let mut var_table = read_vars(|v| v.clone())?;
 	let snapshot = SavedEnv::get_snapshot()?;
@@ -1254,7 +1288,7 @@ fn exec_func(cmd: Pair<Rule>,ctx: &mut ExecCtx) -> LashResult<()> {
 
 fn exec_cmd<'a>(cmd: Pair<Rule>, ctx: &mut ExecCtx) -> LashResult<()> {
 	let blame = cmd.clone();
-	let mut argv = helper::prepare_argv(cmd.clone());
+	let mut argv = helper::prepare_argv(cmd.clone())?;
 	let mut redirs = helper::prepare_redirs(cmd)?;
 	ctx.extend_redirs(redirs);
 	argv.retain(|arg| !arg.is_empty() && arg != "\"\"" && arg != "''");
