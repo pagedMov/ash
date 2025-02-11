@@ -23,3 +23,11 @@ pub fn execute<'a>(pwd_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
 		Err(High(LashErrHigh::exec_err(msg, blame)))
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use crate::{execute, expand};
+
+use super::*;
+
+}

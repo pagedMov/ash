@@ -25,3 +25,23 @@ pub fn execute<'a>(export_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()
 
 	Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+	use crate::execute;
+
+use super::*;
+
+	#[test]
+	fn test_export() {
+		let mut lash = Lash::new();
+		let input = "export VAR=\"foo bar\"";
+
+		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
+
+		let external_var = env::var("VAR").unwrap();
+		let internal_var = lash.borrow_vars().get_evar("VAR").unwrap();
+		assert_eq!(external_var, "foo bar".to_string());
+		assert_eq!(internal_var, "foo bar".to_string());
+	}
+}

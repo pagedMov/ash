@@ -156,3 +156,11 @@ pub fn test<'a>(test_call: &mut VecDeque<String>, lash: &mut Lash) -> LashResult
 	}
 	Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+	use crate::{execute, expand};
+
+use super::*;
+
+}

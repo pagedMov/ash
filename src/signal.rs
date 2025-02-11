@@ -40,11 +40,16 @@ extern "C" fn handle_sigint(_: libc::c_int) {
 }
 
 pub extern "C" fn ignore_sigchld(_: libc::c_int) {
-	// Do nothing
-	// This function exists because using SIGIGN to ignore SIGCHLD
-	// will cause the kernel to reap the child process implicitly
-	// which will prevents the code from being able to reap it elsewhere
-	// which is the entire point of shellenv::disable_reaping()
+	/*
+	Do nothing
+	This function exists because using SIGIGN to ignore SIGCHLD
+	will cause the signal to bounce off of the program
+	which will prevents the code from being able to reap it elsewhere
+	which is the entire point of shellenv::disable_reaping()
+
+	This function is used when we want to handle SIGCHLD explicitly,
+	like in the case of handling foreground jobs
+	*/
 }
 
 extern "C" fn handle_sigquit(_: libc::c_int) {

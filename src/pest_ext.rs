@@ -146,10 +146,11 @@ brace_expand      = @{ "{" ~ (alpha_range_upper | alpha_range_lower | num_range 
 path_seg          = @{ path_root | path_rel }
 path_root         =  { ("/" ~ ident)+ }
 path_rel          =  { (ident ~ "/")+ }
+reserved          =  @{ ("if" | "for" | "while" | "do" | "done" | "fi" | "in" | "select" | "match") ~ word_bound }
 
 // in case you need to explicitly mark where a word ends
 // necessary with shell constructs, for some reason
-word_bound = _{ (WHITESPACE | sep)+ }
+word_bound = _{ !ASCII_ALPHANUMERIC }
 
 // Rules for the expansion phase of the parsing
 operator = _{
@@ -209,7 +210,7 @@ word               = ${
   | expand_word
   | ident
 }
-array_elem         =  { array | (("\\," | "\\]") | !("]" | ",") ~ ANY)+ }
+array_elem         =  { array | (("\\," | "\\]" | "\\[") | !("[" | "]" | ",") ~ ANY)+ }
 array              =  { "[" ~ (array_elem ~ ("," ~ array_elem)*)? ~ "]" }
 word_list          =  { word ~ (NEWLINE* ~ word)* }
 std_assign         =  { var_ident ~ "=" ~ word? ~ (!sep ~ cmd_list)? }
@@ -218,12 +219,12 @@ increment          =  @{ var_ident ~ "++" ~ (!sep ~ WHITESPACE+ ~ cmd_list)? }
 decrement          =  @{ var_ident ~ "--" ~ (!sep ~ WHITESPACE+ ~ cmd_list)? }
 minus_assign       =  { var_ident ~ "-=" ~ word? ~ (!sep ~ cmd_list)? }
 assignment         =  { increment | decrement | std_assign | plus_assign | minus_assign }
-arg_assign         = ${ var_ident ~ "=" ~ (array | word)? }
+arg_assign         =  { var_ident ~ "=" ~ (array|word)? }
 sep                = _{ (";" | NEWLINE)+ }
 
 // Types of commands
 cmd_list   =  { (bg_cmd | expr) ~ (#op = op ~ (bg_cmd | expr))* }
-simple_cmd =  { (redir | cmd_name) ~ (arg_assign | word | redir)* }
+simple_cmd =  { !reserved ~ (redir | cmd_name) ~ (arg_assign | word | redir)* }
 bg_cmd     =  { expr ~ !"&&" ~ "&" ~ word_bound }
 pipeline   =  { (shell_cmd | simple_cmd) ~ ("|" ~ (shell_cmd | simple_cmd))+ }
 expr       = _{ pipeline | shell_cmd | assignment | simple_cmd }
@@ -240,26 +241,26 @@ proc_sub   =  { (in | out) ~ "(" ~ subsh_body ~ ")" }
 
 if_cond   = { cmd_list }
 loop_cond = { cmd_list }
-if_body   = { (!("fi" | "elif" | "else") ~ cmd_list ~ sep)+ }
-loop_body = { (!"done" ~ cmd_list ~ sep)+ }
+if_body   = { (!(fi | elif | else) ~ cmd_list ~ sep)+ }
+loop_body = { (!done ~ cmd_list ~ sep)+ }
 
-loop_kind = { "while" | "until" }
-loop_cmd  = { loop_kind ~ NEWLINE* ~ loop_cond ~ sep ~ "do" ~ NEWLINE* ~ loop_body ~ "done" }
+loop_kind = { while | until }
+loop_cmd  = { loop_kind ~ NEWLINE* ~ loop_cond ~ sep ~ do ~ NEWLINE* ~ loop_body ~ done }
 
-for_vars = { (!"in" ~ word ~ NEWLINE*)+ }
+for_vars = { (!in ~ word ~ NEWLINE*)+ }
 for_arr  = { (word ~ NEWLINE*)+ }
-for_cmd  = { "for" ~ NEWLINE* ~ for_vars ~ "in" ~ NEWLINE* ~ for_arr+ ~ sep ~ "do" ~ NEWLINE* ~ loop_body ~ NEWLINE* ~ "done" }
+for_cmd  = { for ~ NEWLINE* ~ for_vars ~ in ~ NEWLINE* ~ for_arr+ ~ sep ~ do ~ NEWLINE* ~ loop_body ~ NEWLINE* ~ done }
 
 match_pat  = { (!"=>" ~ word)+ }
 match_body = { (brace_grp ~ ","? | (!"," ~ ANY)+ ~ ",") }
 match_arm  = { match_pat ~ "=>" ~ NEWLINE* ~ match_body }
 match_cmd  = {
-    "match" ~ word ~ NEWLINE* ~ "in" ~ NEWLINE* ~ match_arm ~ (NEWLINE* ~ match_arm)* ~ NEWLINE* ~ "done"
+    match ~ NEWLINE* ~ word ~ NEWLINE* ~ in ~ NEWLINE* ~ match_arm ~ (NEWLINE* ~ match_arm)* ~ NEWLINE* ~ done
 }
 
-if_cmd     = { "if" ~ if_cond ~ sep ~ "then" ~ NEWLINE* ~ if_body ~ elif_block* ~ else_block? ~ "fi" }
-elif_block = { "elif" ~ if_cond ~ sep ~ "then" ~ NEWLINE* ~ if_body }
-else_block = { "else" ~ NEWLINE* ~ (!("fi") ~ #else_body = cmd_list ~ sep)+ }
+if_cmd     = { if ~ NEWLINE* ~ if_cond ~ sep ~ then ~ NEWLINE* ~ if_body ~ elif_block* ~ else_block? ~ fi }
+elif_block = { elif ~ NEWLINE* ~ if_cond ~ sep ~ then ~ NEWLINE* ~ if_body }
+else_block = { else ~ NEWLINE* ~ (!(fi) ~ #else_body = cmd_list ~ sep)+ }
 
 // Operator stuff
 and = { "&&" }
@@ -269,7 +270,7 @@ op  = { (and | or) }
 redir_list =  { redir ~ (redir)* }
 fd_out     = @{ number }
 fd_target  = @{ number }
-file       = @{ word }
+file       = { proc_sub|word }
 pipe       =  { "|" }
 in         =  { "<" }
 out        =  { ">" }

@@ -11,12 +11,12 @@ pub fn execute<'a>(assign: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
 		match arg.as_rule() {
 			Rule::arg_assign => {
 				let var_name = arg.scry(Rule::var_ident).unpack()?;
-				if let Some(val) = arg.scry(Rule::word) {
+				if let Some(val) = arg.scry(&[Rule::word,Rule::array][..]) {
 					let rule = val.as_rule();
 					let val = helper::try_expansion(lash,val)?;
 					let lash_val = match cmd_name.as_str() {
 						"string" => {
-							LashVal::String(val)
+							LashVal::String(val.trim_quotes().to_string())
 						}
 						"int" => {
 							let lash_int = val.as_str().parse::<i32>();
@@ -44,7 +44,8 @@ pub fn execute<'a>(assign: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
 						}
 						"arr" => {
 							if let Rule::array = rule {
-								LashVal::parse(val.as_str())?
+								let val = LashVal::parse(val.as_str())?;
+								val
 							} else {
 								let msg = format!("Expected an array in `array` assignment");
 								return Err(High(LashErrHigh::syntax_err(msg, blame)))
@@ -65,4 +66,66 @@ pub fn execute<'a>(assign: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
 		}
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::execute;
+
+use super::*;
+
+	#[test]
+	fn test_assign_int() {
+		let mut lash = Lash::new();
+		let input = "int var=5";
+
+		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
+		assert_eq!(lash.borrow_vars().get_var("var"), Some(LashVal::Int(5)))
+	}
+	#[test]
+	fn test_assign_string() {
+		let mut lash = Lash::new();
+		let input = "string var=\"foo bar\"";
+
+		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
+		assert_eq!(lash.borrow_vars().get_var("var"), Some(LashVal::String("foo bar".to_string())))
+	}
+	#[test]
+	fn test_assign_float() {
+		let mut lash = Lash::new();
+		let input = "float pi=3.14";
+
+		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
+		assert_eq!(lash.borrow_vars().get_var("pi"), Some(LashVal::Float(HashFloat(3.14))))
+	}
+	#[test]
+	fn test_assign_bool() {
+		let mut lash = Lash::new();
+		let input = "bool var=true";
+
+		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
+		assert_eq!(lash.borrow_vars().get_var("var"), Some(LashVal::Bool(true)));
+
+		let mut lash = Lash::new();
+		let input = "bool var=false";
+
+		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
+		assert_eq!(lash.borrow_vars().get_var("var"), Some(LashVal::Bool(false)))
+	}
+	#[test]
+	fn test_assign_array() {
+		let mut lash = Lash::new();
+		let input = "arr list=[1, \"foo\", 3.14, true, [1,2,3]]";
+
+		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
+		let array = lash.borrow_vars().get_var("list").unwrap();
+
+		if let LashVal::Array(mut list) = array {
+			assert_eq!(list.remove(4), LashVal::Array(vec![LashVal::Int(1),LashVal::Int(2),LashVal::Int(3)]));
+			assert_eq!(list.remove(3), LashVal::Bool(true));
+			assert_eq!(list.remove(2), LashVal::Float(HashFloat(3.14)));
+			assert_eq!(list.remove(1), LashVal::String("foo".into()));
+			assert_eq!(list.remove(0), LashVal::Int(1));
+		} else { panic!() }
+	}
 }

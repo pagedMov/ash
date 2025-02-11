@@ -20,3 +20,21 @@ pub fn setopt<'a>(setopt_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()>
 	}
 	Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+	use crate::execute;
+
+use super::*;
+
+	#[test]
+	fn test_setopt() {
+		let mut lash = Lash::new();
+		let input = "setopt prompt.custom.foo=\"bar\"";
+
+		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
+		let opt = lash.borrow_meta().get_shopt("prompt.custom.foo").unwrap();
+
+		assert_eq!(opt,"bar".to_string())
+	}
+}

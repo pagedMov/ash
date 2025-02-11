@@ -1450,10 +1450,12 @@ impl EnvMeta {
 }
 
 
+/// Override the default signal handler to manually wait on processes
 pub fn disable_reaping() {
 	unsafe { signal(Signal::SIGCHLD, SigHandler::Handler(crate::signal::ignore_sigchld)) }.unwrap();
 }
 
+/// Re-enable the sigchld handler
 pub fn enable_reaping<'a>() -> LashResult<()> {
 	write_jobs(|j| j.update_job_statuses())??;
 	unsafe { signal(Signal::SIGCHLD, SigHandler::Handler(crate::signal::handle_sigchld)) }.unwrap();
@@ -1473,9 +1475,6 @@ where F: FnOnce(&mut JobTable) -> T {
 }
 
 pub fn attach_tty<'a>(pgid: Pid) -> LashResult<()> {
-
-
-	// Ensure stdin (fd 0) is a tty before proceeding
 	if !isatty(0).unwrap_or(false) || pgid == term_controller() {
 		return Ok(())
 	}

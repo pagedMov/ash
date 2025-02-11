@@ -33,3 +33,18 @@ pub fn execute<'a>(alias_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()>
 	}
 	Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+	use crate::execute;
+
+use super::*;
+
+	#[test]
+	fn test_alias() {
+		let mut lash = Lash::new();
+		let input = "alias foo=\"bar\";";
+		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
+		assert!(lash.borrow_logic().get_alias("foo").is_some_and(|al| &al == "bar"))
+	}
+}
