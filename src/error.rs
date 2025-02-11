@@ -1,9 +1,10 @@
-use std::{fmt::{Debug, Display}, hash::Hash};
+use crate::prelude::*;
 
 use nix::errno::Errno;
-use pest::{error::ErrorVariant, iterators::Pair, Span};
 
-use crate::{helper, Rule};
+use crate::helper;
+
+pub type LashResult<T> = Result<T,LashErr>;
 
 pub trait LashErrExt<T> {
 	/// Transforms a LashResult into an Option

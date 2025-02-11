@@ -1,10 +1,11 @@
-use nix::{sys::wait::WaitStatus, unistd::{dup2, getpgrp}, NixPath};
-use pest::{error::ErrorVariant, iterators::Pair, Parser, RuleType, Span};
-use regex::Regex;
-use serde_json::Value;
-use std::{alloc::GlobalAlloc, collections::{HashMap, VecDeque}, env, f32::INFINITY, fs, io::{self, Read}, mem::take, os::{fd::AsRawFd, unix::fs::PermissionsExt}, path::{Path, PathBuf}, thread, time::Duration};
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 
-use crate::{comp::REGEX, error::{LashErr, LashErrHigh, LashErrLow}, execute::Redir, expand::{self, expand_esc, expand_time}, shellenv::{self, attach_tty, disable_reaping, enable_reaping, read_logic, read_meta, read_vars, write_jobs, write_logic, write_vars, DisplayWaitStatus, HashFloat, Job, LashVal}, LashParse, LashResult, pair::OptPairExt, pair::PairExt, Rule};
+use io::Read;
+use nix::unistd::getpgrp;
+
+use crate::{expand, prelude::*, utils};
+use crate::{utils::REGEX, error::{LashErr, LashErrHigh, LashErrLow}, shellenv::{self, attach_tty, disable_reaping, enable_reaping, write_jobs, DisplayWaitStatus, HashFloat, Job, Lash, LashVal}, LashResult};
 
 
 #[macro_export]
@@ -385,8 +386,8 @@ impl StrExtension for str {
 
 }
 
-pub fn validate_autocd(argv: &VecDeque<String>) -> LashResult<bool> {
-	if read_meta(|m| m.get_shopt("core.autocd").is_ok_and(|opt| opt.parse::<bool>().unwrap()))? && argv.len() == 1 {
+pub fn validate_autocd(lash: &mut Lash,argv: &VecDeque<String>) -> LashResult<bool> {
+	if lash.borrow_meta().get_shopt("core.autocd").is_ok_and(|opt| opt.parse::<bool>().unwrap()) && argv.len() == 1 {
 		let candidate = argv.front().unwrap();
 		Ok(Path::new(candidate).is_dir())
 	} else {
@@ -394,27 +395,27 @@ pub fn validate_autocd(argv: &VecDeque<String>) -> LashResult<bool> {
 	}
 }
 
-pub fn try_expansion<'a>(pair: Pair<'a,Rule>) -> LashResult<String> {
+pub fn try_expansion<'a>(lash: &mut Lash,pair: Pair<'a,Rule>) -> LashResult<String> {
 	if pair.contains_rules(&[Rule::expand_word,Rule::dquoted][..]) {
-		expand::expand_word(pair)
+		expand::dispatch::expand_word(pair,lash)
 	} else {
 		Ok(pair.as_str().to_string())
 	}
 }
 
-pub fn prepare_argv<'a>(pair: Pair<'a,Rule>) -> LashResult<VecDeque<String>> {
+pub fn prepare_argv<'a>(pair: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<VecDeque<String>> {
 	let mut args = VecDeque::new();
 	let mut inner = pair.into_inner().filter(|pr| matches!(pr.as_rule(), Rule::cmd_name | Rule::arg_assign | Rule::word));
 	while let Some(pair) = inner.next() {
 		if pair.as_rule() == Rule::cmd_name {
-			match read_logic(|l| l.get_alias(pair.as_str()))? {
+			match lash.borrow_logic().get_alias(pair.as_str()) {
 				Some(alias) => {
 
 				}
 				None => { /* Pass */ }
 			}
 		}
-		let word = try_expansion(pair)?;
+		let word = try_expansion(lash,pair)?;
 		args.push_back(word.trim_quotes());
 	}
 	Ok(args)
@@ -446,8 +447,8 @@ pub fn get_pipeline_cmd<'a>(pair: Pair<'a,Rule>) -> LashResult<String> {
 	})
 }
 
-pub fn prepare_redirs<'a>(pair: Pair<'a,Rule>) -> LashResult<VecDeque<Redir>> {
-	let mut results = pair.filter(Rule::redir).into_iter().map(|pr| Redir::from_pair(pr)).collect::<VecDeque<_>>();
+pub fn prepare_redirs<'a>(pair: Pair<'a,Rule>) -> LashResult<VecDeque<utils::Redir>> {
+	let mut results = pair.filter(Rule::redir).into_iter().map(|pr| utils::Redir::from_pair(pr)).collect::<VecDeque<_>>();
 	let mut redirs = VecDeque::new();
 	while let Some(result) = results.pop_front() {
 		let extracted = result?;
@@ -636,8 +637,8 @@ pub fn slice_completion(line: &str, candidate: &str) -> String {
 	}
 }
 
-pub fn which(command: &str) -> Option<String> {
-	if let Some(env_path) = read_vars(|v| v.get_evar("PATH")).unwrap() {
+pub fn which(lash: &mut Lash,command: &str) -> Option<String> {
+	if let Some(env_path) = lash.borrow_vars().get_evar("PATH") {
 		for path in env::split_paths(&env_path) {
 			let full_path = path.join(command);
 			if full_path.is_file() && is_exec(&full_path) {
@@ -654,45 +655,31 @@ pub fn is_exec(path: &Path) -> bool {
 		.unwrap_or(false)
 }
 
-pub fn write_alias(alias: &str, body: &str) -> LashResult<()> {
-	if read_logic(|l| l.get_func(alias))?.is_some() {
-		write_logic(|l| l.remove_func(alias))?;
+pub fn write_alias(lash: &mut Lash,alias: &str, body: &str) -> LashResult<()> {
+	if lash.borrow_logic().get_func(alias).is_some() {
+		lash.logic_mut().remove_func(alias);
 	}
-	write_logic(|l| l.new_alias(alias, body.into()))?;
+	lash.logic_mut().new_alias(alias, body.into());
 	Ok(())
 }
 
-pub fn write_func(func: &str, body: &str) -> LashResult<()> {
-	if read_logic(|l| l.get_alias(func))?.is_some() {
-		write_logic(|l| l.remove_alias(func))?;
+pub fn write_func(lash: &mut Lash,func: &str, body: &str) -> LashResult<()> {
+	if lash.borrow_logic().get_alias(func).is_some() {
+		lash.logic_mut().remove_alias(func);
 	}
-	write_logic(|l| l.new_func(func, body))?;
+	lash.logic_mut().new_func(func, body);
 	Ok(())
 }
 
-pub fn unset_var_conflicts(key: &str) -> LashResult<()> {
-	if read_vars(|v| v.get_var(key))?.is_some() {
-		write_vars(|v| v.unset_var(key))?
+pub fn unset_var_conflicts(lash: &mut Lash,key: &str) -> LashResult<()> {
+	if lash.borrow_vars().get_var(key).is_some() {
+		lash.vars_mut().unset_var(key)
 	}
-	if read_vars(|v| v.get_evar(key))?.is_some() {
+	if lash.borrow_vars().get_evar(key).is_some() {
 		std::env::remove_var(key);
-		write_vars(|v| v.unset_evar(key))?;
+		lash.vars_mut().unset_evar(key);
 	}
 
-	Ok(())
-}
-
-pub fn set_last_status<'a>(status: &WaitStatus) -> LashResult<()> {
-	match status {
-		WaitStatus::Exited(pid, code) => {
-			write_vars(|v| v.set_param("?".into(), code.to_string()))?;
-		}
-		WaitStatus::Signaled(_, signal, _) | WaitStatus::Stopped(_,signal) => {
-			write_vars(|v| v.set_param("?".into(), (*signal as i32).to_string()))?;
-		}
-		WaitStatus::Continued(_) | WaitStatus::StillAlive => { /* Do nothing */ }
-		_ => unimplemented!()
-	}
 	Ok(())
 }
 
@@ -720,7 +707,7 @@ pub fn handle_fg(job: Job) -> LashResult<()> {
 	enable_reaping()
 }
 
-pub fn handle_prompt_visgroup(pair: Pair<Rule>) -> LashResult<String> {
+pub fn handle_prompt_visgroup(lash: &mut Lash,pair: Pair<Rule>) -> LashResult<String> {
 	let mut found = false;
 	let span = pair.as_span();
 	let mut visgroup = pair.as_str().to_string();
@@ -738,7 +725,7 @@ pub fn handle_prompt_visgroup(pair: Pair<Rule>) -> LashResult<String> {
 			Rule::esc_return |
 			Rule::esc_ansi_seq |
 			Rule::esc_newline => {
-				let meta_char = expand_esc(esc)?;
+				let meta_char = expand::misc::expand_esc(lash,esc)?;
 				let cur_len = ps1.len();
 				ps1.replace_span(span, &meta_char);
 				len_delta += ps1.len() as isize - cur_len as isize;
@@ -746,7 +733,7 @@ pub fn handle_prompt_visgroup(pair: Pair<Rule>) -> LashResult<String> {
 			}
 			_ => { /* Pass */ }
 		}
-		let expanded = expand_esc(esc)?;
+		let expanded = expand::misc::expand_esc(lash,esc)?;
 		if !expanded.is_empty() {
 			found = true;
 		}
@@ -832,7 +819,7 @@ pub fn handle_prompt_hidegroup<'a>() -> LashResult<String> {
 	todo!()
 }
 
-pub fn format_cmd_runtime(dur: Duration) -> String {
+pub fn format_cmd_runtime(dur: std::time::Duration) -> String {
 	const ETERNITY: u64 = f32::INFINITY as u64;
 	let mut seconds    = dur.as_secs();
 	let mut minutes    = 0;
@@ -999,24 +986,24 @@ pub fn escseq_cmdtime<'a>() -> LashResult<String> {
 	Ok(env::var("OX_CMD_TIME").unwrap_or_default())
 }
 
-pub fn escseq_custom(query: &str) -> LashResult<String> {
-	let command = read_meta(|m| m.get_shopt(&format!("prompt.custom.{query}")))??;
+pub fn escseq_custom(lash: &mut Lash,query: &str) -> LashResult<String> {
+	let command = lash.borrow_meta().get_shopt(&format!("prompt.custom.{query}"))?;
 	let cmd_sub = format!("$({command})");
 	let parsed = LashParse::parse(Rule::cmd_sub, &cmd_sub)
 		.map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?
 		.into_iter()
 		.next()
 		.unpack()?;
-	expand::expand_cmd_sub(parsed)
+	expand::cmdsub::expand_cmd_sub(parsed,lash)
 }
 
-pub fn escseq_exitcode<'a>() -> LashResult<String> {
-	Ok(read_vars(|v| v.get_param("?"))?.unwrap_or_default())
+pub fn escseq_exitcode<'a>(lash: &mut Lash) -> LashResult<String> {
+	Ok(lash.borrow_vars().get_param("?").unwrap_or_default())
 }
 
-pub fn escseq_success<'a>() -> LashResult<String> {
-	let code = read_vars(|v| v.get_param("?"))?;
-	let success = read_meta(|m| m.get_shopt("prompt.exit_status.success"))??.trim_matches('"').to_string();
+pub fn escseq_success<'a>(lash: &mut Lash) -> LashResult<String> {
+	let code = lash.borrow_vars().get_param("?");
+	let success = lash.borrow_meta().get_shopt("prompt.exit_status.success")?.trim_matches('"').to_string();
 	if let Some(code) = code {
 		match code.as_str() {
 			"0" => Ok(success),
@@ -1027,9 +1014,9 @@ pub fn escseq_success<'a>() -> LashResult<String> {
 	}
 }
 
-pub fn escseq_fail<'a>() -> LashResult<String> {
-	let code = read_vars(|v| v.get_param("?"))?;
-	let failure = read_meta(|m| m.get_shopt("prompt.exit_status.failure"))??.trim_matches('"').to_string();
+pub fn escseq_fail<'a>(lash: &mut Lash) -> LashResult<String> {
+	let code = lash.borrow_vars().get_param("?");
+	let failure = lash.borrow_meta().get_shopt("prompt.exit_status.failure")?.trim_matches('"').to_string();
 	if let Some(code) = code {
 		match code.as_str() {
 			"0" => Ok(String::new()),
@@ -1087,13 +1074,13 @@ pub fn escseq_non_printing_sequence(chars: &mut VecDeque<char>, result: &mut Str
 }
 
 /// Handles the current working directory.
-pub fn escseq_working_directory<'a>() -> LashResult<String> {
+pub fn escseq_working_directory<'a>(lash: &mut Lash) -> LashResult<String> {
 	let mut cwd = env::var("PWD").unwrap_or_default();
 	let home = env::var("HOME").unwrap_or_default();
 	if cwd.starts_with(&home) {
 		cwd = cwd.replacen(&home, "~", 1); // Use `replacen` to replace only the first occurrence
 	}
-	let trunc_len = read_meta(|meta| meta.get_shopt("prompt.trunc_prompt_path").unwrap_or("0".into()))?.parse::<usize>().unwrap();
+	let trunc_len = lash.borrow_meta().get_shopt("prompt.trunc_prompt_path").unwrap_or("0".into()).parse::<usize>().unwrap();
 	if trunc_len > 0 {
 		let mut path = PathBuf::from(cwd);
 		let mut cwd_components: Vec<_> = path.components().collect();
@@ -1107,10 +1094,10 @@ pub fn escseq_working_directory<'a>() -> LashResult<String> {
 }
 
 /// Handles the basename of the current working directory.
-pub fn escseq_basename_working_directory<'a>() -> LashResult<String> {
-	let cwd = PathBuf::from(read_vars(|vars| vars.get_evar("PWD").map_or("".to_string(), |pwd| pwd.to_string()))?);
+pub fn escseq_basename_working_directory<'a>(lash: &mut Lash) -> LashResult<String> {
+	let cwd = PathBuf::from(lash.borrow_vars().get_evar("PWD").map_or("".to_string(), |pwd| pwd.to_string()));
 	let mut cwd = cwd.components().last().map(|comp| comp.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
-	let home = read_vars(|vars| vars.get_evar("HOME").map_or("".into(), |home| home))?;
+	let home = lash.borrow_vars().get_evar("HOME").map_or("".into(), |home| home);
 	if cwd.starts_with(&home) {
 		cwd = cwd.replacen(&home, "~", 1); // Replace HOME with '~'
 	}
@@ -1118,14 +1105,14 @@ pub fn escseq_basename_working_directory<'a>() -> LashResult<String> {
 }
 
 /// Handles the full hostname.
-pub fn escseq_full_hostname<'a>() -> LashResult<String> {
-	let hostname: String = read_vars(|vars| vars.get_evar("HOSTNAME").map_or("unknown host".into(), |host| host))?;
+pub fn escseq_full_hostname<'a>(lash: &mut Lash) -> LashResult<String> {
+	let hostname: String = lash.borrow_vars().get_evar("HOSTNAME").map_or("unknown host".into(), |host| host);
 	Ok(hostname)
 }
 
 /// Handles the short hostname.
-pub fn escseq_short_hostname<'a>() -> LashResult<String> {
-	let hostname = read_vars(|vars| vars.get_evar("HOSTNAME").map_or("unknown host".into(), |host| host))?;
+pub fn escseq_short_hostname<'a>(lash: &mut Lash) -> LashResult<String> {
+	let hostname = lash.borrow_vars().get_evar("HOSTNAME").map_or("unknown host".into(), |host| host);
 	if let Some((hostname, _)) = hostname.split_once('.') {
 		Ok(hostname.to_string())
 	} else {
@@ -1134,20 +1121,20 @@ pub fn escseq_short_hostname<'a>() -> LashResult<String> {
 }
 
 /// Handles the shell name.
-pub fn escseq_shell_name<'a>() -> LashResult<String> {
-	let sh_name = read_vars(|vars| vars.get_evar("SHELL").map_or("rsh".into(), |sh| sh))?;
+pub fn escseq_shell_name<'a>(lash: &mut Lash) -> LashResult<String> {
+	let sh_name = lash.borrow_vars().get_evar("SHELL").map_or("rsh".into(), |sh| sh);
 	Ok(sh_name)
 }
 
 /// Handles the username.
-pub fn escseq_username<'a>() -> LashResult<String> {
-	let user = read_vars(|vars| vars.get_evar("USER").map_or("unknown".into(), |user| user))?;
+pub fn escseq_username<'a>(lash: &mut Lash) -> LashResult<String> {
+	let user = lash.borrow_vars().get_evar("USER").map_or("unknown".into(), |user| user);
 	Ok(user)
 }
 
 /// Handles the prompt symbol based on the user ID.
-pub fn escseq_prompt_symbol<'a>() -> LashResult<char> {
-	let uid = read_vars(|vars| vars.get_evar("UID").map_or("0".into(), |uid| uid))?;
+pub fn escseq_prompt_symbol<'a>(lash: &mut Lash) -> LashResult<char> {
+	let uid = lash.borrow_vars().get_evar("UID").map_or("0".into(), |uid| uid);
 	match uid.as_str() {
 		"0" => Ok('#'),
 		_ => Ok('$'),
@@ -1388,8 +1375,8 @@ pub fn proc_res<T>(result: LashResult<T>, pair: Pair<Rule>) -> LashResult<T> {
 	}
 }
 
-pub fn build_lash_err<R: RuleType>(pair: Pair<R>, message: String) -> String {
-	pest::error::Error::<R>::new_from_span(ErrorVariant::CustomError { message }, pair.as_span()).to_string()
+pub fn build_lash_err<R: pest::RuleType>(pair: Pair<R>, message: String) -> String {
+	pest::error::Error::<R>::new_from_span(pest::error::ErrorVariant::CustomError { message }, pair.as_span()).to_string()
 }
 
 pub fn add_vars<'a>(left: LashVal, right: LashVal) -> LashResult<LashVal> {

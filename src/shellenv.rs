@@ -4,11 +4,10 @@ use std::collections::HashMap;
 use bitflags::bitflags;
 use nix::{sys::{signal::{kill, killpg, signal, SigHandler, SigmaskHow, Signal::{self, SIGCHLD, SIGTSTP, SIGTTIN, SIGTTOU}}, wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{gethostname, getpgrp, isatty, setpgid, tcgetpgrp, tcsetpgrp, Pid, User}};
 use once_cell::sync::Lazy;
-use pest::Parser;
-use serde_json::Value;
-use std::{fs::File, sync::RwLock};
+use std::sync::RwLock;
 
-use crate::{error::{LashErr, LashErrLow}, exec_input, execute::{ExecCtx, RustFd}, helper::{self, VecDequeExtension}, pair::OptPairExt, shopt::ShOpts, LashParse, LashResult, Rule};
+use crate::{execute::dispatch, prelude::*, utils};
+use crate::{error::{LashErr::*, LashErrLow}, helper::{self, VecDequeExtension}, shopt::ShOpts, LashResult};
 
 
 #[derive(Debug)]
@@ -57,32 +56,6 @@ pub static JOBS: LazyLock<Arc<RwLock<JobTable>>> = LazyLock::new(|| {
 	)
 });
 
-pub static VARS: LazyLock<Arc<RwLock<VarTable>>> = LazyLock::new(|| {
-	Arc::new(
-		RwLock::new(
-			VarTable::new()
-		)
-	)
-});
-
-pub static LOGIC: LazyLock<Arc<RwLock<LogicTable>>> = LazyLock::new(|| {
-	Arc::new(
-		RwLock::new(
-			LogicTable::new()
-		)
-	)
-});
-
-pub static META: LazyLock<Arc<RwLock<EnvMeta>>> = LazyLock::new(|| {
-	Arc::new(
-		RwLock::new(
-			EnvMeta::new(EnvFlags::empty())
-		)
-	)
-});
-
-
-
 bitflags! {
 	#[derive(Debug,Copy,Clone,PartialEq)]
 	pub struct EnvFlags: u32 {
@@ -126,6 +99,309 @@ bitflags! {
 		const RUNNING   = 0b00001000;
 		const STOPPED   = 0b00010000;
 		const INIT      = 0b00100000;
+	}
+}
+
+#[derive(Debug,Clone)]
+pub struct Lash {
+	vars: VarTable,
+	logic: LogicTable,
+	meta: EnvMeta,
+	ctx: ExecCtx
+}
+
+impl Lash {
+	pub fn new() -> Self {
+		let env = Self::init_env_vars(true);
+		let vars = VarTable::new(env);
+		let logic = LogicTable::new();
+		let meta = EnvMeta::new(EnvFlags::empty());
+		let ctx = ExecCtx::new();
+
+		Self { vars, logic, meta, ctx }
+	}
+	pub fn borrow_vars(&self) -> &VarTable {
+		&self.vars
+	}
+	pub fn vars_mut(&mut self) -> &mut VarTable {
+		&mut self.vars
+	}
+	pub fn borrow_logic(&self) -> &LogicTable {
+		&self.logic
+	}
+	pub fn logic_mut(&mut self) -> &mut LogicTable {
+		&mut self.logic
+	}
+	pub fn borrow_meta(&self) -> &EnvMeta {
+		&self.meta
+	}
+	pub fn meta_mut(&mut self) -> &mut EnvMeta {
+		&mut self.meta
+	}
+	pub fn borrow_ctx(&self) -> &ExecCtx {
+		&self.ctx
+	}
+	pub fn ctx_mut(&mut self) -> &mut ExecCtx {
+		&mut self.ctx
+	}
+	pub fn get_status(&self) -> i32 {
+		self.vars.get_param("?").map(|c| c.parse::<i32>().unwrap()).unwrap_or(0)
+	}
+	pub fn set_code(&mut self, code: i32) {
+		self.vars.set_param("?", &code.to_string())
+	}
+	pub fn in_pipe(&self) -> bool {
+		self.meta.flags().contains(EnvFlags::IN_SUB_PROC)
+	}
+	pub fn push_state(&mut self) -> LashResult<()> {
+		self.ctx.push_state()
+	}
+	pub fn pop_state(&mut self) -> LashResult<()> {
+		self.ctx.pop_state()
+	}
+
+	pub fn start_timer(&mut self) {
+		self.meta.timer_start = Some(Instant::now())
+	}
+	pub fn stop_timer(&mut self) -> LashResult<()> {
+		if let Some(start_time) = self.meta.timer_start {
+			self.meta.cmd_duration = Some(start_time.elapsed());
+			self.vars.export_var("OX_CMD_TIME", &self.meta.cmd_duration.unwrap().as_millis().to_string());
+		}
+		Ok(())
+	}
+
+	pub fn change_dir(&mut self, path: &Path) -> LashResult<()> {
+		let cwd = env::var("PWD").map_err(|_| Low(LashErrLow::from_io()))?;
+		self.vars.export_var("OLDPWD", &cwd);
+		env::set_current_dir(path)?;
+		let cwd = env::current_dir().map_err(|_| Low(LashErrLow::from_io()))?;
+		self.vars.export_var("PWD", cwd.to_str().unwrap());
+		Ok(())
+	}
+
+	pub fn source_rc(&mut self, path: Option<PathBuf>) -> LashResult<()> {
+		let path = if let Some(path) = path {
+			path
+		} else {
+			let home = env::var("HOME").unwrap();
+			PathBuf::from(format!("{home}/.lashrc"))
+		};
+		if let Err(e) = self.source_file(path.to_str().unwrap()) {
+			self.set_code(1);
+			eprintln!("Failed to source lashrc: {}",e);
+		}
+		Ok(())
+	}
+
+
+	pub fn source_file<'a>(&mut self, path: &str) -> LashResult<()> {
+		let mut file = utils::RustFd::std_open(&path)?;
+		let mut buffer = String::new();
+		dbg!("sourcing lashrc");
+		file.read_to_string(&mut buffer).map_err(|_| Low(LashErrLow::from_io()))?;
+		file.close()?;
+
+		dispatch::exec_input(buffer, self)
+	}
+
+	pub fn get_cstring_evars<'a>(&self) -> LashResult<Vec<CString>> {
+		let env = self.vars.borrow_evars();
+		let env = env.iter().map(|(k,v)| CString::new(format!("{}={}",k,v).as_str()).unwrap()).collect::<Vec<CString>>();
+		Ok(env)
+	}
+	pub fn is_func(&self, name: &str) -> LashResult<bool> {
+		let result = self.logic.get_func(name).is_some();
+		Ok(result)
+	}
+
+	pub fn init_env_vars(clean: bool) -> HashMap<String,String> {
+		let pathbuf_to_string = |pb: Result<PathBuf, std::io::Error>| pb.unwrap_or_default().to_string_lossy().to_string();
+		// First, inherit any env vars from the parent process if clean bit not set
+		let mut env_vars = HashMap::new();
+		if !clean {
+			env_vars = std::env::vars().collect::<HashMap<String,String>>();
+		}
+		let term = {
+			if isatty(1).unwrap() {
+				if let Ok(term) = std::env::var("TERM") {
+					term
+				} else {
+					"linux".to_string()
+				}
+			} else {
+				"xterm-256color".to_string()
+			}
+		};
+		let home;
+		let username;
+		let uid;
+		if let Some(user) = User::from_uid(nix::unistd::Uid::current()).ok().flatten() {
+			home = user.dir;
+			username = user.name;
+			uid = user.uid;
+		} else {
+			home = PathBuf::new();
+			username = "unknown".into();
+			uid = 0.into();
+		}
+		let home = pathbuf_to_string(Ok(home));
+		let hostname = gethostname().map(|hname| hname.to_string_lossy().to_string()).unwrap_or_default();
+
+		env_vars.insert("HOSTNAME".into(), hostname.clone());
+		env::set_var("HOSTNAME", hostname);
+		env_vars.insert("UID".into(), uid.to_string());
+		env::set_var("UID", uid.to_string());
+		env_vars.insert("TMPDIR".into(), "/tmp".into());
+		env::set_var("TMPDIR", "/tmp");
+		env_vars.insert("TERM".into(), term.clone());
+		env::set_var("TERM", term);
+		env_vars.insert("LANG".into(), "en_US.UTF-8".into());
+		env::set_var("LANG", "en_US.UTF-8");
+		env_vars.insert("USER".into(), username.clone());
+		env::set_var("USER", username.clone());
+		env_vars.insert("LOGNAME".into(), username.clone());
+		env::set_var("LOGNAME", username);
+		env_vars.insert("PWD".into(), pathbuf_to_string(std::env::current_dir()));
+		env::set_var("PWD", pathbuf_to_string(std::env::current_dir()));
+		env_vars.insert("OLDPWD".into(), pathbuf_to_string(std::env::current_dir()));
+		env::set_var("OLDPWD", pathbuf_to_string(std::env::current_dir()));
+		env_vars.insert("HOME".into(), home.clone());
+		env::set_var("HOME", home.clone());
+		env_vars.insert("SHELL".into(), pathbuf_to_string(std::env::current_exe()));
+		env::set_var("SHELL", pathbuf_to_string(std::env::current_exe()));
+		env_vars.insert("HIST_FILE".into(),format!("{}/.lash_hist",home));
+		env::set_var("HIST_FILE",format!("{}/.lash_hist",home));
+
+		env_vars
+	}
+	pub fn exec_as_cond(&mut self, input: &str) -> LashResult<i32> {
+		let saved = self.ctx.clone();
+		self.ctx = self.ctx.as_cond();
+		dispatch::exec_input(input.to_string(), self)?;
+		let status = self.get_status();
+		self.ctx = saved;
+		self.set_code(status);
+		Ok(status)
+	}
+	pub fn exec_as_body(&mut self, input: &str) -> LashResult<i32> {
+		let saved = self.ctx.clone();
+		self.ctx = self.ctx.as_body();
+		dispatch::exec_input(input.to_string(), self)?;
+		let status = self.get_status();
+		self.ctx = saved;
+		self.set_code(status);
+		Ok(status)
+	}
+}
+
+#[derive(Debug,Clone)]
+pub struct ExecCtx {
+	redir_queue: VecDeque<utils::Redir>,
+	flags: utils::ExecFlags,
+	depth: usize,
+	state_stack: Vec<Box<ExecCtx>>,
+	max_recurse_depth: usize
+}
+
+impl ExecCtx {
+	pub fn new() -> Self {
+		Self {
+			redir_queue: VecDeque::new(),
+			flags: utils::ExecFlags::empty(),
+			depth: 0,
+			state_stack: vec![], // Each alteration is local to a single layer of recursion
+			max_recurse_depth: 1000
+		}
+	}
+	/// Creates a new instance of ExecCtx which retains only the standard input of the original
+	/// Used in shell structures like `if` and `while` to direct input to the condition
+	pub fn as_cond(&self) -> Self {
+		let mut clone = self.clone();
+		let (cond_redirs,_) = self.sort_redirs();
+		clone.redir_queue = cond_redirs.into();
+		clone
+	}
+	/// Creates a new instance of ExecCtx which retains only the stdout and stderr of the original
+	/// Used in shell structures like `if` and `while` to direct output from the body
+	pub fn as_body(&self) -> Self {
+		let mut clone = self.clone();
+		let (_,body_redirs) = self.sort_redirs();
+		clone.redir_queue = body_redirs.into();
+		clone
+	}
+	pub fn refresh(&mut self) -> LashResult<()> {
+		*self = ExecCtx::new();
+		Ok(())
+	}
+	/// returned as (Incoming Redirs, Outgoing Redirs)
+	pub fn sort_redirs(&self) -> (Vec<utils::Redir>,Vec<utils::Redir>) {
+		let mut in_redirs = vec![];
+		let mut out_redirs = vec![];
+		for redir in self.redir_queue.clone() {
+			match redir.redir_type() {
+				Rule::r#in => in_redirs.push(redir.clone()),
+				Rule::out | Rule::append => out_redirs.push(redir.clone()),
+				_ => unimplemented!()
+			}
+		}
+		(in_redirs,out_redirs)
+	}
+	pub fn push_state(&mut self) -> LashResult<()> {
+		let saved_state = Box::new(self.clone());
+		self.state_stack.push(saved_state);
+		Ok(())
+	}
+	pub fn pop_state(&mut self) -> LashResult<()> {
+		if let Some(state) = self.state_stack.pop() {
+			*self = *state;
+		}
+		Ok(())
+	}
+	pub fn ascend(&mut self) -> LashResult<()> {
+		self.pop_state()?;
+		self.depth = self.depth.saturating_sub(1);
+		Ok(())
+	}
+	pub fn descend(&mut self) -> LashResult<()> {
+		self.push_state()?;
+		self.depth += 1;
+		if self.depth >= self.max_recurse_depth {
+			Err(Low(LashErrLow::InternalErr(format!("Hit maximum recursion depth during execution: {}",self.max_recurse_depth))))
+		} else {
+			Ok(())
+		}
+	}
+	pub fn depth(&self) -> usize {
+		self.depth
+	}
+	pub fn flags_mut(&mut self) -> &mut utils::ExecFlags {
+		&mut self.flags
+	}
+	pub fn flags(&self) -> utils::ExecFlags {
+		self.flags
+	}
+	pub fn set_redirs(&mut self, redirs: VecDeque<utils::Redir>) {
+		self.redir_queue = redirs
+	}
+	pub fn extend_redirs(&mut self, redirs: VecDeque<utils::Redir>) {
+		self.redir_queue.extend(redirs);
+	}
+	pub fn push_redir(&mut self,redir: utils::Redir) {
+		self.redir_queue.push_back(redir)
+	}
+	pub fn pop_redir(&mut self) -> Option<utils::Redir> {
+		self.redir_queue.pop_back()
+	}
+	pub fn take_redirs(&mut self) -> VecDeque<utils::Redir> {
+		take(&mut self.redir_queue)
+	}
+	pub fn consume_redirs(&mut self) -> utils::CmdRedirs {
+		utils::CmdRedirs::new(self.take_redirs())
+	}
+	pub fn activate_redirs(&mut self) -> LashResult<()> {
+		let mut redirs = self.consume_redirs();
+		redirs.activate()
 	}
 }
 
@@ -189,7 +465,7 @@ impl<'a> ChildProc {
 	}
 	pub fn kill(&self, signal: Signal) -> LashResult<()> {
 		kill(self.pid, Some(signal))
-			.map_err(|_| LashErr::Low(LashErrLow::from_io()))
+			.map_err(|_| Low(LashErrLow::from_io()))
 	}
 	pub fn is_alive(&self) -> bool {
 		matches!(self.status, WaitStatus::StillAlive)
@@ -356,7 +632,7 @@ impl Job {
 			_ => unimplemented!()
 		};
 		self.set_statuses(status);
-		killpg(self.pgid, Some(signal)).map_err(|_| LashErr::Low(LashErrLow::from_io()))?;
+		killpg(self.pgid, Some(signal)).map_err(|_| Low(LashErrLow::from_io()))?;
 		Ok(())
 	}
 	pub fn wait_pgrp<'a>(&mut self) -> LashResult<Vec<WaitStatus>> {
@@ -373,14 +649,11 @@ impl Job {
 					break;
 				}
 				Err(_) => {
-					return Err(LashErr::Low(LashErrLow::from_io()));
+					return Err(Low(LashErrLow::from_io()));
 				}
 			}
 		}
 
-		if let Some(status) = statuses.last() {
-			helper::set_last_status(status)?
-		}
 		Ok(statuses)
 	}
 	pub fn display(&self, job_order: &[usize], flags: JobCmdFlags) -> String {
@@ -776,7 +1049,7 @@ impl LashVal {
 			Self::Int(i) => {
 				self.operate(|_| Self::Int(i + 1))?
 			}
-			_ => return Err(LashErr::Low(LashErrLow::InternalErr("Expected an integer in increment call".into()))),
+			_ => return Err(Low(LashErrLow::InternalErr("Expected an integer in increment call".into()))),
 		}
 		Ok(())
 	}
@@ -786,7 +1059,7 @@ impl LashVal {
 			Self::Int(i) => {
 				self.operate(|_| Self::Int(i - 1))?
 			}
-			_ => return Err(LashErr::Low(LashErrLow::InternalErr("Expected an integer in decrement call".into()))),
+			_ => return Err(Low(LashErrLow::InternalErr("Expected an integer in decrement call".into()))),
 		}
 		Ok(())
 	}
@@ -796,7 +1069,7 @@ impl LashVal {
 			LashVal::String(ref mut word) => {
 				*word = format!("{}{}",word,val);
 			}
-			_ => return Err(LashErr::Low(LashErrLow::InternalErr("Expected an array in append call".into()))),
+			_ => return Err(Low(LashErrLow::InternalErr("Expected an array in append call".into()))),
 		}
 		Ok(())
 	}
@@ -806,7 +1079,7 @@ impl LashVal {
 			LashVal::Array(ref mut arr) => {
 				arr.push(val);
 			}
-			_ => return Err(LashErr::Low(LashErrLow::InternalErr("Expected an array in append call".into()))),
+			_ => return Err(Low(LashErrLow::InternalErr("Expected an array in append call".into()))),
 		}
 		Ok(())
 	}
@@ -816,7 +1089,7 @@ impl LashVal {
 			LashVal::Array(ref mut arr) => {
 				Ok(arr.pop())
 			}
-			_ => return Err(LashErr::Low(LashErrLow::InternalErr("Expected an array in pop call".into()))),
+			_ => return Err(Low(LashErrLow::InternalErr("Expected an array in pop call".into()))),
 		}
 	}
 
@@ -873,7 +1146,7 @@ impl LashVal {
 			map.insert(key,val);
 			Ok(())
 		} else {
-			Err(LashErr::Low(LashErrLow::InternalErr("Called try_insert() on a non-dict LashVal".into())))
+			Err(Low(LashErrLow::InternalErr("Called try_insert() on a non-dict LashVal".into())))
 		}
 	}
 
@@ -881,7 +1154,7 @@ impl LashVal {
 		if let LashVal::Dict(map) = self {
 			Ok(map.get(key))
 		} else {
-			Err(LashErr::Low(LashErrLow::InternalErr("Called try_get() on a non-dict LashVal".into())))
+			Err(Low(LashErrLow::InternalErr("Called try_get() on a non-dict LashVal".into())))
 		}
 	}
 
@@ -889,7 +1162,7 @@ impl LashVal {
 		if let LashVal::Dict(map) = self {
 			Ok(map.get_mut(key))
 		} else {
-			Err(LashErr::Low(LashErrLow::InternalErr("Called try_get_mut() on a non-dict LashVal".into())))
+			Err(Low(LashErrLow::InternalErr("Called try_get_mut() on a non-dict LashVal".into())))
 		}
 	}
 
@@ -897,7 +1170,7 @@ impl LashVal {
 		if let LashVal::Dict(map) = self {
 			Ok(map.remove(key))
 		} else {
-			Err(LashErr::Low(LashErrLow::InternalErr("Called try_remove() on a non-dict LashVal".into())))
+			Err(Low(LashErrLow::InternalErr("Called try_remove() on a non-dict LashVal".into())))
 		}
 	}
 }
@@ -943,8 +1216,7 @@ pub struct VarTable {
 }
 
 impl VarTable {
-	pub fn new() -> Self {
-		let env = init_env_vars(false);
+	pub fn new(env: HashMap<String,String>) -> Self {
 		Self {
 			env,
 			params: HashMap::new(),
@@ -992,20 +1264,17 @@ impl VarTable {
 	}
 	pub fn pos_param_popfront(&mut self) -> Option<String> {
 		let popped_param = self.pos_params.pop_front();
-		self.set_param("@".into(), self.pos_params.clone().to_vec().join(" "));
-		self.set_param("#".into(), self.pos_params.len().to_string());
+		self.set_param("@".into(), &self.pos_params.clone().to_vec().join(" "));
+		self.set_param("#".into(), &self.pos_params.len().to_string());
 		popped_param
 	}
 	pub fn pos_param_pushback(&mut self, param: &str) {
 		self.pos_params.push_back(param.to_string());
-		self.set_param("@".into(), self.pos_params.clone().to_vec().join(" "));
-		self.set_param("#".into(), self.pos_params.len().to_string());
+		self.set_param("@".into(), &self.pos_params.clone().to_vec().join(" "));
+		self.set_param("#".into(), &self.pos_params.len().to_string());
 	}
-	pub fn set_param(&mut self, key: String, value: String) {
-		// Set the individual parameter as well
-		if &key == "?" {
-		}
-		self.params.insert(key, value);
+	pub fn set_param(&mut self, key: &str, value: &str) {
+		self.params.insert(key.into(), value.into());
 	}
 	pub fn reset_params(&mut self) {
 		self.params.clear();
@@ -1041,20 +1310,14 @@ impl VarTable {
 				if let Some(value) = arr.get(index) {
 					Ok(value.clone())
 				} else {
-					Err(LashErr::Low(LashErrLow::ExecFailed(format!("Index `{}` out of range for array `{}`",index,key))))
+					Err(Low(LashErrLow::ExecFailed(format!("Index `{}` out of range for array `{}`",index,key))))
 				}
 			} else {
-				Err(LashErr::Low(LashErrLow::ExecFailed(format!("{} is not an array",key))))
+				Err(Low(LashErrLow::ExecFailed(format!("{} is not an array",key))))
 			}
 		} else {
-			Err(LashErr::Low(LashErrLow::ExecFailed(format!("{} is not a variable",key))))
+			Err(Low(LashErrLow::ExecFailed(format!("{} is not a variable",key))))
 		}
-	}
-}
-
-impl Default for VarTable {
-	fn default() -> Self {
-		Self::new()
 	}
 }
 
@@ -1129,16 +1392,6 @@ impl EnvMeta {
 			in_prompt,
 		}
 	}
-	pub fn stop_timer(&mut self) -> LashResult<()> {
-		if let Some(start_time) = self.timer_start {
-			self.cmd_duration = Some(start_time.elapsed());
-			write_vars(|v| v.export_var("OX_CMD_TIME", &self.cmd_duration.unwrap().as_millis().to_string()))?;
-		}
-		Ok(())
-	}
-	pub fn start_timer(&mut self) {
-		self.timer_start = Some(Instant::now())
-	}
 	pub fn get_cmd_duration(&self) -> Option<Duration> {
 		self.cmd_duration
 	}
@@ -1197,16 +1450,6 @@ impl EnvMeta {
 	}
 }
 
-pub fn change_dir(path: &Path) -> LashResult<()> {
-	write_vars(|v| v.export_var("OLDPWD", &env::var("PWD").unwrap_or_default()))?;
-	write_vars(|v| v.export_var("PWD", path.to_str().unwrap()))?;
-	env::set_current_dir(path)?;
-	Ok(())
-}
-
-pub fn set_code(code: isize) -> LashResult<()> {
-	write_vars(|v| v.set_param("?".into(), code.to_string()))
-}
 
 pub fn disable_reaping() {
 	unsafe { signal(Signal::SIGCHLD, SigHandler::Handler(crate::signal::ignore_sigchld)) }.unwrap();
@@ -1220,55 +1463,21 @@ pub fn enable_reaping<'a>() -> LashResult<()> {
 
 pub fn read_jobs<'a,F,T>(f: F) -> LashResult<T>
 where F: FnOnce(&JobTable) -> T {
-	let lock = JOBS.read().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
+	let lock = JOBS.read().map_err(|_| Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
 	Ok(f(&lock))
 }
 
 pub fn write_jobs<'a,F,T>(f: F) -> LashResult<T>
 where F: FnOnce(&mut JobTable) -> T {
-	let mut lock = JOBS.write().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
+	let mut lock = JOBS.write().map_err(|_| Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
 	Ok(f(&mut lock))
 }
 
-pub fn read_vars<'a,F,T>(f: F) -> LashResult<T>
-where F: FnOnce(&VarTable) -> T {
-	let lock = VARS.read().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
-	Ok(f(&lock))
-}
-pub fn write_vars<'a,F,T>(f: F) -> LashResult<T>
-where F: FnOnce(&mut VarTable) -> T {
-	let mut lock = VARS.write().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
-	Ok(f(&mut lock))
-}
-pub fn read_logic<'a,F,T>(f: F) -> LashResult<T>
-where F: FnOnce(&LogicTable) -> T {
-	let lock = LOGIC.read().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
-	Ok(f(&lock))
-}
-pub fn write_logic<'a,F,T>(f: F) -> LashResult<T>
-where F: FnOnce(&mut LogicTable) -> T {
-	let mut lock = LOGIC.write().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
-	Ok(f(&mut lock))
-}
-pub fn read_meta<'a,F,T>(f: F) -> LashResult<T>
-where F: FnOnce(&EnvMeta) -> T {
-	let lock = META.read().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
-	Ok(f(&lock))
-}
-pub fn write_meta<'a,F,T>(f: F) -> LashResult<T>
-where F: FnOnce(&mut EnvMeta) -> T {
-	let mut lock = META.write().map_err(|_| LashErr::Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
-	Ok(f(&mut lock))
-}
 pub fn attach_tty<'a>(pgid: Pid) -> LashResult<()> {
 
 
 	// Ensure stdin (fd 0) is a tty before proceeding
-	if !isatty(0).unwrap_or(false) {
-		return Ok(())
-	}
-
-	if pgid == getpgrp() && read_meta(|m| m.flags().contains(EnvFlags::IN_SUBSH))? {
+	if !isatty(0).unwrap_or(false) || pgid == term_controller() {
 		return Ok(())
 	}
 
@@ -1287,6 +1496,7 @@ pub fn attach_tty<'a>(pgid: Pid) -> LashResult<()> {
 	nix::sys::signal::pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&mut new_mask), Some(&mut mask_backup))
 		.map_err(|_| io::Error::last_os_error())?;
 
+	eprintln!("attaching pgid `{}' to the tty",pgid);
 	if unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) == Ok(pgid) } {
 		return Ok(())
 	}
@@ -1302,7 +1512,7 @@ pub fn attach_tty<'a>(pgid: Pid) -> LashResult<()> {
 		Ok(_) => Ok(()),
 		Err(_) => {
 			// Something weird has probably happened - let's take back the terminal
-			unsafe { tcsetpgrp(BorrowedFd::borrow_raw(1), getpgrp()).ok(); }
+			unsafe { tcsetpgrp(BorrowedFd::borrow_raw(0), getpgrp()).ok(); }
 			Ok(())
 		}
 	}
@@ -1310,134 +1520,4 @@ pub fn attach_tty<'a>(pgid: Pid) -> LashResult<()> {
 
 pub fn term_controller() -> Pid {
 	unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) }.unwrap_or(getpgrp())
-}
-
-pub fn in_pipe() -> LashResult<bool> {
-	read_meta(|m| m.flags().contains(EnvFlags::IN_SUB_PROC))
-}
-
-pub struct SavedEnv {
-	vars: VarTable,
-	logic: LogicTable,
-	meta: EnvMeta
-}
-
-impl SavedEnv {
-	pub fn get_snapshot<'a>() -> LashResult<Self> {
-		let vars = read_vars(|vars| vars.clone())?;
-		let logic = read_logic(|log| log.clone())?;
-		let meta = read_meta(|meta| meta.clone())?;
-		Ok(Self { vars, logic, meta })
-	}
-	pub fn restore_snapshot<'a>(self) -> LashResult<()> {
-		write_vars(|vars| *vars = self.vars)?;
-		write_logic(|log| *log = self.logic)?;
-		write_meta(|meta| *meta = self.meta)?;
-		Ok(())
-	}
-}
-
-fn init_env_vars(clean: bool) -> HashMap<String,String> {
-	let pathbuf_to_string = |pb: Result<PathBuf, std::io::Error>| pb.unwrap_or_default().to_string_lossy().to_string();
-	// First, inherit any env vars from the parent process if clean bit not set
-	let mut env_vars = HashMap::new();
-	if !clean {
-		env_vars = std::env::vars().collect::<HashMap<String,String>>();
-	}
-	let term = {
-		if isatty(1).unwrap() {
-			if let Ok(term) = std::env::var("TERM") {
-				term
-			} else {
-				"linux".to_string()
-			}
-		} else {
-			"xterm-256color".to_string()
-		}
-	};
-	let home;
-	let username;
-	let uid;
-	if let Some(user) = User::from_uid(nix::unistd::Uid::current()).ok().flatten() {
-		home = user.dir;
-		username = user.name;
-		uid = user.uid;
-	} else {
-		home = PathBuf::new();
-		username = "unknown".into();
-		uid = 0.into();
-	}
-	let home = pathbuf_to_string(Ok(home));
-	let hostname = gethostname().map(|hname| hname.to_string_lossy().to_string()).unwrap_or_default();
-
-	env_vars.insert("HOSTNAME".into(), hostname.clone());
-	env::set_var("HOSTNAME", hostname);
-	env_vars.insert("UID".into(), uid.to_string());
-	env::set_var("UID", uid.to_string());
-	env_vars.insert("TMPDIR".into(), "/tmp".into());
-	env::set_var("TMPDIR", "/tmp");
-	env_vars.insert("TERM".into(), term.clone());
-	env::set_var("TERM", term);
-	env_vars.insert("LANG".into(), "en_US.UTF-8".into());
-	env::set_var("LANG", "en_US.UTF-8");
-	env_vars.insert("USER".into(), username.clone());
-	env::set_var("USER", username.clone());
-	env_vars.insert("LOGNAME".into(), username.clone());
-	env::set_var("LOGNAME", username);
-	env_vars.insert("PWD".into(), pathbuf_to_string(std::env::current_dir()));
-	env::set_var("PWD", pathbuf_to_string(std::env::current_dir()));
-	env_vars.insert("OLDPWD".into(), pathbuf_to_string(std::env::current_dir()));
-	env::set_var("OLDPWD", pathbuf_to_string(std::env::current_dir()));
-	env_vars.insert("HOME".into(), home.clone());
-	env::set_var("HOME", home.clone());
-	env_vars.insert("SHELL".into(), pathbuf_to_string(std::env::current_exe()));
-	env::set_var("SHELL", pathbuf_to_string(std::env::current_exe()));
-	env_vars.insert("HIST_FILE".into(),format!("{}/.lash_hist",home));
-	env::set_var("HIST_FILE",format!("{}/.lash_hist",home));
-
-	env_vars
-}
-
-pub fn source_rc(path: Option<PathBuf>) -> LashResult<()> {
-	write_meta(|m| m.mod_flags(|f| *f |= EnvFlags::INITIALIZED))?;
-	let path = if let Some(path) = path {
-		path
-	} else {
-		let home = env::var("HOME").unwrap();
-		PathBuf::from(format!("{home}/.lashrc"))
-	};
-	if let Err(e) = source_file(path.to_str().unwrap()) {
-		set_code(1)?;
-		eprintln!("Failed to source lashrc: {}",e);
-	}
-	Ok(())
-}
-
-pub fn is_func(name: &str) -> LashResult<bool> {
-	let result = read_logic(|l| l.get_func(name))?.is_some();
-	Ok(result)
-}
-
-pub fn check_status<'a>() -> LashResult<String> {
-	Ok(read_vars(|v| v.get_param("?"))?.unwrap_or("0".into()))
-}
-
-pub fn get_cstring_evars<'a>() -> LashResult<Vec<CString>> {
-	let env = read_vars(|v| v.borrow_evars().clone())?;
-	let env = env.iter().map(|(k,v)| CString::new(format!("{}={}",k,v).as_str()).unwrap()).collect::<Vec<CString>>();
-	Ok(env)
-}
-
-pub fn source_file<'a>(path: &str) -> LashResult<()> {
-	let mut file = RustFd::std_open(&path)?;
-	let mut buffer = String::new();
-	file.read_to_string(&mut buffer).map_err(|_| LashErr::Low(LashErrLow::from_io()))?;
-	write_meta(|meta| meta.set_last_input(&buffer.clone()))?;
-	write_meta(|m| m.flags |= EnvFlags::SOURCING)?;
-
-	let mut ctx = ExecCtx::new();
-	let result = exec_input(buffer, &mut ctx);
-	write_meta(|m| m.flags &= !EnvFlags::SOURCING)?;
-	file.close()?;
-	result
 }

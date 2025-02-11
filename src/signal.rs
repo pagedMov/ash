@@ -82,7 +82,6 @@ pub fn handle_child_signal<'a>(pid: Pid, sig: Signal) -> LashResult<()> {
 		if let Some(job) = j.query_mut(JobID::Pgid(pgid)) {
 			let child = job.get_children_mut().iter_mut().find(|chld| pid == chld.pid()).unwrap();
 			let status = WaitStatus::Signaled(pid, sig, false);
-			helper::set_last_status(&status).unwrap();
 			child.set_status(status);
 		}
 	})?;
@@ -98,7 +97,6 @@ pub fn handle_child_stop<'a>(pid: Pid, signal: Signal) -> LashResult<()> {
 		if let Some(job) = j.query_mut(JobID::Pgid(pgid)) {
 			let child = job.get_children_mut().iter_mut().find(|chld| pid == chld.pid()).unwrap();
 			let status = WaitStatus::Stopped(pid, signal);
-			helper::set_last_status(&status).unwrap();
 			child.set_status(status);
 		} else if j.get_fg_mut().is_some_and(|fg| fg.pgid() == pgid) {
 			j.fg_to_bg(WaitStatus::Stopped(pid, signal)).unwrap();
@@ -130,7 +128,6 @@ pub fn handle_child_exit<'a>(pid: Pid, status: WaitStatus) -> LashResult<()> {
 			let is_finished = !job.is_alive();
 
 			if let Some(child) = job.get_children_mut().iter_mut().find(|chld| pid == chld.pid()) {
-				helper::set_last_status(&status).unwrap();
 				child.set_status(status);
 			}
 

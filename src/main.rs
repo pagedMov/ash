@@ -1,14 +1,9 @@
-use std::{collections::VecDeque, env, path::PathBuf};
+use std::path::PathBuf;
 
-use clap::{Arg, ArgAction, Command, Parser as ClapParser};
-use error::{LashErr, LashErrExt, LashErrHigh, LashErrLow};
-use execute::{ExecCtx, ProcIO, Redir, RustFd, SavedIO};
-use expand::expand_list;
-use helper::StrExtension;
-use pair::{OptPairExt, PairExt};
-use pest::{iterators::{Pair, Pairs}, Parser, Span};
-use pest_derive::Parser as PestParser;
-use shellenv::{read_meta, write_meta, write_vars, EnvFlags};
+use clap::{ArgAction, Parser as ClapParser};
+use error::{LashErrExt, LashResult};
+use execute::dispatch;
+use shellenv::Lash;
 
 pub mod prompt;
 pub mod execute;
@@ -19,69 +14,10 @@ pub mod helper;
 pub mod signal;
 pub mod expand;
 pub mod builtin;
-pub mod comp;
-pub mod pair;
-
-
-pub type LashResult<T> = Result<T,error::LashErr>;
-
-#[derive(pest_derive::Parser)]
-#[grammar = "pest/lash_lang.pest"]
-pub struct LashParse;
-
-pub fn exec_input(mut input: String, ctx: &mut ExecCtx) -> LashResult<()> {
-	input = expand::expand_aliases(input, 0, vec![])?;
-	let mut lists = LashParse::parse(Rule::main, &input).map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?.next().unwrap().into_inner().collect::<VecDeque<_>>();
-	lists.pop_back();
-	// Chew through the input one list at a time
-	while let Some(list) = lists.pop_front() {
-		let mut cmds = list.into_inner();
-		while let Some(cmd) = cmds.next() {
-			if cmd.as_rule() == Rule::op {
-				let op = cmd.scry(&[Rule::and,Rule::or][..]).unpack()?;
-				match op.as_rule() {
-					Rule::and => {
-						if shellenv::check_status()? != "0" {
-							break
-						} else {
-							continue
-						}
-					}
-					Rule::or => {
-						if shellenv::check_status()? == "0" {
-							break
-						} else {
-							continue
-						}
-					}
-					_ => unreachable!()
-				}
-			}
-			let blame = cmd.clone();
-			let node_stack = VecDeque::from([cmd]);
-			helper::proc_res(execute::descend(node_stack, ctx), blame)?;
-		}
-	}
-	Ok(())
-}
-
-pub fn save_fds() -> LashResult<(RustFd,RustFd,RustFd)> {
-	Ok((
-		RustFd::from_stdin()?,
-		RustFd::from_stdout()?,
-		RustFd::from_stderr()?
-	))
-}
-
-pub fn restore_fds(mut stdio: (RustFd,RustFd,RustFd)) -> LashResult<()> {
-	stdio.0.dup2(&0)?;
-	stdio.0.close()?;
-	stdio.1.dup2(&1)?;
-	stdio.1.close()?;
-	stdio.2.dup2(&2)?;
-	stdio.2.close()?;
-	Ok(())
-}
+pub mod prelude;
+pub mod utils;
+pub mod script;
+pub mod pest_ext;
 
 
 #[derive(Debug,ClapParser)]
@@ -109,26 +45,30 @@ struct LashArgs {
 }
 
 fn main() {
-	let mut ctx = ExecCtx::new();
+
+	let mut lash = Lash::new(); // The shell environment
+
+	let args = LashArgs::parse();
+	if args.no_rc {
+		lash.vars_mut().export_var("PS1", "$> ");
+	}
+
+	if !args.no_rc {
+		lash.source_rc(args.rc_path).catch();
+	}
+
 	loop {
-		let is_initialized = read_meta(|m| m.flags().contains(EnvFlags::INITIALIZED)).catch();
-		let args = LashArgs::parse();
-		if args.no_rc {
-			env::set_var("PS1", "$> ");
-			write_vars(|v| v.export_var("PS1", "$> ")).catch();
-		}
-		if is_initialized == Some(false) && !args.no_rc {
-			shellenv::source_rc(args.rc_path).catch();
-		}
-		let input = prompt::run_prompt().catch().unwrap_or_default();
-		write_meta(|m| m.start_timer()).catch();
-		ctx.push_state().catch();
+		let input = prompt::prompt::run_prompt(&mut lash).catch().unwrap_or_default();
 
-		let saved_fds = save_fds().unwrap();
-		let result = exec_input(input, &mut ctx);
-		restore_fds(saved_fds).catch();
+		lash.start_timer();
+		lash.ctx_mut().push_state().catch();
+		let saved_fds = utils::save_fds().unwrap();
 
-		ctx.pop_state().catch();
+		let result = dispatch::exec_input(input, &mut lash);
+
+		utils::restore_fds(saved_fds).catch();
+		lash.ctx_mut().pop_state().catch();
+
 		match result {
 			Ok(_) => continue,
 			Err(e) => eprintln!("{}",e)
