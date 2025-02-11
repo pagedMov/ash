@@ -198,7 +198,6 @@ impl Lash {
 	pub fn source_file<'a>(&mut self, path: &str) -> LashResult<()> {
 		let mut file = utils::RustFd::std_open(&path)?;
 		let mut buffer = String::new();
-		dbg!("sourcing lashrc");
 		file.read_to_string(&mut buffer).map_err(|_| Low(LashErrLow::from_io()))?;
 		file.close()?;
 
@@ -1496,7 +1495,6 @@ pub fn attach_tty<'a>(pgid: Pid) -> LashResult<()> {
 	nix::sys::signal::pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&mut new_mask), Some(&mut mask_backup))
 		.map_err(|_| io::Error::last_os_error())?;
 
-	eprintln!("attaching pgid `{}' to the tty",pgid);
 	if unsafe { tcgetpgrp(BorrowedFd::borrow_raw(0)) == Ok(pgid) } {
 		return Ok(())
 	}
