@@ -66,6 +66,7 @@ impl<'a> LashHelper<'a> {
 }
 
 pub fn run_prompt(lash: &mut Lash) -> LashResult<String> {
+	lash.stop_timer()?;
 	lash.meta_mut().enter_prompt();
 
 	let hist_path = lash.borrow_vars().get_evar("HIST_FILE").unwrap_or_else(|| -> String {
@@ -82,7 +83,6 @@ pub fn run_prompt(lash: &mut Lash) -> LashResult<String> {
 
 	let mut lash_clone = lash.clone();
 	let mut rl = rl_init::init_prompt(&mut lash_clone)?;
-	lash.stop_timer()?;
 	match rl.readline(&prompt) {
 		Ok(line) => {
 			lash.meta_mut().leave_prompt();

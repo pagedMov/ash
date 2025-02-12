@@ -73,7 +73,7 @@ pub fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, lash: &mut Lash) -> LashResult
 						.with_children(children)
 						.build();
 
-					helper::handle_fg(job)?;
+					helper::handle_fg(lash,job)?;
 				}
 			}
 			Err(e) => return Err(High(LashErrHigh::exec_err("Command in pipeline failed", blame)))

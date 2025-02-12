@@ -232,6 +232,7 @@ shell_cmd  =  {
     (for_cmd | match_cmd | loop_cmd | if_cmd | subshell | brace_grp | assignment | func_def) ~ redir*
 }
 
+
 subshebang = @{ "#!" ~ (!NEWLINE ~ ANY)+ ~ NEWLINE }
 subsh_body = @{ (nested | non_paren)+ }
 nested     = _{ "(" ~ subsh_body* ~ ")"? }
@@ -241,26 +242,26 @@ proc_sub   =  { (in | out) ~ "(" ~ subsh_body ~ ")" }
 
 if_cond   = { cmd_list }
 loop_cond = { cmd_list }
-if_body   = { (!(fi | elif | else) ~ cmd_list ~ sep)+ }
-loop_body = { (!done ~ cmd_list ~ sep)+ }
+if_body   = { (!("fi" | "elif" | "else") ~ cmd_list ~ sep)+ }
+loop_body = { (!"done" ~ cmd_list ~ sep)+ }
 
-loop_kind = { while | until }
-loop_cmd  = { loop_kind ~ NEWLINE* ~ loop_cond ~ sep ~ do ~ NEWLINE* ~ loop_body ~ done }
+loop_kind = { "while" | "until" }
+loop_cmd  = { loop_kind ~ NEWLINE* ~ loop_cond ~ sep ~ "do" ~ NEWLINE* ~ loop_body ~ "done" }
 
-for_vars = { (!in ~ word ~ NEWLINE*)+ }
+for_vars = { (!"in" ~ word ~ NEWLINE*)+ }
 for_arr  = { (word ~ NEWLINE*)+ }
-for_cmd  = { for ~ NEWLINE* ~ for_vars ~ in ~ NEWLINE* ~ for_arr+ ~ sep ~ do ~ NEWLINE* ~ loop_body ~ NEWLINE* ~ done }
+for_cmd  = { "for" ~ NEWLINE* ~ for_vars ~ in ~ NEWLINE* ~ for_arr+ ~ sep ~ "do" ~ NEWLINE* ~ loop_body ~ NEWLINE* ~ "done" ~ word_bound }
 
 match_pat  = { (!"=>" ~ word)+ }
 match_body = { (brace_grp ~ ","? | (!"," ~ ANY)+ ~ ",") }
 match_arm  = { match_pat ~ "=>" ~ NEWLINE* ~ match_body }
 match_cmd  = {
-    match ~ NEWLINE* ~ word ~ NEWLINE* ~ in ~ NEWLINE* ~ match_arm ~ (NEWLINE* ~ match_arm)* ~ NEWLINE* ~ done
+		"match" ~ NEWLINE* ~ word ~ NEWLINE* ~ in ~ NEWLINE* ~ match_arm ~ (NEWLINE* ~ match_arm)* ~ NEWLINE* ~ "done" ~ word_bound
 }
 
-if_cmd     = { if ~ NEWLINE* ~ if_cond ~ sep ~ then ~ NEWLINE* ~ if_body ~ elif_block* ~ else_block? ~ fi }
-elif_block = { elif ~ NEWLINE* ~ if_cond ~ sep ~ then ~ NEWLINE* ~ if_body }
-else_block = { else ~ NEWLINE* ~ (!(fi) ~ #else_body = cmd_list ~ sep)+ }
+if_cmd     = { "if" ~ NEWLINE* ~ if_cond ~ sep ~ "then" ~ NEWLINE* ~ if_body ~ elif_block* ~ else_block? ~ "fi" ~ word_bound }
+elif_block = { "elif" ~ NEWLINE* ~ if_cond ~ sep ~ "then" ~ NEWLINE* ~ if_body }
+else_block = { "else" ~ NEWLINE* ~ (!("fi") ~ #else_body = cmd_list ~ sep)+ }
 
 // Operator stuff
 and = { "&&" }

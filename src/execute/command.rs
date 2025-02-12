@@ -39,7 +39,7 @@ pub fn exec_cmd<'a>(cmd: Pair<Rule>, lash: &mut Lash) -> LashResult<()> {
 			utils::exec_external(command, argv, envp, blame);
 		}
 		Ok(ForkResult::Parent { child }) => {
-			utils::handle_parent_process(child, command.to_str().unwrap().to_string())?;
+			utils::handle_parent_process(child, command.to_str().unwrap().to_string(),lash)?;
 		}
 		Err(_) => todo!()
 	}

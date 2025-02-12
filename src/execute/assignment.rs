@@ -1,4 +1,4 @@
-use crate::{error::LashErr::*, helper, prelude::*, shellenv::LashVal};
+use crate::{error::LashErr::*, expand, helper, prelude::*, shellenv::LashVal};
 
 use super::dispatch;
 
@@ -32,7 +32,7 @@ pub fn exec_assignment<'a>(ass: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()
 				if let LashVal::Int(lhs) = var_val.unwrap() {
 					if let LashVal::Int(rhs) = rhs {
 						let value = LashVal::Int(lhs + rhs);
-						vars.set_var(&var_name, LashVal::Int(lhs + rhs));
+						vars.set_var(&var_name, value);
 					} else {
 						let msg = "The right side of this assignment is invalid; expected an integer";
 						return Err(High(LashErrHigh::syntax_err(msg, blame)))
@@ -67,8 +67,7 @@ pub fn exec_assignment<'a>(ass: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()
 			}
 		}
 		Rule::std_assign => {
-			let val = LashVal::parse(ass.scry(Rule::word).unpack()?.as_str())?;
-			vars.set_var(&var_name, val.clone());
+			vars.set_var(&var_name, LashVal::parse(&val.clone())?);
 		}
 		Rule::cmd_list => {}
 		_ => unreachable!()

@@ -1,7 +1,10 @@
+use libc::{S_IRGRP, S_IROTH, S_IRUSR, S_IWUSR};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
 use crate::{helper, prelude::*, shellenv::{ChildProc, JobBuilder}};
+
+pub const SIG_EXIT_OFFSET: i32 = 128;
 
 pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
 	let mut regex = HashMap::new();
@@ -43,6 +46,7 @@ bitflags::bitflags! {
 		const NO_FORK    = 0b00000000000000000000000000000001;
 		const BACKGROUND = 0b00000000000000000000000000000010;
 		const IN_PIPE    = 0b00000000000000000000000000000100;
+		const IGN_FUNC   = 0b00000000000000000000000000001000;
 	}
 }
 
@@ -161,7 +165,12 @@ impl CmdRedirs {
 				Rule::append => O_WRONLY | O_CREAT | O_APPEND,
 				_ => unreachable!(),
 			};
-			let mut file_fd = RustFd::open(path.to_str().unwrap(), flags as u32)?;
+			let mode: mode_t = if flags & O_CREAT != 0 {
+				S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH
+			} else {
+				0
+			};
+			let mut file_fd = RustFd::open(path.to_str().unwrap(), flags as u32, Some(mode))?;
 			file_fd.dup2(&src_fd)?;
 			file_fd.close()?;
 			self.open_fds.push(src_fd);
@@ -449,10 +458,10 @@ impl<'a> RustFd {
 	}
 
 	/// Open a file using a file descriptor, with the given OFlags and Mode bits
-	pub fn open(path: &str, mode: mode_t) -> io::Result<Self> {
+	pub fn open(path: &str, oflags: mode_t, mode: Option<mode_t>) -> io::Result<Self> {
 		let c_path = CString::new(path)
 			.map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid path: {}", e)))?;
-		let file_fd = unsafe { libc::open(c_path.as_ptr(), mode as i32) };
+		let file_fd = unsafe { libc::open(c_path.as_ptr(), oflags as i32, mode.unwrap_or(0) as i32) };
 		if file_fd < 0 {
 			return Err(io::Error::last_os_error())
 		}
@@ -461,7 +470,7 @@ impl<'a> RustFd {
 
 	pub fn std_open(path: &str) -> io::Result<Self> {
 		let mode: u32 = 0o644 | O_RDWR as u32;
-		Self::open(path, mode)
+		Self::open(path, mode, None)
 	}
 
 	pub fn close(&mut self) -> io::Result<()> {
@@ -500,14 +509,6 @@ impl AsRawFd for RustFd {
 	}
 }
 
-impl IntoRawFd for RustFd {
-	fn into_raw_fd(self) -> RawFd {
-		let fd = self.fd;
-		std::mem::forget(self);
-		fd
-	}
-}
-
 impl FromRawFd for RustFd {
 	unsafe fn from_raw_fd(fd: RawFd) -> Self {
 		RustFd { fd }
@@ -530,7 +531,7 @@ pub fn exec_external(command: CString, argv: Vec<CString>, envp: Vec<CString>,bl
 	std::process::exit(e as i32)
 }
 
-pub fn handle_parent_process<'a>(child: Pid, command: String) -> LashResult<()> {
+pub fn handle_parent_process<'a>(child: Pid, command: String, lash: &mut Lash) -> LashResult<()> {
 	let children = vec![
 		ChildProc::new(child, Some(&command), None)?
 	];
@@ -539,7 +540,7 @@ pub fn handle_parent_process<'a>(child: Pid, command: String) -> LashResult<()> 
 		.with_pgid(child)
 		.build();
 
-	helper::handle_fg(job)?;
+	helper::handle_fg(lash,job)?;
 	Ok(())
 }
 

@@ -97,7 +97,7 @@ pub fn execute<'a>(echo_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> 
 			if lash.borrow_ctx().flags().contains(utils::ExecFlags::BACKGROUND) {
 				write_jobs(|j| j.insert_job(job,false))??;
 			} else {
-				helper::handle_fg(job)?;
+				helper::handle_fg(lash,job)?;
 			}
 		}
 		Err(_) => return Err(High(LashErrHigh::exec_err("Failed to fork in echo()", blame)))

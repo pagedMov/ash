@@ -58,7 +58,7 @@ fn handle_external_subshell(script: String, argv: VecDeque<String>, lash: &mut L
 				.with_pgid(child)
 				.with_children(children)
 				.build();
-			helper::handle_fg(job)?;
+			helper::handle_fg(lash,job)?;
 		}
 		Err(e) => panic!("Encountered fork error: {}",e)
 	}

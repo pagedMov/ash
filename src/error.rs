@@ -27,7 +27,7 @@ impl<T> LashErrExt<T> for Result<T,LashErr> {
 /// These error types represent different stages of the lash error reporting mechanism
 /// A low error is thrown in deep contexts where there is no token to blame.
 /// A high error is created when a low error is caught in a context where there is a token to blame.
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum LashErr {
 	Low(LashErrLow),
 	High(LashErrHigh)
@@ -95,10 +95,10 @@ impl Display for LashErrLow {
 			LashErrLow::ExecFailed(msg) => write!(f,"Execution Failed: {}",msg),
 			LashErrLow::CmdNotFound(name) => write!(f,"Command not found: {}",name),
 			LashErrLow::BadPermission(name) => write!(f,"Permission denied: {}",name),
-			LashErrLow::CleanExit(_) |
-			LashErrLow::FuncReturn(_) |
-			LashErrLow::LoopCont |
-			LashErrLow::LoopBreak(_) => write!(f, ""),
+			LashErrLow::FuncReturn(_) => write!(f, "Found return outside of function"),
+			LashErrLow::LoopCont => write!(f, "Found continue outside of loop"),
+			LashErrLow::LoopBreak(_) => write!(f, "Found break outside of loop"),
+			LashErrLow::CleanExit(_) => write!(f, ""),
 		}
 	}
 }
@@ -157,4 +157,10 @@ impl LashErrHigh {
 	pub fn get_err(&self) -> &LashErrLow {
 		&self.low_err
 	}
+}
+
+pub fn infer_parse_err(input: &str, err: pest::error::Error<Rule>) -> String {
+	let mut err_msg = err.to_string();
+
+	err_msg
 }

@@ -31,27 +31,11 @@ pub fn exec_func(cmd: Pair<Rule>,lash: &mut Lash) -> LashResult<()> {
 	let result = dispatch::exec_input(body, lash);
 	*lash = snapshot;
 
-	// Let's check to see if the function was cut by the return command
-	match &result {
-		Ok(()) => {
-			lash.set_code(0);
-			Ok(())
-		}
-		Err(e) => {
-			match e {
-				High(high) => Err(High(high.clone())),
-				Low(low) => {
-					match low {
-						LashErrLow::FuncReturn(code) => {
-							lash.set_code(*code);
-							Ok(())
-						}
-						_ => {
-							helper::proc_res(result,blame)
-						}
-					}
-				}
-			}
-		}
+	let code = helper::extract_return(&result);
+	if let Ok(code) = code {
+		lash.set_code(code);
+		Ok(())
+	} else {
+		result
 	}
 }

@@ -147,7 +147,15 @@ impl Lash {
 	pub fn get_status(&self) -> i32 {
 		self.vars.get_param("?").map(|c| c.parse::<i32>().unwrap()).unwrap_or(0)
 	}
+	#[track_caller]
 	pub fn set_code(&mut self, code: i32) {
+		//dbg!(code);
+		//let call_info = std::panic::Location::caller();
+		//let file = call_info.file();
+		//let line = call_info.line();
+		//let col = call_info.column();
+		//eprintln!("called set code from file: {file}, on line {line} col {col}");
+
 		self.vars.set_param("?", &code.to_string())
 	}
 	pub fn in_pipe(&self) -> bool {
@@ -769,10 +777,10 @@ impl JobTable {
 			None
 		}
 	}
-	pub fn bg_to_fg(&mut self, id: JobID) -> LashResult<()> {
+	pub fn bg_to_fg(&mut self,lash: &mut Lash, id: JobID) -> LashResult<()> {
 		let job = self.remove_job(id);
 		if let Some(job) = job {
-			helper::handle_fg(job)?;
+			helper::handle_fg(lash,job)?;
 		}
 		Ok(())
 	}

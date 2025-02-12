@@ -683,28 +683,56 @@ pub fn unset_var_conflicts(lash: &mut Lash,key: &str) -> LashResult<()> {
 	Ok(())
 }
 
-pub fn handle_fg(job: Job) -> LashResult<()> {
+pub fn handle_fg(lash: &mut Lash, job: Job) -> LashResult<()> {
+	let mut code = 0;
 	attach_tty(job.pgid())?;
 	disable_reaping();
 	let statuses = write_jobs(|j| j.new_fg(job))??;
 	for status in statuses {
 		match status {
+			WaitStatus::Exited(_, exit_code) => {
+				code = exit_code;
+			}
 			WaitStatus::Stopped(pid, sig) => {
-				attach_tty(getpgrp())?;
-				crate::signal::handle_child_stop(pid, sig)?
+				crate::signal::handle_child_stop(pid, sig)?;
+				code = utils::SIG_EXIT_OFFSET + sig as i32;
 			},
 			WaitStatus::Signaled(pid, sig, _) => {
-				attach_tty(getpgrp())?;
-				crate::signal::handle_child_signal(pid, sig)?
+				crate::signal::handle_child_signal(pid, sig)?;
+				code = utils::SIG_EXIT_OFFSET + sig as i32;
 			},
 			_ => { /* Do nothing */ }
 		}
 	}
+	attach_tty(getpgrp())?;
+	lash.set_code(code);
 	write_jobs(|j| {
 		j.update_job_statuses().unwrap();
 		j.reset_fg();
 	})?;
 	enable_reaping()
+}
+
+pub fn extract_return<T>(result: &LashResult<T>) -> LashResult<i32> {
+	match result {
+		Ok(_) => Ok(0),
+		Err(err) => match err {
+			High(ref high) => match *high.get_err() {
+				LashErrLow::FuncReturn(code) |
+				LashErrLow::LoopBreak(code) => {
+					Ok(code)
+				}
+				_ => Err(err.clone())
+			}
+			Low(ref low) => match low {
+				LashErrLow::FuncReturn(code) |
+				LashErrLow::LoopBreak(code) => {
+					Ok(*code)
+				}
+				_ => Err(err.clone())
+			}
+		}
+	}
 }
 
 pub fn handle_prompt_visgroup(lash: &mut Lash,pair: Pair<Rule>) -> LashResult<String> {
