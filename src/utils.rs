@@ -25,6 +25,7 @@ pub static REGEX: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
 	regex.insert("operator",Regex::new(r"(?:&&|\|\||[><]=?|[|&])").unwrap());
 	regex.insert("cmdsep",Regex::new(r"^(?:\n|;)$").unwrap());
 	regex.insert("ident",Regex::new(r"^[\x20-\x7E]*$").unwrap());
+	regex.insert("glob_braces",Regex::new(r".*\[[A-Za-z0-9-_]+\].*").unwrap());
 	regex.insert("find_do",Regex::new(r"(?P<loop_cond>.*?)(?P<kw>[\n;]*\s*do\s+)$").unwrap());
 	regex.insert("find_done",Regex::new(r"(?P<loop_body>.*?)(?P<kw>[\n;]*\s*done(?:[\s;]*|\z))$").unwrap());
 	regex.insert("ansi",Regex::new(r"\x1B\[[0-9;]*m").unwrap());

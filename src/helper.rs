@@ -405,6 +405,9 @@ pub fn try_expansion<'a>(lash: &mut Lash,pair: Pair<'a,Rule>) -> LashResult<Stri
 
 pub fn try_glob(word: &str) -> VecDeque<String> {
 	let mut globs = VecDeque::new();
+	if !word.has_unescaped("*") && !word.has_unescaped("?") && !REGEX["glob_braces"].is_match(word) {
+		return globs
+	}
 	if let Ok(results) = glob::glob(word) {
 		for entry in results {
 			if let Ok(path) = entry {
