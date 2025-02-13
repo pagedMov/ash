@@ -179,9 +179,9 @@ pub fn rule_queue() -> Vec<Rule> {
 }
 
 pub fn expand_word<'a>(pair: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<String> {
-	let mut word = pair.as_str();
+	let word = pair.as_str();
 	let mut rule_queue = rule_queue();
-	let mut expansions = match LashParse::parse(Rule::expand_word_loud, word) {
+	let expansions = match LashParse::parse(Rule::expand_word_loud, word) {
 		Ok(mut parsed) => parsed.next().unwrap(),
 		Err(_) => return Ok(word.to_string())
 	};
@@ -192,19 +192,18 @@ pub fn expand_word<'a>(pair: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<Strin
 		while let Some(pair) = matches.pop_front() {
 			let span = pair.as_span();
 			let expanded = match rule {
-				Rule::var_sub => {
-					let var_name = &pair.as_str()[1..];
-					let result = lash.vars().get_var(var_name).unwrap_or_default().to_string();
-					result
-				}
+				Rule::cmd_sub => expand::cmdsub::expand_cmd_sub(pair,lash)?,
 				Rule::param_sub => {
 					let param_name = &pair.as_str()[1..];
 					let param = lash.vars().get_param(param_name).unwrap_or_default().to_string();
 					param
 				}
+				Rule::var_sub => {
+					let var_name = &pair.as_str()[1..];
+					let result = lash.vars().get_var(var_name).unwrap_or_default().to_string();
+					result
+				}
 				Rule::dquoted => expand::string::expand_string(pair,lash)?,
-				Rule::cmd_sub => expand::cmdsub::expand_cmd_sub(pair,lash)?,
-				Rule::brace_word => expand::brace::expand_brace(pair),
 				_ => unreachable!()
 			};
 			let exp = Expansion { expanded, span };
