@@ -921,7 +921,7 @@ impl JobTable {
 	pub fn reset_recents(&mut self) {
 		self.new_updates.clear()
 	}
-	pub fn print_jobs(&self, flags: &JobCmdFlags) {
+	pub fn print_jobs(&self, flags: &JobCmdFlags, mut fmt: impl Write) -> LashResult<()> {
 		let jobs = if flags.contains(JobCmdFlags::NEW_ONLY) {
 			&self.jobs
 				.iter()
@@ -945,8 +945,9 @@ impl JobTable {
 				continue;
 			}
 			// Print the job in the selected format
-			println!("{}", job.display(&self.order,*flags));
+			writeln!(fmt,"{}",job.display(&self.order,*flags))?;
 		}
+		Ok(())
 	}
 	pub fn update_job_statuses<'a>(&mut self) -> LashResult<()> {
 		for job in self.jobs.iter_mut().flatten() {

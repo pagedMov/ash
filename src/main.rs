@@ -1,8 +1,9 @@
-use std::path::PathBuf;
+use std::{os::fd::AsRawFd, path::PathBuf};
 
 use clap::{ArgAction, Parser as ClapParser};
 use error::{LashErr, LashErrExt, LashErrLow, LashResult};
 use execute::dispatch;
+use nix::{sys::termios::{self, LocalFlags, Termios}, unistd::isatty};
 use shellenv::Lash;
 
 pub mod prompt;
@@ -44,6 +45,24 @@ struct LashArgs {
 	command: Option<String>
 }
 
+fn set_termios() -> Option<Termios> {
+	if isatty(std::io::stdin().as_raw_fd()).unwrap() {
+		let mut termios = termios::tcgetattr(std::io::stdin()).unwrap();
+		termios.local_flags &= !LocalFlags::ECHOCTL;
+		termios::tcsetattr(std::io::stdin(), nix::sys::termios::SetArg::TCSANOW, &termios).unwrap();
+		Some(termios)
+	} else {
+		None
+	}
+}
+
+fn restore_termios(orig: &Option<Termios>) {
+	if let Some(termios) = orig {
+		let fd = std::io::stdin();
+		termios::tcsetattr(fd, termios::SetArg::TCSANOW, termios).unwrap();
+	}
+}
+
 fn main() {
 
 	let mut lash = Lash::new(); // The shell environment
@@ -57,6 +76,7 @@ fn main() {
 		lash.source_rc(args.rc_path).catch();
 	}
 
+	let termios = set_termios();
 	loop {
 		let input = prompt::prompt::run_prompt(&mut lash).catch().unwrap_or_default();
 
@@ -74,10 +94,12 @@ fn main() {
 			Err(e) => {
 				match e {
 					LashErr::Low(LashErrLow::CleanExit(code)) => {
+						restore_termios(&termios);
 						std::process::exit(code)
 					}
 					LashErr::High(ref high) => {
 						if let LashErrLow::CleanExit(code) = high.get_err() {
+							restore_termios(&termios);
 							std::process::exit(*code)
 						} else {
 							eprintln!("{}",e)

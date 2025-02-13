@@ -134,6 +134,9 @@ pub fn exec_builtin(cmd: Pair<Rule>, name: &str, lash: &mut Lash) -> LashResult<
 			}
 		}
 		"string" | "float" | "int" | "arr" | "bool" => builtin::assign::execute(cmd, lash)?,
+		"fg" => builtin::job::continue_job(cmd, lash, true)?,
+		"bg" => builtin::job::continue_job(cmd, lash, false)?,
+		"jobs" => builtin::job::jobs(cmd, lash)?,
 		"return" => builtin::control::func_return(cmd, lash)?,
 		"break" => builtin::control::loop_break(cmd, lash)?,
 		"continue" => builtin::control::loop_continue()?,

@@ -10,6 +10,7 @@ pub mod pwd;
 pub mod source;
 pub mod test;
 pub mod control;
+pub mod job;
 pub mod cmd_override;
 
 pub const BUILTINS: [&str; 43] = [
