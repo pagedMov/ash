@@ -463,7 +463,7 @@ shell_struct = {
 }
 
 glob_opt      = { !"\\?" ~ "?" }
-glob_wild     = { "\\*" ~ "*" }
+glob_wild     = { !"\\*" ~ "*" }
 hl_globs      = { glob_opt | glob_wild | glob_brackets }
 hl_glob       = { (loud_ident? ~ hl_globs+ ~ loud_ident?)+ }
 hl_brace_word = { loud_ident? ~ brace_expand+ ~ loud_ident? }

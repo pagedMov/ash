@@ -1,4 +1,4 @@
-use crate::{builtin::{self, BUILTINS}, expand, helper, prelude::*, script, utils::{ExecFlags, Redir}};
+use crate::{builtin::{self, BUILTINS}, error::LashErrExt, expand, helper, prelude::*, script, utils::{ExecFlags, Redir}};
 
 use super::{pipeline, command, func};
 
@@ -112,7 +112,7 @@ pub fn exec_input(mut input: String, lash: &mut Lash) -> LashResult<()> {
 			}
 			let blame = cmd.clone();
 			let node_stack = VecDeque::from([cmd]);
-			helper::proc_res(descend(node_stack, lash), blame)?;
+			descend(node_stack, lash).blame_no_overwrite(blame)?;
 		}
 	}
 	Ok(())
@@ -124,7 +124,7 @@ pub fn exec_builtin(cmd: Pair<Rule>, name: &str, lash: &mut Lash) -> LashResult<
 		"test" | "[" => {
 			let mut argv = helper::prepare_argv(cmd,lash)?;
 			argv.pop_front(); // Ignore the command name
-			let result = helper::proc_res(builtin::test::test(&mut argv, lash), blame)?;
+			let result = builtin::test::test(&mut argv, lash).blame(blame)?;
 			if result {
 				lash.set_code(0);
 				return Ok(())

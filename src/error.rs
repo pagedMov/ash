@@ -10,9 +10,44 @@ pub trait LashErrExt<T> {
 	/// Transforms a LashResult into an Option
 	/// If LashResult is an error, this function will display it before returning None
 	fn catch(self) -> Option<T>;
+	/// This method will transform the contained LashErr, if the result is an error
+	/// It takes a pair to blame the error on, if the contained error is LashErrLow,
+	/// then it will be converted to a LashErrHigh
+	/// If the contained error is LashErrHigh, the blamed pair will be replaced
+	fn blame(self, pair: Pair<Rule>) -> Result<T,LashErr>;
+	/// The same as blame(), though does not overwrite the contained pair in a LashErrHigh.
+	/// Will still transform a LashErrLow into a LashErrHigh
+	fn blame_no_overwrite(self, pair: Pair<Rule>) -> Result<T,LashErr>;
 }
 
 impl<T> LashErrExt<T> for Result<T,LashErr> {
+	fn blame(self, pair: Pair<Rule>) -> Result<T,LashErr> {
+		match self {
+			Ok(thing) => Ok(thing),
+			Err(err) => {
+				let new_err = match err {
+					Low(low) => LashErrHigh::blame(pair, low),
+					High(high) => {
+						let low = high.get_err();
+						LashErrHigh::blame(pair, low.clone())
+					}
+				};
+				Err(High(new_err))
+			}
+		}
+	}
+	fn blame_no_overwrite(self, pair: Pair<Rule>) -> Result<T,LashErr> {
+		match self {
+			Ok(thing) => Ok(thing),
+			Err(err) => {
+				let new_err = match err {
+					Low(low) => LashErrHigh::blame(pair, low),
+					High(high) => high
+				};
+				Err(High(new_err))
+			}
+		}
+	}
 	fn catch(self) -> Option<T> {
 		match self {
 			Err(err) => {
@@ -74,7 +109,6 @@ pub enum LashErrLow {
 	LoopCont,
 	LoopBreak(i32),
 }
-
 
 impl LashErrLow {
 	pub fn from_io() -> Self {

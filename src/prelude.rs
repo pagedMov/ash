@@ -100,6 +100,7 @@ pub use crate::{
 		VecDequeExtension,
 	},
 	error::{
+		LashErrExt,
 		LashResult,
 		LashErr::*,
 		LashErrLow,

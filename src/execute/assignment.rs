@@ -1,4 +1,4 @@
-use crate::{error::LashErr::*, expand, helper, prelude::*, shellenv::LashVal};
+use crate::{error::{LashErr::*, LashErrExt}, expand, helper, prelude::*, shellenv::LashVal};
 
 use super::dispatch;
 
@@ -17,12 +17,12 @@ pub fn exec_assignment<'a>(ass: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()
 	match assign_type.as_rule() {
 		Rule::increment => {
 			if let Some(val) = vars.get_var_mut(&var_name) {
-				helper::proc_res(val.increment(), blame)?;
+				val.increment().blame(blame)?;
 			}
 		}
 		Rule::decrement => {
 			if let Some(val) = vars.get_var_mut(&var_name) {
-				helper::proc_res(val.decrement(), blame)?;
+				val.decrement().blame(blame)?;
 			}
 		}
 		Rule::plus_assign => {

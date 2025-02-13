@@ -457,15 +457,17 @@ pub fn prepare_argv<'a>(pair: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<VecDe
 	let mut inner = pair.into_inner().filter(|pr| matches!(pr.as_rule(), Rule::cmd_name | Rule::arg_assign | Rule::word));
 	while let Some(pair) = inner.next() {
 		let word = pair.as_str().trim_quotes().to_string();
-		let words = VecDeque::from(vec![try_expansion(lash,pair)?]);
-		let words = try_glob(words);
-		let mut words = try_tilde(words);
-		if !words.is_empty() {
-			for word in words {
+		let expanded = VecDeque::from(vec![try_expansion(lash,pair)?]);
+		let expanded_ext = try_glob(expanded.clone());
+		let expanded_ext = try_tilde(expanded_ext);
+		if !expanded_ext.is_empty() {
+			for word in expanded_ext {
 				args.push_back(word.trim_quotes());
 			}
 		} else {
-			args.push_back(word.trim_quotes());
+			for word in expanded {
+				args.push_back(word.trim_quotes());
+			}
 		}
 	}
 	Ok(args)
