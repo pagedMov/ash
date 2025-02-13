@@ -174,8 +174,6 @@ pub fn rule_queue() -> Vec<Rule> {
 		Rule::cmd_sub,
 		Rule::param_sub,
 		Rule::var_sub,
-		Rule::tilde_sub,
-		Rule::brace_word,
 		Rule::dquoted
 	]
 }
@@ -206,7 +204,6 @@ pub fn expand_word<'a>(pair: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<Strin
 				}
 				Rule::dquoted => expand::string::expand_string(pair,lash)?,
 				Rule::cmd_sub => expand::cmdsub::expand_cmd_sub(pair,lash)?,
-				Rule::tilde_sub => expand::misc::expand_tilde(pair)?,
 				Rule::brace_word => expand::brace::expand_brace(pair),
 				_ => unreachable!()
 			};

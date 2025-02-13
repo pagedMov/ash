@@ -69,6 +69,7 @@ impl<'a> StringExt<'a> for String {
 }
 
 pub trait StrExtension {
+	fn as_pair_from_rule(&self, rule: Rule) -> Option<Pair<Rule>>;
 	fn replacen_ignore_ansi(&self, pat: &str, new: &str, num: usize) -> String;
 	fn fill_from(&self, other: &str) -> String;
 	fn trim_command_sub(&self) -> Option<String>;
@@ -85,6 +86,12 @@ pub trait StrExtension {
 }
 
 impl StrExtension for str {
+	fn as_pair_from_rule(&self, rule: Rule) -> Option<Pair<Rule>> {
+		match LashParse::parse(rule, self) {
+			Ok(mut pair) => Some(pair.next().unwrap()),
+			Err(_) => None
+		}
+	}
 	fn is_quoted(&self) -> bool {
 		(self.starts_with('"') && self.ends_with('"')) || (self.starts_with('\'') && self.ends_with('\''))
 	}
@@ -403,19 +410,40 @@ pub fn try_expansion<'a>(lash: &mut Lash,pair: Pair<'a,Rule>) -> LashResult<Stri
 	}
 }
 
-pub fn try_glob(word: &str) -> VecDeque<String> {
+pub fn try_glob(words: VecDeque<String>) -> VecDeque<String> {
 	let mut globs = VecDeque::new();
-	if !word.has_unescaped("*") && !word.has_unescaped("?") && !REGEX["glob_braces"].is_match(word) {
-		return globs
-	}
-	if let Ok(results) = glob::glob(word) {
-		for entry in results {
-			if let Ok(path) = entry {
-				globs.push_back(path.to_str().unwrap().to_string());
+	for word in &words {
+		if !word.has_unescaped("*") && !word.has_unescaped("?") && !REGEX["glob_braces"].is_match(&word) {
+			return words
+		}
+		if let Ok(results) = glob::glob(&word) {
+			for entry in results {
+				if let Ok(path) = entry {
+					globs.push_back(path.to_str().unwrap().to_string());
+				}
 			}
 		}
 	}
 	globs
+}
+
+pub fn try_tilde(words: VecDeque<String>) -> VecDeque<String> {
+	let mut expanded = VecDeque::new();
+	for word in &words {
+		if !word.starts_with('~') {
+			if let Some(pair) = word.as_pair_from_rule(Rule::arg_assign) {
+				let value = pair.scry(Rule::word).unwrap();
+				if !value.as_str().starts_with('~') {
+					return words
+				}
+			} else {
+				return words
+			}
+		}
+		let home = env::var("HOME").unwrap_or_default();
+		expanded.push_back(word.replacen("~", &home, 1).to_string());
+	}
+	expanded
 }
 
 pub fn try_brace(word: &str) -> VecDeque<String> {
@@ -428,10 +456,14 @@ pub fn prepare_argv<'a>(pair: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<VecDe
 	let mut args = VecDeque::new();
 	let mut inner = pair.into_inner().filter(|pr| matches!(pr.as_rule(), Rule::cmd_name | Rule::arg_assign | Rule::word));
 	while let Some(pair) = inner.next() {
-		let word = try_expansion(lash,pair)?;
-		let glob_results = try_glob(&word);
-		if !glob_results.is_empty() {
-			args.extend(glob_results);
+		let word = pair.as_str().trim_quotes().to_string();
+		let words = VecDeque::from(vec![try_expansion(lash,pair)?]);
+		let words = try_glob(words);
+		let mut words = try_tilde(words);
+		if !words.is_empty() {
+			for word in words {
+				args.push_back(word.trim_quotes());
+			}
 		} else {
 			args.push_back(word.trim_quotes());
 		}

@@ -3,6 +3,19 @@ use crate::{helper, prelude::*};
 pub fn expand_tilde(pair: Pair<Rule>) -> LashResult<String> {
 	debug_assert!(pair.as_rule() == Rule::tilde_sub, "Found this: {:?}",pair.as_rule());
 	let word = pair.as_str();
+	dbg!(&word);
+	if !word.starts_with('~') {
+		dbg!(&word);
+		if pair.as_rule() == Rule::arg_assign {
+			let value = pair.scry(Rule::word).unpack()?;
+			dbg!(&value);
+			if !value.as_str().starts_with('~') {
+				return Ok(word.to_string())
+			}
+		} else {
+			return Ok(word.to_string())
+		}
+	}
 	let home = env::var("HOME").unwrap_or_default();
 	Ok(word.replacen("~", &home, 1))
 }
