@@ -171,7 +171,6 @@ pub fn rule_pass<'a>(rule: Rule, buffer: String, lash: &mut Lash) -> LashResult<
 
 pub fn rule_queue() -> Vec<Rule> {
 	vec![
-		Rule::glob_word,
 		Rule::cmd_sub,
 		Rule::param_sub,
 		Rule::var_sub,
@@ -206,7 +205,6 @@ pub fn expand_word<'a>(pair: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<Strin
 					param
 				}
 				Rule::dquoted => expand::string::expand_string(pair,lash)?,
-				Rule::glob_word => expand::glob::expand_glob(pair),
 				Rule::cmd_sub => expand::cmdsub::expand_cmd_sub(pair,lash)?,
 				Rule::tilde_sub => expand::misc::expand_tilde(pair)?,
 				Rule::brace_word => expand::brace::expand_brace(pair),

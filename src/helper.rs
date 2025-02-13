@@ -403,20 +403,35 @@ pub fn try_expansion<'a>(lash: &mut Lash,pair: Pair<'a,Rule>) -> LashResult<Stri
 	}
 }
 
+pub fn try_glob(word: &str) -> VecDeque<String> {
+	let mut globs = VecDeque::new();
+	if let Ok(results) = glob::glob(word) {
+		for entry in results {
+			if let Ok(path) = entry {
+				globs.push_back(path.to_str().unwrap().to_string());
+			}
+		}
+	}
+	globs
+}
+
+pub fn try_brace(word: &str) -> VecDeque<String> {
+	// TODO: implement this
+	let mut unpacked = VecDeque::new();
+	unpacked
+}
+
 pub fn prepare_argv<'a>(pair: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<VecDeque<String>> {
 	let mut args = VecDeque::new();
 	let mut inner = pair.into_inner().filter(|pr| matches!(pr.as_rule(), Rule::cmd_name | Rule::arg_assign | Rule::word));
 	while let Some(pair) = inner.next() {
-		if pair.as_rule() == Rule::cmd_name {
-			match lash.logic().get_alias(pair.as_str()) {
-				Some(alias) => {
-
-				}
-				None => { /* Pass */ }
-			}
-		}
 		let word = try_expansion(lash,pair)?;
-		args.push_back(word.trim_quotes());
+		let glob_results = try_glob(&word);
+		if !glob_results.is_empty() {
+			args.extend(glob_results);
+		} else {
+			args.push_back(word.trim_quotes());
+		}
 	}
 	Ok(args)
 }

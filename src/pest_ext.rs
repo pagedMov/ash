@@ -169,8 +169,7 @@ arr_index       = @{ !"\\$" ~ "$" ~ var_ident ~ ("[" ~ (key | slice | index) ~ "
 cmd_sub         = @{ !"\\$" ~ "$(" ~ subsh_body ~ ")" }
 param_sub       = @{ !"\\$" ~ "$" ~ parameter }
 expansion       =  {
-    glob_word
-  | tilde_sub
+    tilde_sub
   | brace_word
   | var_sub
   | arr_index
@@ -201,7 +200,7 @@ ident              = _{
 	"[" |
     "]" |
     (("\\" ~ ANY) | // 'out' and 'in' refer to redir operators '>' and '<'
-  	(!out ~ !in ~ ASCII_ALPHANUMERIC | "\"" | "'" | "_" | "-" | "!" | "%" | "+" | "=" | "\\" | "/" | "," | "." | ":" | "@"))+
+  	(!out ~ !in ~ ASCII_ALPHANUMERIC | "\"" | "'" | "[" | "]" | "*" | "?" | "_" | "-" | "!" | "%" | "+" | "=" | "\\" | "/" | "," | "." | ":" | "@"))+
 }
 cmd_name           = @{ word }
 word               = ${
@@ -466,7 +465,7 @@ shell_struct = {
 glob_opt      = { !"\\?" ~ "?" }
 glob_wild     = { "\\*" ~ "*" }
 hl_globs      = { glob_opt | glob_wild | glob_brackets }
-hl_glob       = { loud_ident? ~ hl_globs+ ~ loud_ident? }
+hl_glob       = { (loud_ident? ~ hl_globs+ ~ loud_ident?)+ }
 hl_brace_word = { loud_ident? ~ brace_expand+ ~ loud_ident? }
 
 hl_brace_grp = { "{" ~ syntax_hl ~ "}" }

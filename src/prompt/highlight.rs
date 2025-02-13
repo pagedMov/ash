@@ -286,7 +286,11 @@ impl<'a> LashHighlighter<'a> {
 				continue
 			}
 
-			let sub_type = word_pair.clone().step(1);
+			let sub_type = if word_pair.as_rule() == Rule::hl_glob {
+				Some(word_pair.clone())
+			} else {
+				word_pair.clone().step(1)
+			};
 			if sub_type.clone().is_some_and(|pr| pr.as_rule() != Rule::tilde_sub) {
 				let sub_type = sub_type.unwrap();
 				let span = sub_type.as_span();
@@ -339,21 +343,24 @@ impl<'a> LashHighlighter<'a> {
 						buffer.replace_span(span, &proc_sub);
 					}
 					Rule::hl_glob => {
-						let glob_kind = sub_type.scry(Rule::hl_globs).unwrap().step(1).unwrap();
-						let glob_span = glob_kind.as_span();
-						match glob_kind.as_rule() {
-							Rule::glob_opt | Rule::glob_wild => {
-								let styled = self.style_text(KEYWORD,glob_kind.as_str());
-								buffer.replace_span(glob_span, &styled);
+						let mut globs = sub_type.filter(Rule::hl_globs);
+						while let Some(hl_glob) = globs.pop_back() {
+							let glob_span = hl_glob.as_span();
+							let glob = hl_glob.step(1).unwrap();
+							match glob.as_rule() {
+								Rule::glob_opt | Rule::glob_wild => {
+									let styled = self.style_text(KEYWORD,glob.as_str());
+									buffer.replace_span(glob_span, &styled);
+								}
+								Rule::glob_brackets => {
+									let body = glob.as_str().trim_matches(['[',']']);
+									let left_brack = format!("{}{}{}",KEYWORD,'[',RESET);
+									let right_brack = format!("{}{}{}",KEYWORD,']',RESET);
+									let rebuilt = format!("{left_brack}{body}{right_brack}");
+									buffer.replace_span(glob_span,&rebuilt);
+								}
+								_ => unreachable!("Unexpected rule: {:?}",sub_type.as_rule())
 							}
-							Rule::glob_brackets => {
-								let body = glob_kind.as_str().trim_matches(['[',']']);
-								let left_brack = format!("{}{}{}",KEYWORD,'[',RESET);
-								let right_brack = format!("{}{}{}",KEYWORD,']',RESET);
-								let rebuilt = format!("{left_brack}{body}{right_brack}");
-								buffer.replace_span(glob_span,&rebuilt);
-							}
-							_ => unreachable!("Unexpected rule: {:?}",sub_type.as_rule())
 						}
 					}
 					Rule::hl_brace_word => {
