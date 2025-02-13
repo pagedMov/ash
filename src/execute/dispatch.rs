@@ -6,7 +6,7 @@ pub fn dispatch_exec<'a>(node: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()>
 		match node.as_rule() {
 			Rule::simple_cmd => {
 				let command_name = node.clone().into_inner().find(|pair| pair.as_rule() == Rule::cmd_name).unpack()?.as_str();
-				if !lash.borrow_ctx().flags().contains(ExecFlags::IGN_FUNC) && lash.is_func(command_name)? {
+				if !lash.ctx().flags().contains(ExecFlags::IGN_FUNC) && lash.is_func(command_name)? {
 					func::exec_func(node,lash)?;
 				} else if BUILTINS.contains(&command_name) {
 					exec_builtin(node,command_name,lash)?;
@@ -141,6 +141,7 @@ pub fn exec_builtin(cmd: Pair<Rule>, name: &str, lash: &mut Lash) -> LashResult<
 		"source" => builtin::source::execute(cmd, lash)?,
 		"popd" => builtin::dir_stack::popd(cmd, lash)?,
 		"setopt" => builtin::opts::setopt(cmd, lash)?,
+		"getopt" => builtin::opts::getopt(cmd, lash)?,
 		"cd" => builtin::cd::execute(cmd, lash)?,
 		"alias" => builtin::alias::execute(cmd, lash)?,
 		"pwd" => builtin::pwd::execute(cmd, lash)?,

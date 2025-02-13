@@ -40,7 +40,7 @@ use super::*;
 		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
 
 		let external_var = env::var("VAR").unwrap();
-		let internal_var = lash.borrow_vars().get_evar("VAR").unwrap();
+		let internal_var = lash.vars().get_evar("VAR").unwrap();
 		assert_eq!(external_var, "foo bar".to_string());
 		assert_eq!(internal_var, "foo bar".to_string());
 	}

@@ -57,7 +57,7 @@ impl<'a> LashHighlighter<'a> {
 		if target.is_empty() || path.is_empty() {
 			return false
 		}
-		let logic = self.lash.borrow_logic().clone();
+		let logic = self.lash.logic().clone();
 		let is_cmd = path.split(':')
 			.map(Path::new)
 			.any(|p| p.join(target).exists());

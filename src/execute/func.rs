@@ -19,8 +19,8 @@ pub fn exec_func(cmd: Pair<Rule>,lash: &mut Lash) -> LashResult<()> {
 	let blame = cmd.clone();
 	let mut argv = helper::prepare_argv(cmd,lash)?;
 	let func_name = argv.pop_front().unwrap();
-	let body = lash.borrow_logic().get_func(&func_name).unwrap();
-	let mut var_table = lash.borrow_vars().clone();
+	let body = lash.logic().get_func(&func_name).unwrap();
+	let mut var_table = lash.vars().clone();
 	let snapshot = lash.clone();
 
 	var_table.reset_params();

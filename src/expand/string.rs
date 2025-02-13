@@ -18,10 +18,10 @@ pub fn expand_string(pair: Pair<Rule>, lash: &mut Lash) -> LashResult<String> {
 			let sub_type = inner.next().unpack()?;
 			let expanded = match sub_type.as_rule() {
 				Rule::var_sub => {
-					lash.borrow_vars().get_var(&word.as_str()[1..]).unwrap_or_default().to_string()
+					lash.vars().get_var(&word.as_str()[1..]).unwrap_or_default().to_string()
 				}
 				Rule::param_sub => {
-					let param = lash.borrow_vars().get_param(&word.as_str()[1..]).unwrap_or_default().to_string();
+					let param = lash.vars().get_param(&word.as_str()[1..]).unwrap_or_default().to_string();
 					param
 				}
 				Rule::cmd_sub => {

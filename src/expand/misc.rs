@@ -20,7 +20,7 @@ pub fn expand_shebang(lash: &mut Lash,shebang: &str) -> String {
 }
 
 pub fn expand_prompt(input: Option<&str>,lash: &mut Lash) -> LashResult<String> {
-	let mut prompt = lash.borrow_vars().get_evar("PS1").unwrap_or_default();
+	let mut prompt = lash.vars().get_evar("PS1").unwrap_or_default();
 	prompt = prompt.replace("\n", "");
 	let mut result = prompt.clone();
 	let mut prompt_parse = LashParse::parse(Rule::prompt, &prompt)

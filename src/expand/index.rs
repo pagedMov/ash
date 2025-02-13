@@ -4,7 +4,7 @@ pub fn expand_index(pair: Pair<Rule>,lash: &mut Lash) -> LashResult<String> {
 	let mut inner = pair.step(1).unpack()?.into_inner().peekable();
 	let arr_name = inner.next().unpack()?;
 
-	let array = lash.borrow_vars().get_var(arr_name.as_str());
+	let array = lash.vars().get_var(arr_name.as_str());
 	let mut cur_val = match array {
 		Some(LashVal::Array(vec)) => Some(LashVal::Array(vec)),
 		_ => return Ok(String::new()), // If not an array, return empty

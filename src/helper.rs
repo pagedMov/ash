@@ -387,7 +387,7 @@ impl StrExtension for str {
 }
 
 pub fn validate_autocd(lash: &mut Lash,argv: &VecDeque<String>) -> LashResult<bool> {
-	if lash.borrow_meta().get_shopt("core.autocd").is_ok_and(|opt| opt.parse::<bool>().unwrap()) && argv.len() == 1 {
+	if lash.meta().get_shopt("core.autocd").is_ok_and(|opt| opt.parse::<bool>().unwrap()) && argv.len() == 1 {
 		let candidate = argv.front().unwrap();
 		Ok(Path::new(candidate).is_dir())
 	} else {
@@ -408,7 +408,7 @@ pub fn prepare_argv<'a>(pair: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<VecDe
 	let mut inner = pair.into_inner().filter(|pr| matches!(pr.as_rule(), Rule::cmd_name | Rule::arg_assign | Rule::word));
 	while let Some(pair) = inner.next() {
 		if pair.as_rule() == Rule::cmd_name {
-			match lash.borrow_logic().get_alias(pair.as_str()) {
+			match lash.logic().get_alias(pair.as_str()) {
 				Some(alias) => {
 
 				}
@@ -638,7 +638,7 @@ pub fn slice_completion(line: &str, candidate: &str) -> String {
 }
 
 pub fn which(lash: &mut Lash,command: &str) -> Option<String> {
-	if let Some(env_path) = lash.borrow_vars().get_evar("PATH") {
+	if let Some(env_path) = lash.vars().get_evar("PATH") {
 		for path in env::split_paths(&env_path) {
 			let full_path = path.join(command);
 			if full_path.is_file() && is_exec(&full_path) {
@@ -656,7 +656,7 @@ pub fn is_exec(path: &Path) -> bool {
 }
 
 pub fn write_alias(lash: &mut Lash,alias: &str, body: &str) -> LashResult<()> {
-	if lash.borrow_logic().get_func(alias).is_some() {
+	if lash.logic().get_func(alias).is_some() {
 		lash.logic_mut().remove_func(alias);
 	}
 	lash.logic_mut().new_alias(alias, body.into());
@@ -664,7 +664,7 @@ pub fn write_alias(lash: &mut Lash,alias: &str, body: &str) -> LashResult<()> {
 }
 
 pub fn write_func(lash: &mut Lash,func: &str, body: &str) -> LashResult<()> {
-	if lash.borrow_logic().get_alias(func).is_some() {
+	if lash.logic().get_alias(func).is_some() {
 		lash.logic_mut().remove_alias(func);
 	}
 	lash.logic_mut().new_func(func, body);
@@ -672,10 +672,10 @@ pub fn write_func(lash: &mut Lash,func: &str, body: &str) -> LashResult<()> {
 }
 
 pub fn unset_var_conflicts(lash: &mut Lash,key: &str) -> LashResult<()> {
-	if lash.borrow_vars().get_var(key).is_some() {
+	if lash.vars().get_var(key).is_some() {
 		lash.vars_mut().unset_var(key)
 	}
-	if lash.borrow_vars().get_evar(key).is_some() {
+	if lash.vars().get_evar(key).is_some() {
 		std::env::remove_var(key);
 		lash.vars_mut().unset_evar(key);
 	}
@@ -1015,7 +1015,7 @@ pub fn escseq_cmdtime<'a>() -> LashResult<String> {
 }
 
 pub fn escseq_custom(lash: &mut Lash,query: &str) -> LashResult<String> {
-	let command = lash.borrow_meta().get_shopt(&format!("prompt.custom.{query}"))?;
+	let command = lash.meta().get_shopt(&format!("prompt.custom.{query}"))?;
 	let cmd_sub = format!("$({command})");
 	let parsed = LashParse::parse(Rule::cmd_sub, &cmd_sub)
 		.map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?
@@ -1026,12 +1026,12 @@ pub fn escseq_custom(lash: &mut Lash,query: &str) -> LashResult<String> {
 }
 
 pub fn escseq_exitcode<'a>(lash: &mut Lash) -> LashResult<String> {
-	Ok(lash.borrow_vars().get_param("?").unwrap_or_default())
+	Ok(lash.vars().get_param("?").unwrap_or_default())
 }
 
 pub fn escseq_success<'a>(lash: &mut Lash) -> LashResult<String> {
-	let code = lash.borrow_vars().get_param("?");
-	let success = lash.borrow_meta().get_shopt("prompt.exit_status.success")?.trim_matches('"').to_string();
+	let code = lash.vars().get_param("?");
+	let success = lash.meta().get_shopt("prompt.exit_status.success")?.trim_matches('"').to_string();
 	if let Some(code) = code {
 		match code.as_str() {
 			"0" => Ok(success),
@@ -1043,8 +1043,8 @@ pub fn escseq_success<'a>(lash: &mut Lash) -> LashResult<String> {
 }
 
 pub fn escseq_fail<'a>(lash: &mut Lash) -> LashResult<String> {
-	let code = lash.borrow_vars().get_param("?");
-	let failure = lash.borrow_meta().get_shopt("prompt.exit_status.failure")?.trim_matches('"').to_string();
+	let code = lash.vars().get_param("?");
+	let failure = lash.meta().get_shopt("prompt.exit_status.failure")?.trim_matches('"').to_string();
 	if let Some(code) = code {
 		match code.as_str() {
 			"0" => Ok(String::new()),
@@ -1108,7 +1108,7 @@ pub fn escseq_working_directory<'a>(lash: &mut Lash) -> LashResult<String> {
 	if cwd.starts_with(&home) {
 		cwd = cwd.replacen(&home, "~", 1); // Use `replacen` to replace only the first occurrence
 	}
-	let trunc_len = lash.borrow_meta().get_shopt("prompt.trunc_prompt_path").unwrap_or("0".into()).parse::<usize>().unwrap();
+	let trunc_len = lash.meta().get_shopt("prompt.trunc_prompt_path").unwrap_or("0".into()).parse::<usize>().unwrap();
 	if trunc_len > 0 {
 		let mut path = PathBuf::from(cwd);
 		let mut cwd_components: Vec<_> = path.components().collect();
@@ -1123,9 +1123,9 @@ pub fn escseq_working_directory<'a>(lash: &mut Lash) -> LashResult<String> {
 
 /// Handles the basename of the current working directory.
 pub fn escseq_basename_working_directory<'a>(lash: &mut Lash) -> LashResult<String> {
-	let cwd = PathBuf::from(lash.borrow_vars().get_evar("PWD").map_or("".to_string(), |pwd| pwd.to_string()));
+	let cwd = PathBuf::from(lash.vars().get_evar("PWD").map_or("".to_string(), |pwd| pwd.to_string()));
 	let mut cwd = cwd.components().last().map(|comp| comp.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
-	let home = lash.borrow_vars().get_evar("HOME").map_or("".into(), |home| home);
+	let home = lash.vars().get_evar("HOME").map_or("".into(), |home| home);
 	if cwd.starts_with(&home) {
 		cwd = cwd.replacen(&home, "~", 1); // Replace HOME with '~'
 	}
@@ -1134,13 +1134,13 @@ pub fn escseq_basename_working_directory<'a>(lash: &mut Lash) -> LashResult<Stri
 
 /// Handles the full hostname.
 pub fn escseq_full_hostname<'a>(lash: &mut Lash) -> LashResult<String> {
-	let hostname: String = lash.borrow_vars().get_evar("HOSTNAME").map_or("unknown host".into(), |host| host);
+	let hostname: String = lash.vars().get_evar("HOSTNAME").map_or("unknown host".into(), |host| host);
 	Ok(hostname)
 }
 
 /// Handles the short hostname.
 pub fn escseq_short_hostname<'a>(lash: &mut Lash) -> LashResult<String> {
-	let hostname = lash.borrow_vars().get_evar("HOSTNAME").map_or("unknown host".into(), |host| host);
+	let hostname = lash.vars().get_evar("HOSTNAME").map_or("unknown host".into(), |host| host);
 	if let Some((hostname, _)) = hostname.split_once('.') {
 		Ok(hostname.to_string())
 	} else {
@@ -1150,19 +1150,19 @@ pub fn escseq_short_hostname<'a>(lash: &mut Lash) -> LashResult<String> {
 
 /// Handles the shell name.
 pub fn escseq_shell_name<'a>(lash: &mut Lash) -> LashResult<String> {
-	let sh_name = lash.borrow_vars().get_evar("SHELL").map_or("rsh".into(), |sh| sh);
+	let sh_name = lash.vars().get_evar("SHELL").map_or("rsh".into(), |sh| sh);
 	Ok(sh_name)
 }
 
 /// Handles the username.
 pub fn escseq_username<'a>(lash: &mut Lash) -> LashResult<String> {
-	let user = lash.borrow_vars().get_evar("USER").map_or("unknown".into(), |user| user);
+	let user = lash.vars().get_evar("USER").map_or("unknown".into(), |user| user);
 	Ok(user)
 }
 
 /// Handles the prompt symbol based on the user ID.
 pub fn escseq_prompt_symbol<'a>(lash: &mut Lash) -> LashResult<char> {
-	let uid = lash.borrow_vars().get_evar("UID").map_or("0".into(), |uid| uid);
+	let uid = lash.vars().get_evar("UID").map_or("0".into(), |uid| uid);
 	match uid.as_str() {
 		"0" => Ok('#'),
 		_ => Ok('$'),

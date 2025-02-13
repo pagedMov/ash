@@ -124,7 +124,7 @@ impl Redir {
 
 #[derive(Debug)]
 pub struct CmdRedirs {
-	open_fds: Vec<RustFd>,
+	open_fds: Vec<SmartFD>,
 	targets_fd: Vec<Redir>,
 	targets_file: Vec<Redir>
 }
@@ -157,7 +157,7 @@ impl CmdRedirs {
 	pub fn open_file_targets(&mut self) -> LashResult<()> {
 		for redir in &self.targets_file {
 			let Redir { redir_type, our_fd, their_fd: _, file_target } = redir;
-			let src_fd = RustFd::new(*our_fd)?;
+			let src_fd = SmartFD::new(*our_fd)?;
 			let path = file_target.as_ref().unwrap(); // We know that there's a file target so unwrap is safe
 			let flags = match redir_type {
 				Rule::r#in => O_RDONLY,
@@ -170,7 +170,7 @@ impl CmdRedirs {
 			} else {
 				0
 			};
-			let mut file_fd = RustFd::open(path.to_str().unwrap(), flags as u32, Some(mode))?;
+			let mut file_fd = SmartFD::open(path.to_str().unwrap(), flags as u32, Some(mode))?;
 			file_fd.dup2(&src_fd)?;
 			file_fd.close()?;
 			self.open_fds.push(src_fd);
@@ -180,8 +180,8 @@ impl CmdRedirs {
 	pub fn open_their_fds(&mut self) -> LashResult<()> {
 		for redir in &self.targets_fd {
 			let Redir { redir_type: _, our_fd, their_fd, file_target: _ } = redir;
-			let mut tgt_fd = RustFd::new(their_fd.unwrap())?;
-			let src_fd = RustFd::new(*our_fd)?;
+			let mut tgt_fd = SmartFD::new(their_fd.unwrap())?;
+			let src_fd = SmartFD::new(*our_fd)?;
 			tgt_fd.dup2(&src_fd)?;
 			tgt_fd.close()?;
 			self.open_fds.push(src_fd);
@@ -191,11 +191,11 @@ impl CmdRedirs {
 }
 
 #[derive(Hash, Eq, PartialEq, Debug)]
-pub struct RustFd {
+pub struct SmartFD {
 	fd: RawFd,
 }
 
-impl fmt::Write for RustFd {
+impl fmt::Write for SmartFD {
 	fn write_str(&mut self, s: &str) -> std::fmt::Result {
 	  self.write(s.as_bytes()).map_err(|_| fmt::Error)?;
 		Ok(())
@@ -208,12 +208,11 @@ impl fmt::Write for RustFd {
 	}
 }
 
-impl io::Write for RustFd {
+impl io::Write for SmartFD {
 	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
 		if !self.is_valid() {
-			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"))
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"))
 		}
-
 		let result = unsafe { libc::write(self.fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
 
 		if result < 0 {
@@ -234,10 +233,10 @@ impl io::Write for RustFd {
 	}
 }
 
-impl io::Read for RustFd {
+impl io::Read for SmartFD {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		if !self.is_valid() {
-			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"));
 		}
 
 		let result = unsafe { libc::read(self.as_raw_fd(), buf.as_ptr() as *mut c_void, buf.len()) };
@@ -256,7 +255,7 @@ impl io::Read for RustFd {
 	}
 	fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
 		if !self.is_valid() {
-			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"));
 		}
 
 		let mut temp_buf = [0u8; 4096];
@@ -291,7 +290,7 @@ impl io::Read for RustFd {
 	}
 	fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
 		if !self.is_valid() {
-			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"));
 		}
 
 		let mut temp_buf = [0u8; 4096];
@@ -328,7 +327,7 @@ impl io::Read for RustFd {
 	}
 	fn read_vectored(&mut self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
 		if !self.is_valid() {
-			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"));
 		}
 
 		let iovcnt = bufs.len() as i32;
@@ -351,21 +350,21 @@ impl io::Read for RustFd {
 	}
 }
 
-impl AsFd for RustFd {
+impl AsFd for SmartFD {
 	fn as_fd(&self) -> std::os::unix::prelude::BorrowedFd<'_> {
 		unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
 	}
 }
 
-impl<'a> RustFd {
+impl<'a> SmartFD {
 	pub fn new(fd: RawFd) -> io::Result<Self> {
 		if fd < 0 {
 			panic!()
 		}
-		Ok(RustFd { fd })
+		Ok(SmartFD { fd })
 	}
 
-	/// Create a `RustFd` from a duplicate of `stdin` (FD 0)
+	/// Create a `SmartFD` from a duplicate of `stdin` (FD 0)
 	pub fn from_stdin() -> io::Result<Self> {
 		let fd = unsafe { libc::dup(0) };
 		if fd < 0 {
@@ -375,7 +374,7 @@ impl<'a> RustFd {
 		}
 	}
 
-	/// Create a `RustFd` from a duplicate of `stdout` (FD 1)
+	/// Create a `SmartFD` from a duplicate of `stdout` (FD 1)
 	pub fn from_stdout() -> io::Result<Self> {
 		let fd = unsafe { libc::dup(1) };
 		if fd < 0 {
@@ -385,7 +384,7 @@ impl<'a> RustFd {
 		}
 	}
 
-	/// Create a `RustFd` from a duplicate of `stderr` (FD 2)
+	/// Create a `SmartFD` from a duplicate of `stderr` (FD 2)
 	pub fn from_stderr() -> io::Result<Self> {
 		let fd = unsafe { libc::dup(2) };
 		if fd < 0 {
@@ -395,32 +394,32 @@ impl<'a> RustFd {
 		}
 	}
 
-	/// Create a `RustFd` from a type that provides an owned or borrowed FD
+	/// Create a `SmartFD` from a type that provides an owned or borrowed FD
 	pub fn from_fd<T: AsFd>(fd: T) -> io::Result<Self> {
 		let raw_fd = fd.as_fd().as_raw_fd();
 		if raw_fd < 0 {
-			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"));
 		}
-		Ok(RustFd::new(raw_fd)?)
+		Ok(SmartFD::new(raw_fd)?)
 	}
 
-	/// Create a `RustFd` by consuming ownership of an FD
+	/// Create a `SmartFD` by consuming ownership of an FD
 	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> io::Result<Self> {
 		let raw_fd = fd.into_raw_fd(); // Consumes ownership
 		if raw_fd < 0 {
-			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"));
 		}
-		Ok(RustFd::new(raw_fd)?)
+		Ok(SmartFD::new(raw_fd)?)
 	}
 
-	/// Create a new `RustFd` that points to an in-memory file descriptor. In-memory file descriptors can be interacted with as though they were normal files.
+	/// Create a new `SmartFD` that points to an in-memory file descriptor. In-memory file descriptors can be interacted with as though they were normal files.
 	pub fn memfd_create(name: &str, flags: u32) -> io::Result<Self> {
 		let c_name = CString::new(name).unwrap();
 		let fd = unsafe { libc::memfd_create(c_name.as_ptr(), flags) };
-		Ok(RustFd::new(fd)?)
+		Ok(SmartFD::new(fd)?)
 	}
 
-	/// Wrapper for nix::unistd::pipe(), simply produces two `RustFds` that point to a read and write pipe respectfully
+	/// Wrapper for nix::unistd::pipe(), simply produces two `SmartFDs` that point to a read and write pipe respectfully
 	pub fn pipe() -> io::Result<(Self,Self)> {
 		let mut fds = [0;2];
 		let result = unsafe { libc::pipe(fds.as_mut_ptr()) };
@@ -428,18 +427,18 @@ impl<'a> RustFd {
 		if result == -1 {
 			return Err(io::Error::last_os_error())
 		}
-		let r_fd = RustFd::new(fds[0])?;
-		let w_fd = RustFd::new(fds[1])?;
+		let r_fd = SmartFD::new(fds[0])?;
+		let w_fd = SmartFD::new(fds[1])?;
 		Ok((r_fd,w_fd))
 	}
 
-	/// Produce a `RustFd` that points to the same reour_fd as the 'self' `RustFd`
+	/// Produce a `SmartFD` that points to the same reour_fd as the 'self' `SmartFD`
 	pub fn dup(&self) -> io::Result<Self> {
 		if !self.is_valid() {
-			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"));
 		}
 		let duped = unsafe { libc::dup(self.as_raw_fd()) };
-		Ok(RustFd::new(duped)?)
+		Ok(SmartFD::new(duped)?)
 	}
 
 	/// A wrapper for nix::unistd::dup2(), 'self' is duplicated to the given target file descriptor.
@@ -450,7 +449,7 @@ impl<'a> RustFd {
 			return Ok(())
 		}
 		if !self.is_valid() || target_fd < 0 {
-			return Err(io::Error::new(io::ErrorKind::Other, "Invalid RustFd"));
+			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"));
 		}
 
 		unsafe { libc::dup2(self.as_raw_fd(), target_fd) };
@@ -497,21 +496,21 @@ impl<'a> RustFd {
 	}
 }
 
-impl Display for RustFd {
+impl Display for SmartFD {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(f, "{}", self.fd)
 	}
 }
 
-impl AsRawFd for RustFd {
+impl AsRawFd for SmartFD {
 	fn as_raw_fd(&self) -> RawFd {
 		self.fd
 	}
 }
 
-impl FromRawFd for RustFd {
+impl FromRawFd for SmartFD {
 	unsafe fn from_raw_fd(fd: RawFd) -> Self {
-		RustFd { fd }
+		SmartFD { fd }
 	}
 }
 
@@ -544,15 +543,15 @@ pub fn handle_parent_process<'a>(child: Pid, command: String, lash: &mut Lash) -
 	Ok(())
 }
 
-pub fn save_fds() -> LashResult<(RustFd,RustFd,RustFd)> {
+pub fn save_fds() -> LashResult<(SmartFD,SmartFD,SmartFD)> {
 	Ok((
-		RustFd::from_stdin()?,
-		RustFd::from_stdout()?,
-		RustFd::from_stderr()?
+		SmartFD::from_stdin()?,
+		SmartFD::from_stdout()?,
+		SmartFD::from_stderr()?
 	))
 }
 
-pub fn restore_fds(mut stdio: (RustFd,RustFd,RustFd)) -> LashResult<()> {
+pub fn restore_fds(mut stdio: (SmartFD,SmartFD,SmartFD)) -> LashResult<()> {
 	stdio.0.dup2(&0)?;
 	stdio.0.close()?;
 	stdio.1.dup2(&1)?;

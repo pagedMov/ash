@@ -17,7 +17,7 @@ pub fn exec_for_cmd<'a>(cmd: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<()> {
 
 	let vars_len = loop_vars.len();
 	for var in &loop_vars {
-		let existing_val = lash.borrow_vars().get_var(var).unwrap_or_default();
+		let existing_val = lash.vars().get_var(var).unwrap_or_default();
 		saved_vars.insert(var,existing_val);
 	}
 

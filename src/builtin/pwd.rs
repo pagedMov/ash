@@ -15,7 +15,7 @@ pub fn execute<'a>(pwd_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
 	}
 
 	if let Ok(pwd) = env::var("PWD") {
-		let mut stdout = utils::RustFd::new(STDOUT_FILENO)?;
+		let mut stdout = utils::SmartFD::new(STDOUT_FILENO)?;
 		write!(stdout,"{}",pwd)?;
 		Ok(())
 	} else {

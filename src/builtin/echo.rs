@@ -19,7 +19,6 @@ pub fn execute<'a>(echo_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> 
 	argv.pop_front();
 	let mut arg_buffer = vec![];
 	let redirs = helper::prepare_redirs(echo_call)?;
-	lash.ctx_mut().extend_redirs(redirs);
 
 	while let Some(arg) = argv.pop_front() {
 		if arg.as_str().starts_with('-') {
@@ -60,14 +59,14 @@ pub fn execute<'a>(echo_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> 
 	let newline = !flags.contains(EchoFlags::NO_NEWLINE);
 
 	let mut target_fd = if flags.contains(EchoFlags::STDERR) {
-		utils::RustFd::new(STDERR_FILENO)?
+		utils::SmartFD::new(STDERR_FILENO)?
 	} else {
-		utils::RustFd::new(STDOUT_FILENO)?
+		utils::SmartFD::new(STDOUT_FILENO)?
 	};
 
-	lash.ctx_mut().activate_redirs()?;
+	lash.consume_redirs(redirs)?;
 
-	if lash.borrow_ctx().flags().contains(utils::ExecFlags::NO_FORK) {
+	if lash.ctx().flags().contains(utils::ExecFlags::NO_FORK) {
 		if newline {
 			writeln!(target_fd,"{}",output)?;
 		} else {
@@ -94,7 +93,7 @@ pub fn execute<'a>(echo_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> 
 				.with_children(children)
 				.build();
 
-			if lash.borrow_ctx().flags().contains(utils::ExecFlags::BACKGROUND) {
+			if lash.ctx().flags().contains(utils::ExecFlags::BACKGROUND) {
 				write_jobs(|j| j.insert_job(job,false))??;
 			} else {
 				helper::handle_fg(lash,job)?;

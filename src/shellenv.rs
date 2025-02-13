@@ -6,7 +6,7 @@ use nix::{sys::{signal::{kill, killpg, signal, SigHandler, SigmaskHow, Signal::{
 use once_cell::sync::Lazy;
 use std::sync::RwLock;
 
-use crate::{execute::dispatch, prelude::*, utils};
+use crate::{execute::dispatch, prelude::*, utils::{self, Redir}};
 use crate::{error::{LashErr::*, LashErrLow}, helper::{self, VecDequeExtension}, shopt::ShOpts, LashResult};
 
 
@@ -120,25 +120,25 @@ impl Lash {
 
 		Self { vars, logic, meta, ctx }
 	}
-	pub fn borrow_vars(&self) -> &VarTable {
+	pub fn vars(&self) -> &VarTable {
 		&self.vars
 	}
 	pub fn vars_mut(&mut self) -> &mut VarTable {
 		&mut self.vars
 	}
-	pub fn borrow_logic(&self) -> &LogicTable {
+	pub fn logic(&self) -> &LogicTable {
 		&self.logic
 	}
 	pub fn logic_mut(&mut self) -> &mut LogicTable {
 		&mut self.logic
 	}
-	pub fn borrow_meta(&self) -> &EnvMeta {
+	pub fn meta(&self) -> &EnvMeta {
 		&self.meta
 	}
 	pub fn meta_mut(&mut self) -> &mut EnvMeta {
 		&mut self.meta
 	}
-	pub fn borrow_ctx(&self) -> &ExecCtx {
+	pub fn ctx(&self) -> &ExecCtx {
 		&self.ctx
 	}
 	pub fn ctx_mut(&mut self) -> &mut ExecCtx {
@@ -167,7 +167,11 @@ impl Lash {
 	pub fn pop_state(&mut self) -> LashResult<()> {
 		self.ctx.pop_state()
 	}
-
+	pub fn consume_redirs(&mut self, redirs: VecDeque<Redir>) -> LashResult<()> {
+		self.ctx_mut().extend_redirs(redirs);
+		self.ctx_mut().activate_redirs()?;
+		Ok(())
+	}
 	pub fn start_timer(&mut self) {
 		self.meta.timer_start = Some(Instant::now())
 	}
@@ -204,7 +208,7 @@ impl Lash {
 
 
 	pub fn source_file<'a>(&mut self, path: &str) -> LashResult<()> {
-		let mut file = utils::RustFd::std_open(&path)?;
+		let mut file = utils::SmartFD::std_open(&path)?;
 		let mut buffer = String::new();
 		file.read_to_string(&mut buffer).map_err(|_| Low(LashErrLow::from_io()))?;
 		file.close()?;
@@ -1232,7 +1236,7 @@ impl VarTable {
 		}
 	}
 
-	pub fn borrow_vars(&self) -> &HashMap<String, LashVal> {
+	pub fn vars(&self) -> &HashMap<String, LashVal> {
 		&self.vars
 	}
 

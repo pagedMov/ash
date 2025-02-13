@@ -69,8 +69,8 @@ pub fn run_prompt(lash: &mut Lash) -> LashResult<String> {
 	lash.stop_timer()?;
 	lash.meta_mut().enter_prompt();
 
-	let hist_path = lash.borrow_vars().get_evar("HIST_FILE").unwrap_or_else(|| -> String {
-		let home = lash.borrow_vars().get_evar("HOME").unwrap_or_default();
+	let hist_path = lash.vars().get_evar("HIST_FILE").unwrap_or_else(|| -> String {
+		let home = lash.vars().get_evar("HOME").unwrap_or_default();
 		format!("{}/.lash_hist",home)
 	});
 	let prompt = match expand::misc::expand_prompt(None,lash) {

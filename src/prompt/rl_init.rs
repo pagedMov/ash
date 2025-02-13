@@ -12,7 +12,7 @@ pub fn load_history(path: &Path, rl: &mut Editor<LashHelper, DefaultHistory>) ->
 }
 
 pub fn init_prompt<'a>(lash: &'a mut Lash) -> LashResult<Editor<LashHelper<'a>, DefaultHistory>> {
-	let config = build_editor_config(lash.borrow_meta())?;
+	let config = build_editor_config(lash.meta())?;
 	let path = format!("{}/.lash_hist",env::var("HOME").unwrap_or_default());
 	let hist_path = Path::new(&path);
 	let mut rl = initialize_editor(lash,config)?;

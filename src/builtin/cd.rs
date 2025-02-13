@@ -10,7 +10,7 @@ pub fn execute<'a>(cd_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
 	match argv.pop_front() {
 		Some(arg) => {
 			if arg.as_str() == "-" {
-				new_pwd = lash.borrow_vars().get_evar("OLDPWD").unwrap_or("/".into());
+				new_pwd = lash.vars().get_evar("OLDPWD").unwrap_or("/".into());
 			} else {
 				new_pwd = arg.as_str().into();
 			}

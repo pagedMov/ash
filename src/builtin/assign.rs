@@ -80,7 +80,7 @@ use super::*;
 		let input = "int var=5";
 
 		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
-		assert_eq!(lash.borrow_vars().get_var("var"), Some(LashVal::Int(5)))
+		assert_eq!(lash.vars().get_var("var"), Some(LashVal::Int(5)))
 	}
 	#[test]
 	fn test_assign_string() {
@@ -88,7 +88,7 @@ use super::*;
 		let input = "string var=\"foo bar\"";
 
 		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
-		assert_eq!(lash.borrow_vars().get_var("var"), Some(LashVal::String("foo bar".to_string())))
+		assert_eq!(lash.vars().get_var("var"), Some(LashVal::String("foo bar".to_string())))
 	}
 	#[test]
 	fn test_assign_float() {
@@ -96,7 +96,7 @@ use super::*;
 		let input = "float pi=3.14";
 
 		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
-		assert_eq!(lash.borrow_vars().get_var("pi"), Some(LashVal::Float(HashFloat(3.14))))
+		assert_eq!(lash.vars().get_var("pi"), Some(LashVal::Float(HashFloat(3.14))))
 	}
 	#[test]
 	fn test_assign_bool() {
@@ -104,13 +104,13 @@ use super::*;
 		let input = "bool var=true";
 
 		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
-		assert_eq!(lash.borrow_vars().get_var("var"), Some(LashVal::Bool(true)));
+		assert_eq!(lash.vars().get_var("var"), Some(LashVal::Bool(true)));
 
 		let mut lash = Lash::new();
 		let input = "bool var=false";
 
 		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
-		assert_eq!(lash.borrow_vars().get_var("var"), Some(LashVal::Bool(false)))
+		assert_eq!(lash.vars().get_var("var"), Some(LashVal::Bool(false)))
 	}
 	#[test]
 	fn test_assign_array() {
@@ -118,7 +118,7 @@ use super::*;
 		let input = "arr list=[1, \"foo\", 3.14, true, [1,2,3]]";
 
 		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
-		let array = lash.borrow_vars().get_var("list").unwrap();
+		let array = lash.vars().get_var("list").unwrap();
 
 		if let LashVal::Array(mut list) = array {
 			assert_eq!(list.remove(4), LashVal::Array(vec![LashVal::Int(1),LashVal::Int(2),LashVal::Int(3)]));

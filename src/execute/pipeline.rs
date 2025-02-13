@@ -8,7 +8,7 @@ pub fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, lash: &mut Lash) -> LashResult
 	let _ = lash.ctx_mut().take_redirs();
 
 	let mut inner = pipeline.into_inner().peekable();
-	let mut prev_read_pipe: Option<utils::RustFd> = None;
+	let mut prev_read_pipe: Option<utils::SmartFD> = None;
 	let mut pgid: Option<Pid> = None;
 	let mut cmds: Vec<String> = vec![];
 	let mut pids: Vec<Pid> = vec![];
@@ -16,7 +16,7 @@ pub fn exec_pipeline<'a>(pipeline: Pair<'a,Rule>, lash: &mut Lash) -> LashResult
 	let mut first = true;
 	while let Some(node) = inner.next() {
 		let (r_pipe,w_pipe) = if inner.peek().is_some() {
-			let (r_pipe,w_pipe) = utils::RustFd::pipe()?;
+			let (r_pipe,w_pipe) = utils::SmartFD::pipe()?;
 			(Some(r_pipe),Some(w_pipe))
 		} else {
 			(None,None)

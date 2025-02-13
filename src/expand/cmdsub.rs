@@ -9,7 +9,7 @@ pub fn expand_cmd_sub(mut pair: Pair<Rule>,lash: &mut Lash) -> LashResult<String
 	let body = pair.as_str();
 	let body = &body[2..body.len() - 1]; // From '$(this)' to 'this'
 
-	let (mut r_pipe, mut w_pipe) = utils::RustFd::pipe()?;
+	let (mut r_pipe, mut w_pipe) = utils::SmartFD::pipe()?;
 	let redir = utils::Redir::from_raw(1,w_pipe.as_raw_fd());
 	let mut sub_lash = lash.clone();
 	let flags = sub_lash.ctx_mut().flags_mut();
@@ -41,7 +41,7 @@ pub fn cmd_sub_from_str(input: &str,lash: &mut Lash) -> LashResult<String> {
 	// Get the subshell token
 	let body = input;
 
-	let (mut r_pipe, mut w_pipe) = utils::RustFd::pipe()?;
+	let (mut r_pipe, mut w_pipe) = utils::SmartFD::pipe()?;
 	let redir = utils::Redir::from_raw(1,w_pipe.as_raw_fd());
 	let mut sub_lash = lash.clone();
 	let flags = sub_lash.ctx_mut().flags_mut();

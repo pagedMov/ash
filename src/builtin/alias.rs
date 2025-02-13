@@ -1,7 +1,7 @@
 use crate::{helper, pest_ext::ARG_RULES, prelude::*, utils};
 
 pub fn execute<'a>(alias_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
-	let mut stdout = utils::RustFd::new(STDOUT_FILENO)?;
+	let mut stdout = utils::SmartFD::new(STDOUT_FILENO)?;
 
 	let mut args = alias_call.filter(&ARG_RULES[..]);
 	let redirs = helper::prepare_redirs(alias_call)?;
@@ -23,7 +23,7 @@ pub fn execute<'a>(alias_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()>
 				helper::write_alias(lash, alias, &body.trim_quotes())?;
 			}
 			Rule::word => {
-				let alias = lash.borrow_logic().get_alias(arg.as_str());
+				let alias = lash.logic().get_alias(arg.as_str());
 				if let Some(alias) = alias {
 					write!(stdout,"{alias}\n")?;
 				}
@@ -45,6 +45,6 @@ use super::*;
 		let mut lash = Lash::new();
 		let input = "alias foo=\"bar\";";
 		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
-		assert!(lash.borrow_logic().get_alias("foo").is_some_and(|al| &al == "bar"))
+		assert!(lash.logic().get_alias("foo").is_some_and(|al| &al == "bar"))
 	}
 }
