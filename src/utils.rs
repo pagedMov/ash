@@ -160,17 +160,13 @@ impl CmdRedirs {
 			let src_fd = SmartFD::new(*our_fd)?;
 			let path = file_target.as_ref().unwrap(); // We know that there's a file target so unwrap is safe
 			let flags = match redir_type {
-				Rule::r#in => O_RDONLY,
-				Rule::out => O_WRONLY | O_CREAT | O_TRUNC,
-				Rule::append => O_WRONLY | O_CREAT | O_APPEND,
+				Rule::r#in => OFlag::O_RDONLY,
+				Rule::out => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_TRUNC,
+				Rule::append => OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_APPEND,
 				_ => unreachable!(),
 			};
-			let mode: mode_t = if flags & O_CREAT != 0 {
-				S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH
-			} else {
-				0
-			};
-			let mut file_fd = SmartFD::open(path.to_str().unwrap(), flags as u32, Some(mode))?;
+			let mode = Mode::from_bits(0o644).unwrap();
+			let mut file_fd = SmartFD::open(path, flags, mode)?;
 			file_fd.dup2(&src_fd)?;
 			file_fd.close()?;
 			self.open_fds.push(src_fd);
@@ -213,6 +209,7 @@ impl io::Write for SmartFD {
 		if !self.is_valid() {
 			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"))
 		}
+
 		let result = unsafe { libc::write(self.fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
 
 		if result < 0 {
@@ -226,7 +223,7 @@ impl io::Write for SmartFD {
 	}
 	fn write_fmt(&mut self, fmt: std::fmt::Arguments<'_>) -> io::Result<()> {
 		let mut formatted = String::new();
-		fmt::write(&mut formatted, fmt).map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to write formatted string"))?;
+		fmt::write(&mut formatted, fmt).unwrap(); // FIXME: do not leave this unwrap unhandled for long
 
 		self.write(formatted.as_bytes())?;
 		Ok(())
@@ -239,18 +236,10 @@ impl io::Read for SmartFD {
 			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"));
 		}
 
-		let result = unsafe { libc::read(self.as_raw_fd(), buf.as_ptr() as *mut c_void, buf.len()) };
-
-		if result < 0 {
-			let err = io::Error::last_os_error();
-			let no = err.raw_os_error().unwrap();
-			if no != 4 { // EINTR
-				return Err(err);
-			} else {
-				return self.read(buf);
-			}
-		} else {
-			return Ok(result as usize)
+		match nix::unistd::read(self.as_raw_fd(), buf) {
+			Ok(num_bytes) => Ok(num_bytes), // Return the number of bytes read
+			Err(nix::errno::Errno::EINTR) => self.read(buf), // Retry if interrupted
+			Err(_) => Err(io::Error::last_os_error()), // Convert other errors
 		}
 	}
 	fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
@@ -262,30 +251,16 @@ impl io::Read for SmartFD {
 		let mut total_read = 0;
 
 		loop {
-			let result = unsafe { libc::read(self.as_raw_fd(), temp_buf.as_mut_ptr() as *mut c_void, temp_buf.len()) };
-
-			match result {
-				0 => break,
-
-				n if n > 0 => {
-					let n = n as usize;
+			match nix::unistd::read(self.as_raw_fd(), &mut temp_buf) {
+				Ok(0) => break,
+				Ok(n) => {
 					buf.extend_from_slice(&temp_buf[..n]);
 					total_read += n;
 				}
-
-				n if n < 0 => {
-					let err = io::Error::last_os_error();
-					let no = err.raw_os_error().unwrap();
-					if no != 4 { // EINTR
-						return Err(err);
-					} else {
-						continue;
-					}
-				}
-				_ => unreachable!(),
+				Err(nix::errno::Errno::EINTR) => continue,
+				Err(_) => return Err(io::Error::last_os_error())
 			}
 		}
-
 		Ok(total_read)
 	}
 	fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
@@ -297,30 +272,17 @@ impl io::Read for SmartFD {
 		let mut total_read = 0;
 
 		loop {
-			let result = unsafe { libc::read(self.as_raw_fd(), temp_buf.as_mut_ptr() as *mut c_void, temp_buf.len()) };
-
-			match result {
-				0 => break,
-
-				n if n > 0 => {
-					let n = n as usize;
+			match nix::unistd::read(self.as_raw_fd(), &mut temp_buf) {
+				Ok(0) => break,
+				Ok(n) => {
 					match std::str::from_utf8(&temp_buf[..n]) {
 						Ok(valid) => buf.push_str(valid),
 						Err(_) => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid UTF-8"))
 					}
 					total_read += n;
 				}
-
-				n if n < 0 => {
-					let err = io::Error::last_os_error();
-					let no = err.raw_os_error().unwrap();
-					if no != 4 { // EINTR
-						return Err(err);
-					} else {
-						continue;
-					}
-				}
-				_ => unreachable!(),
+				Err(nix::errno::Errno::EINTR) => continue,
+				Err(_) => return Err(io::Error::last_os_error())
 			}
 		}
 		Ok(total_read)
@@ -330,23 +292,11 @@ impl io::Read for SmartFD {
 			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"));
 		}
 
-		let iovcnt = bufs.len() as i32;
-		let mut iovecs: Vec<iovec> = Vec::with_capacity(iovcnt as usize);
-
-		for buf in bufs {
-			iovecs.push(iovec {
-				iov_base: buf.as_mut_ptr() as *mut c_void,
-				iov_len: buf.len()
-			});
+		match nix::sys::uio::readv(&mut *self, bufs) {
+			Ok(n) => Ok(n),
+			Err(nix::errno::Errno::EINTR) => self.read_vectored(bufs),
+			Err(_) => Err(io::Error::last_os_error())
 		}
-
-		let result = unsafe { libc::readv(self.as_raw_fd(), iovecs.as_mut_ptr(), iovcnt) };
-
-		if result < 0 {
-			return Err(io::Error::last_os_error())
-		}
-
-		Ok(result as usize)
 	}
 }
 
@@ -357,7 +307,7 @@ impl AsFd for SmartFD {
 }
 
 impl<'a> SmartFD {
-	pub fn new(fd: RawFd) -> io::Result<Self> {
+	pub fn new(fd: RawFd) -> LashResult<Self> {
 		if fd < 0 {
 			panic!()
 		}
@@ -365,114 +315,107 @@ impl<'a> SmartFD {
 	}
 
 	/// Create a `SmartFD` from a duplicate of `stdin` (FD 0)
-	pub fn from_stdin() -> io::Result<Self> {
-		let fd = unsafe { libc::dup(0) };
-		if fd < 0 {
-			Err(io::Error::last_os_error())
-		} else {
-			Ok(Self::new(fd)?)
-		}
+	pub fn from_stdin() -> LashResult<Self> {
+		let fd = dup(0).map_err(|_| Low(LashErrLow::from_io()))?;
+		Ok(Self { fd })
 	}
 
 	/// Create a `SmartFD` from a duplicate of `stdout` (FD 1)
-	pub fn from_stdout() -> io::Result<Self> {
-		let fd = unsafe { libc::dup(1) };
-		if fd < 0 {
-			Err(io::Error::last_os_error())
-		} else {
-			Ok(Self::new(fd)?)
-		}
+	pub fn from_stdout() -> LashResult<Self> {
+		let fd = dup(1).map_err(|_| Low(LashErrLow::from_io()))?;
+		Ok(Self { fd })
 	}
 
 	/// Create a `SmartFD` from a duplicate of `stderr` (FD 2)
-	pub fn from_stderr() -> io::Result<Self> {
-		let fd = unsafe { libc::dup(2) };
-		if fd < 0 {
-			Err(io::Error::last_os_error())
-		} else {
-			Ok(Self::new(fd)?)
-		}
+	pub fn from_stderr() -> LashResult<Self> {
+		let fd = dup(2).map_err(|_| Low(LashErrLow::from_io()))?;
+		Ok(Self { fd })
 	}
 
 	/// Create a `SmartFD` from a type that provides an owned or borrowed FD
-	pub fn from_fd<T: AsFd>(fd: T) -> io::Result<Self> {
+	pub fn from_fd<T: AsFd>(fd: T) -> LashResult<Self> {
 		let raw_fd = fd.as_fd().as_raw_fd();
 		if raw_fd < 0 {
-			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"));
+			return Err(Low(LashErrLow::BadFD("Attempted to create a SmartFD from a negative int".into())))
 		}
-		Ok(SmartFD::new(raw_fd)?)
+		Ok(SmartFD { fd: raw_fd })
 	}
 
 	/// Create a `SmartFD` by consuming ownership of an FD
-	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> io::Result<Self> {
+	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> LashResult<Self> {
 		let raw_fd = fd.into_raw_fd(); // Consumes ownership
 		if raw_fd < 0 {
-			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"));
+			return Err(Low(LashErrLow::BadFD("Attempted to create a SmartFD from a negative int".into())))
 		}
-		Ok(SmartFD::new(raw_fd)?)
+		Ok(SmartFD { fd: raw_fd })
 	}
 
 	/// Create a new `SmartFD` that points to an in-memory file descriptor. In-memory file descriptors can be interacted with as though they were normal files.
-	pub fn memfd_create(name: &str, flags: u32) -> io::Result<Self> {
+	pub fn new_memfd(name: &str, executable: bool) -> LashResult<Self> {
 		let c_name = CString::new(name).unwrap();
-		let fd = unsafe { libc::memfd_create(c_name.as_ptr(), flags) };
-		Ok(SmartFD::new(fd)?)
+		let flags = if executable {
+			MemFdCreateFlag::empty()
+		} else {
+			MemFdCreateFlag::MFD_CLOEXEC
+		};
+		let fd = memfd_create(&c_name, flags).map_err(|_| Low(LashErrLow::from_io()))?;
+		Ok(SmartFD { fd: fd.as_raw_fd() })
 	}
 
 	/// Wrapper for nix::unistd::pipe(), simply produces two `SmartFDs` that point to a read and write pipe respectfully
-	pub fn pipe() -> io::Result<(Self,Self)> {
-		let mut fds = [0;2];
-		let result = unsafe { libc::pipe(fds.as_mut_ptr()) };
-
-		if result == -1 {
-			return Err(io::Error::last_os_error())
-		}
-		let r_fd = SmartFD::new(fds[0])?;
-		let w_fd = SmartFD::new(fds[1])?;
+	pub fn pipe() -> LashResult<(Self,Self)> {
+		let (r_pipe,w_pipe) = pipe().map_err(|_| Low(LashErrLow::from_io()))?;
+		let r_fd = SmartFD::from_owned_fd(r_pipe)?;
+		let w_fd = SmartFD::from_owned_fd(w_pipe)?;
 		Ok((r_fd,w_fd))
 	}
 
-	/// Produce a `SmartFD` that points to the same reour_fd as the 'self' `SmartFD`
-	pub fn dup(&self) -> io::Result<Self> {
+	/// Produce a `SmartFD` that points to the same resource as the 'self' `SmartFD`
+	pub fn dup(&self) -> LashResult<Self> {
 		if !self.is_valid() {
-			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"));
+			return Err(Low(LashErrLow::BadFD("Attempted to call `dup()` on an invalid SmartFD".into())))
 		}
-		let duped = unsafe { libc::dup(self.as_raw_fd()) };
-		Ok(SmartFD::new(duped)?)
+		let new_fd = dup(self.fd).unwrap();
+		Ok(SmartFD { fd: new_fd })
 	}
 
 	/// A wrapper for nix::unistd::dup2(), 'self' is duplicated to the given target file descriptor.
-	pub fn dup2<T: AsRawFd>(&self, target: &T) -> io::Result<()> {
+	pub fn dup2<T: AsRawFd>(&self, target: &T) -> LashResult<()> {
 		let target_fd = target.as_raw_fd();
 		if self.fd == target_fd {
 			// Nothing to do here
 			return Ok(())
 		}
 		if !self.is_valid() || target_fd < 0 {
-			return Err(io::Error::new(io::ErrorKind::Other, "Invalid SmartFD"));
+			return Err(Low(LashErrLow::BadFD("Attempted to call `dup2()` on an invalid SmartFD".into())))
 		}
 
-		unsafe { libc::dup2(self.as_raw_fd(), target_fd) };
+		dup2(self.fd, target_fd).unwrap();
 		Ok(())
 	}
 
 	/// Open a file using a file descriptor, with the given OFlags and Mode bits
-	pub fn open(path: &str, oflags: mode_t, mode: Option<mode_t>) -> io::Result<Self> {
-		let c_path = CString::new(path)
-			.map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid path: {}", e)))?;
-		let file_fd = unsafe { libc::open(c_path.as_ptr(), oflags as i32, mode.unwrap_or(0) as i32) };
-		if file_fd < 0 {
-			return Err(io::Error::last_os_error())
+	pub fn open(path: &Path, flags: OFlag, mode: Mode) -> LashResult<Self> {
+		let file_fd = open(path, flags, mode);
+		if let Ok(file_fd) = file_fd {
+			Ok(Self { fd: file_fd })
+		} else {
+			return Err(Low(LashErrLow::BadFD(format!("Attempted to open non-existant file '{}'",path.to_str().unwrap()))))
 		}
-		Ok(Self::new(file_fd)?)
 	}
 
-	pub fn std_open(path: &str) -> io::Result<Self> {
-		let mode: u32 = 0o644 | O_RDWR as u32;
-		Self::open(path, mode, None)
+	pub fn std_open(path: &Path) -> LashResult<Self> {
+		let flags = OFlag::O_RDWR;
+		let mode = Mode::from_bits(0o644).unwrap();
+		let fd = open(path, flags, mode);
+		if let Ok(file) = fd {
+			Ok(Self { fd: file})
+		} else {
+			return Err(Low(LashErrLow::BadFD(format!("Attempted to open non-existant file '{}'",path.to_str().unwrap()))))
+		}
 	}
 
-	pub fn close(&mut self) -> io::Result<()> {
+	pub fn close(&mut self) -> LashResult<()> {
 		if !self.is_valid() {
 			return Ok(())
 		}
@@ -481,18 +424,17 @@ impl<'a> SmartFD {
 			return Ok(())
 		}
 
-		let result = unsafe { libc::close(self.as_raw_fd()) };
-		if result < 0 {
-			self.fd = -1;
-			return Err(io::Error::last_os_error())
-		} else {
-			self.fd = -1;
-			Ok(())
-		}
+		close(self.fd).unwrap();
+		self.fd = -1;
+		Ok(())
+	}
+
+	pub fn mk_shared(self) -> Arc<Mutex<Self>> {
+		Arc::new(Mutex::new(self))
 	}
 
 	pub fn is_valid(&self) -> bool {
-		self.fd >= 0
+		self.fd > 0
 	}
 }
 
@@ -502,9 +444,25 @@ impl Display for SmartFD {
 	}
 }
 
+impl Drop for SmartFD {
+	#[track_caller]
+	fn drop(&mut self) {
+		if self.fd >= 0 && self.close().is_err() {
+		}
+	}
+}
+
 impl AsRawFd for SmartFD {
 	fn as_raw_fd(&self) -> RawFd {
 		self.fd
+	}
+}
+
+impl IntoRawFd for SmartFD {
+	fn into_raw_fd(self) -> RawFd {
+		let fd = self.fd;
+		std::mem::forget(self);
+		fd
 	}
 }
 

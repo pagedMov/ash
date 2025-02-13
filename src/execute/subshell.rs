@@ -34,7 +34,7 @@ pub fn exec_subshell<'a>(subsh: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()
 fn handle_external_subshell(script: String, argv: VecDeque<String>, lash: &mut Lash) -> LashResult<()> {
 	let argv = argv.into_iter().map(|arg| CString::new(arg).unwrap()).collect::<Vec<_>>();
 	let envp = lash.get_cstring_evars()?;
-	let mut memfd = utils::SmartFD::memfd_create("anonymous_subshell", 1)?;
+	let mut memfd = utils::SmartFD::new_memfd("anonymous_subshell", true)?;
 	write!(memfd,"{}",script)?;
 
 	let fd_path = CString::new(format!("/proc/self/fd/{memfd}")).unwrap();

@@ -208,7 +208,7 @@ impl Lash {
 
 
 	pub fn source_file<'a>(&mut self, path: &str) -> LashResult<()> {
-		let mut file = utils::SmartFD::std_open(&path)?;
+		let mut file = utils::SmartFD::std_open(Path::new(path))?;
 		let mut buffer = String::new();
 		file.read_to_string(&mut buffer).map_err(|_| Low(LashErrLow::from_io()))?;
 		file.close()?;

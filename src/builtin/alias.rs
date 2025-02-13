@@ -1,5 +1,9 @@
 use crate::{helper, pest_ext::ARG_RULES, prelude::*, utils};
 
+/// Creates a new alias from the given arguments
+/// Can create more than one alias at a time
+/// Expects the "arg_assign" rule in the inner pairs
+/// "arg_assign" appears in argument positions and looks like this: foo=bar
 pub fn execute<'a>(alias_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
 	let mut stdout = utils::SmartFD::new(STDOUT_FILENO)?;
 
@@ -34,6 +38,7 @@ pub fn execute<'a>(alias_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()>
 	Ok(())
 }
 
+/// Removes an alias from the logic table
 pub fn unalias<'a>(pair: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
 	let mut argv = helper::prepare_argv(pair, lash)?;
 	argv.pop_front();

@@ -151,7 +151,7 @@ pub fn exec_builtin(cmd: Pair<Rule>, name: &str, lash: &mut Lash) -> LashResult<
 		"echo" => builtin::echo::execute(cmd, lash)?,
 		"builtin" => builtin::cmd_override::execute(cmd, lash, true)?,
 		"command" => builtin::cmd_override::execute(cmd, lash, false)?,
-		_ => unimplemented!("Have not implemented support for builtin `{}` yet",name)
+		_ => return Err(High(LashErrHigh::exec_err(format!("Have not implemented support for builtin `{}` yet",name),blame)))
 	};
 	lash.set_code(0);
 	Ok(())
