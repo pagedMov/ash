@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgAction, Parser as ClapParser};
-use error::{LashErrExt, LashResult};
+use error::{LashErr, LashErrExt, LashErrLow, LashResult};
 use execute::dispatch;
 use shellenv::Lash;
 
@@ -71,7 +71,21 @@ fn main() {
 
 		match result {
 			Ok(_) => continue,
-			Err(e) => eprintln!("{}",e)
+			Err(e) => {
+				match e {
+					LashErr::Low(LashErrLow::CleanExit(code)) => {
+						std::process::exit(code)
+					}
+					LashErr::High(ref high) => {
+						if let LashErrLow::CleanExit(code) = high.get_err() {
+							std::process::exit(*code)
+						} else {
+							eprintln!("{}",e)
+						}
+					}
+					_ => eprintln!("{}",e)
+				}
+			}
 		}
 	}
 }

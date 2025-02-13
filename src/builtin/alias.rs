@@ -34,6 +34,17 @@ pub fn execute<'a>(alias_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()>
 	Ok(())
 }
 
+pub fn unalias<'a>(pair: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
+	let mut argv = helper::prepare_argv(pair, lash)?;
+	argv.pop_front();
+	while let Some(arg) = argv.pop_front() {
+		if lash.logic().get_alias(&arg).is_some() {
+			lash.logic_mut().remove_alias(&arg);
+		}
+	}
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use crate::execute;

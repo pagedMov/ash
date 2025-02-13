@@ -10,6 +10,7 @@ pub mod pwd;
 pub mod source;
 pub mod test;
 pub mod control;
+pub mod cmd_override;
 
 pub const BUILTINS: [&str; 43] = [
 	"try", "except", "return", "break", "continue", "exit", "command", "pushd", "popd", "setopt", "getopt", "type", "string", "int", "bool", "arr", "float", "dict", "expr", "echo", "jobs", "unset", "fg", "bg", "set", "builtin", "test", "[", "shift", "unalias", "alias", "export", "cd", "readonly", "declare", "local", "unset", "trap", "node", "exec", "source", "read_func", "wait",
