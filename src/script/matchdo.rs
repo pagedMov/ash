@@ -1,6 +1,6 @@
 use crate::prelude::*;
 
-pub fn exec_match_cmd<'a>(cmd: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
+pub fn exec_match_cmd<'a>(cmd: Pair<'a,Rule>, slash: &mut Slash) -> SlashResult<()> {
 	let mut inner = cmd.into_inner();
 	let match_pat = inner.next().unpack()?;
 	let mut arms = VecDeque::new();
@@ -15,10 +15,10 @@ pub fn exec_match_cmd<'a>(cmd: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()>
 		let arm_body = inner.next().unpack()?.as_str();
 
 		if arm_pat.as_str().trim() == match_pat.as_str().trim() {
-			lash.exec_as_body(arm_body)?;
+			slash.exec_as_body(arm_body)?;
 			break
 		}
 	}
-	lash.set_code(0);
+	slash.set_code(0);
 	Ok(())
 }

@@ -1,6 +1,6 @@
 use nix::{sys::{signal::{killpg, signal, SigHandler, Signal} , wait::{waitpid, WaitPidFlag, WaitStatus}}, unistd::{getpgid, getpgrp, Pid}};
 
-use crate::{error::{LashErr, LashErrLow}, helper, shellenv::{self, read_jobs, write_jobs, JobCmdFlags, JobID}, LashResult};
+use crate::{error::{SlashErr, SlashErrLow}, helper, shellenv::{self, read_jobs, write_jobs, JobCmdFlags, JobID}, SlashResult};
 
 pub fn sig_handler_setup() {
 	unsafe {
@@ -81,7 +81,7 @@ pub extern "C" fn handle_sigchld(_: libc::c_int) {
 }
 
 //TODO: extract some of this logic from the closure to spend less time holding a write lock
-pub fn handle_child_signal<'a>(pid: Pid, sig: Signal) -> LashResult<()> {
+pub fn handle_child_signal<'a>(pid: Pid, sig: Signal) -> SlashResult<()> {
 	let pgid = getpgid(Some(pid)).unwrap_or(pid);
 	write_jobs(|j| {
 		if let Some(job) = j.query_mut(JobID::Pgid(pgid)) {
@@ -96,7 +96,7 @@ pub fn handle_child_signal<'a>(pid: Pid, sig: Signal) -> LashResult<()> {
 	Ok(())
 }
 
-pub fn handle_child_stop<'a>(pid: Pid, signal: Signal) -> LashResult<()> {
+pub fn handle_child_stop<'a>(pid: Pid, signal: Signal) -> SlashResult<()> {
 	let pgid = getpgid(Some(pid)).unwrap_or(pid);
 	write_jobs(|j| {
 		if let Some(job) = j.query_mut(JobID::Pgid(pgid)) {
@@ -112,7 +112,7 @@ pub fn handle_child_stop<'a>(pid: Pid, signal: Signal) -> LashResult<()> {
 	Ok(())
 }
 
-pub fn handle_child_exit<'a>(pid: Pid, status: WaitStatus) -> LashResult<()> {
+pub fn handle_child_exit<'a>(pid: Pid, status: WaitStatus) -> SlashResult<()> {
 	/*
 	 * Here we are going to get metadata on the exited process by querying the job table with the pid.
 	 * Then if the discovered job is the fg task, return terminal control to rsh
@@ -138,7 +138,7 @@ pub fn handle_child_exit<'a>(pid: Pid, status: WaitStatus) -> LashResult<()> {
 
 			Ok((pgid, is_fg, is_finished))
 		} else {
-			Err(LashErr::Low(LashErrLow::InternalErr("Job not found".into())))
+			Err(SlashErr::Low(SlashErrLow::InternalErr("Job not found".into())))
 		}
 	})??;
 
@@ -157,7 +157,7 @@ pub fn handle_child_exit<'a>(pid: Pid, status: WaitStatus) -> LashResult<()> {
 	Ok(())
 }
 
-pub fn handle_child_continue<'a>(pid: Pid) -> LashResult<()> {
+pub fn handle_child_continue<'a>(pid: Pid) -> SlashResult<()> {
 	let pgid = getpgid(Some(pid)).unwrap_or(pid);
 	write_jobs(|j| {
 		if let Some(job) = j.query_mut(JobID::Pgid(pgid)) {

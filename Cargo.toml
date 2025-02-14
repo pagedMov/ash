@@ -1,5 +1,5 @@
 [package]
-name = "lash"
+name = "slash"
 description = "A linux shell written in rust"
 publish = false
 version = "0.1.0"

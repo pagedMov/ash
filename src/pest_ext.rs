@@ -19,21 +19,21 @@ impl Rules for &[Rule] {
 }
 
 pub trait OptPairExt<'a> {
-	fn unpack(self) -> LashResult<Pair<'a,Rule>>;
+	fn unpack(self) -> SlashResult<Pair<'a,Rule>>;
 }
 
 impl<'a> OptPairExt<'a> for Option<Pair<'a,Rule>> {
-	/// There are many places in the lash codebase where we can be reasonably certain that an Option<Pair> will be Some
+	/// There are many places in the slash codebase where we can be reasonably certain that an Option<Pair> will be Some
 	/// However, if we are wrong for whatever reason, it's probably better to not crash the program by calling unwrap()
 	///
 	/// This function is essentially a safe unwrap that returns our error type instead of panicking
 	#[track_caller]
-	fn unpack(self) -> LashResult<Pair<'a,Rule>> {
+	fn unpack(self) -> SlashResult<Pair<'a,Rule>> {
 		if let Some(pair) = self {
 			Ok(pair)
 		} else {
 			dbg!(std::panic::Location::caller());
-			Err(Low(LashErrLow::InternalErr("Called unpack() on a None value".into())))
+			Err(Low(SlashErrLow::InternalErr("Called unpack() on a None value".into())))
 		}
 	}
 }
@@ -42,7 +42,7 @@ pub trait PairExt<'a> {
 	fn to_vec(self) -> Vec<Pair<'a,Rule>>;
 	fn to_deque(self) -> VecDeque<Pair<'a,Rule>>;
 	fn contains_rules<R: Rules>(&self, rule: R) -> bool;
-	fn process_args(&self, lash: &mut Lash) -> Vec<String>;
+	fn process_args(&self, slash: &mut Slash) -> Vec<String>;
 	fn filter<R: Rules>(&self, rules: R) -> VecDeque<Pair<'a,Rule>>;
 	fn seek_all<R: Rules>(&self, rules: R) -> VecDeque<Pair<'a,Rule>>;
 	fn scry<R: Rules>(&self, rules: R) -> Option<Pair<'a,Rule>>;
@@ -98,7 +98,7 @@ impl<'a> PairExt<'a> for Pair<'a,Rule> {
 		self.into_inner().collect::<VecDeque<_>>()
 	}
 	/// Automatically process command arguments, sorting words and redirections
-	fn process_args(&self, lash: &mut Lash) -> Vec<String> {
+	fn process_args(&self, slash: &mut Slash) -> Vec<String> {
 		let mut argv = vec![];
 		if self.as_rule() != Rule::simple_cmd {
 			return argv
@@ -107,7 +107,7 @@ impl<'a> PairExt<'a> for Pair<'a,Rule> {
 		for arg in inner {
 			match arg.as_rule() {
 				Rule::word | Rule::cmd_name | Rule::arg_assign => argv.push(arg.as_str().trim_quotes()),
-				Rule::redir => lash.ctx_mut().push_redir(utils::Redir::from_pair(arg).unwrap()),
+				Rule::redir => slash.ctx_mut().push_redir(utils::Redir::from_pair(arg).unwrap()),
 				_ => unreachable!("Unexpected rule: {:?}",arg.as_rule())
 			}
 		}
@@ -350,7 +350,7 @@ esc_failure_symbol =  { "\\F" }
 esc_bell           =  { "\\a" }
 esc_newline        =  { "\\n" }
 esc_return         =  { "\\r" }
-esc_backslash      =  { "\\" }
+esc_backsslash      =  { "\\" }
 esc_squote         =  { "'" }
 esc_dquote         =  { "\"" }
 esc_weekday        =  { "\\d" }
@@ -488,4 +488,4 @@ brace_grp = { "{" ~ sub_main ~ "}" }
 sub_main = _{ NEWLINE* ~ cmd_list? ~ (sep ~ cmd_list?)* ~ NEWLINE* }
 main     =  { SOI ~ NEWLINE* ~ cmd_list? ~ (sep ~ cmd_list?)* ~ NEWLINE* ~ EOI }
 "##]
-pub struct LashParse;
+pub struct SlashParse;

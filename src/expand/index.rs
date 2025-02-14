@@ -1,19 +1,19 @@
-use crate::{prelude::*, shellenv::LashVal};
+use crate::{prelude::*, shellenv::SlashVal};
 
-pub fn expand_index(pair: Pair<Rule>,lash: &mut Lash) -> LashResult<String> {
+pub fn expand_index(pair: Pair<Rule>,slash: &mut Slash) -> SlashResult<String> {
 	let mut inner = pair.step(1).unpack()?.into_inner().peekable();
 	let arr_name = inner.next().unpack()?;
 
-	let array = lash.vars().get_var(arr_name.as_str());
+	let array = slash.vars().get_var(arr_name.as_str());
 	let mut cur_val = match array {
-		Some(LashVal::Array(vec)) => Some(LashVal::Array(vec)),
+		Some(SlashVal::Array(vec)) => Some(SlashVal::Array(vec)),
 		_ => return Ok(String::new()), // If not an array, return empty
 	};
 
 	while let Some(index) = inner.next() {
-		let idx = index.as_str().parse::<usize>().map_err(|_| Low(LashErrLow::IndexErr(format!("Index '{}' out of range for array '{}'",index,arr_name.as_str()))))?;
+		let idx = index.as_str().parse::<usize>().map_err(|_| Low(SlashErrLow::IndexErr(format!("Index '{}' out of range for array '{}'",index,arr_name.as_str()))))?;
 		cur_val = match cur_val {
-			Some(LashVal::Array(vec)) => vec.get(idx).cloned(),
+			Some(SlashVal::Array(vec)) => vec.get(idx).cloned(),
 			_ => return Ok(String::new()), // Invalid nesting (e.g., indexing a non-array)
 		};
 	}

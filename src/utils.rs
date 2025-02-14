@@ -44,10 +44,13 @@ pub const SHELL_CMDS: [&str;6] = [
 bitflags::bitflags! {
 	#[derive(Debug,Clone,Copy)]
 	pub struct ExecFlags: u32 {
-		const NO_FORK    = 0b00000000000000000000000000000001;
-		const BACKGROUND = 0b00000000000000000000000000000010;
-		const IN_PIPE    = 0b00000000000000000000000000000100;
-		const IGN_FUNC   = 0b00000000000000000000000000001000;
+		const NO_FORK       = 0b00000000000000000000000000000001;
+		const BACKGROUND    = 0b00000000000000000000000000000010;
+		const IN_PIPE       = 0b00000000000000000000000000000100;
+		const IGN_FUNC      = 0b00000000000000000000000000001000;
+		const NO_RESET_IN   = 0b00000000000000000000000000010000;
+		const NO_RESET_OUT  = 0b00000000000000000000000000100000;
+		const NO_RESET_ERR  = 0b00000000000000000000000001000000;
 	}
 }
 
@@ -61,7 +64,7 @@ pub struct Redir {
 }
 
 impl Redir {
-	pub fn from_pair(pair: Pair<Rule>) -> LashResult<Self> {
+	pub fn from_pair(pair: Pair<Rule>) -> SlashResult<Self> {
 		if let Rule::redir = pair.as_rule() {
 			let mut inner = pair.into_inner();
 			let mut redir_type = None;
@@ -108,7 +111,7 @@ impl Redir {
 				}
 			)
 		} else {
-			Err(Low(LashErrLow::InternalErr(format!("Expected a redir rule in redir construction got this: {:?}", pair.as_rule()))))
+			Err(Low(SlashErrLow::InternalErr(format!("Expected a redir rule in redir construction got this: {:?}", pair.as_rule()))))
 		}
 	}
 	pub fn from_raw(our_fd: RawFd, their_fd: RawFd) -> Self {
@@ -144,18 +147,18 @@ impl CmdRedirs {
 		}
 		Self { open_fds: vec![], targets_fd, targets_file }
 	}
-	pub fn activate(&mut self) -> LashResult<()> {
+	pub fn activate(&mut self) -> SlashResult<()> {
 		self.open_file_targets()?;
 		self.open_their_fds()?;
 		Ok(())
 	}
-	pub fn close_all(mut self) -> LashResult<()> {
+	pub fn close_all(mut self) -> SlashResult<()> {
 		for fd in self.open_fds.iter_mut() {
 			fd.close()?
 		}
 		Ok(())
 	}
-	pub fn open_file_targets(&mut self) -> LashResult<()> {
+	pub fn open_file_targets(&mut self) -> SlashResult<()> {
 		for redir in &self.targets_file {
 			let Redir { redir_type, our_fd, their_fd: _, file_target } = redir;
 			let src_fd = SmartFD::new(*our_fd)?;
@@ -174,7 +177,7 @@ impl CmdRedirs {
 		}
 		Ok(())
 	}
-	pub fn open_their_fds(&mut self) -> LashResult<()> {
+	pub fn open_their_fds(&mut self) -> SlashResult<()> {
 		for redir in &self.targets_fd {
 			let Redir { redir_type: _, our_fd, their_fd, file_target: _ } = redir;
 			let mut tgt_fd = SmartFD::new(their_fd.unwrap())?;
@@ -308,7 +311,7 @@ impl AsFd for SmartFD {
 }
 
 impl<'a> SmartFD {
-	pub fn new(fd: RawFd) -> LashResult<Self> {
+	pub fn new(fd: RawFd) -> SlashResult<Self> {
 		if fd < 0 {
 			panic!()
 		}
@@ -316,79 +319,79 @@ impl<'a> SmartFD {
 	}
 
 	/// Create a `SmartFD` from a duplicate of `stdin` (FD 0)
-	pub fn from_stdin() -> LashResult<Self> {
-		let fd = dup(0).map_err(|_| Low(LashErrLow::from_io()))?;
+	pub fn from_stdin() -> SlashResult<Self> {
+		let fd = dup(0).map_err(|_| Low(SlashErrLow::from_io()))?;
 		Ok(Self { fd })
 	}
 
 	/// Create a `SmartFD` from a duplicate of `stdout` (FD 1)
-	pub fn from_stdout() -> LashResult<Self> {
-		let fd = dup(1).map_err(|_| Low(LashErrLow::from_io()))?;
+	pub fn from_stdout() -> SlashResult<Self> {
+		let fd = dup(1).map_err(|_| Low(SlashErrLow::from_io()))?;
 		Ok(Self { fd })
 	}
 
 	/// Create a `SmartFD` from a duplicate of `stderr` (FD 2)
-	pub fn from_stderr() -> LashResult<Self> {
-		let fd = dup(2).map_err(|_| Low(LashErrLow::from_io()))?;
+	pub fn from_stderr() -> SlashResult<Self> {
+		let fd = dup(2).map_err(|_| Low(SlashErrLow::from_io()))?;
 		Ok(Self { fd })
 	}
 
 	/// Create a `SmartFD` from a type that provides an owned or borrowed FD
-	pub fn from_fd<T: AsFd>(fd: T) -> LashResult<Self> {
+	pub fn from_fd<T: AsFd>(fd: T) -> SlashResult<Self> {
 		let raw_fd = fd.as_fd().as_raw_fd();
 		if raw_fd < 0 {
-			return Err(Low(LashErrLow::BadFD("Attempted to create a SmartFD from a negative int".into())))
+			return Err(Low(SlashErrLow::BadFD("Attempted to create a SmartFD from a negative int".into())))
 		}
 		Ok(SmartFD { fd: raw_fd })
 	}
 
 	/// Create a `SmartFD` by consuming ownership of an FD
-	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> LashResult<Self> {
+	pub fn from_owned_fd<T: IntoRawFd>(fd: T) -> SlashResult<Self> {
 		let raw_fd = fd.into_raw_fd(); // Consumes ownership
 		if raw_fd < 0 {
-			return Err(Low(LashErrLow::BadFD("Attempted to create a SmartFD from a negative int".into())))
+			return Err(Low(SlashErrLow::BadFD("Attempted to create a SmartFD from a negative int".into())))
 		}
 		Ok(SmartFD { fd: raw_fd })
 	}
 
 	/// Create a new `SmartFD` that points to an in-memory file descriptor. In-memory file descriptors can be interacted with as though they were normal files.
-	pub fn new_memfd(name: &str, executable: bool) -> LashResult<Self> {
+	pub fn new_memfd(name: &str, executable: bool) -> SlashResult<Self> {
 		let c_name = CString::new(name).unwrap();
 		let flags = if executable {
 			MemFdCreateFlag::empty()
 		} else {
 			MemFdCreateFlag::MFD_CLOEXEC
 		};
-		let fd = memfd_create(&c_name, flags).map_err(|_| Low(LashErrLow::from_io()))?;
+		let fd = memfd_create(&c_name, flags).map_err(|_| Low(SlashErrLow::from_io()))?;
 		Ok(SmartFD { fd: fd.as_raw_fd() })
 	}
 
 	/// Wrapper for nix::unistd::pipe(), simply produces two `SmartFDs` that point to a read and write pipe respectfully
-	pub fn pipe() -> LashResult<(Self,Self)> {
-		let (r_pipe,w_pipe) = pipe().map_err(|_| Low(LashErrLow::from_io()))?;
+	pub fn pipe() -> SlashResult<(Self,Self)> {
+		let (r_pipe,w_pipe) = pipe().map_err(|_| Low(SlashErrLow::from_io()))?;
 		let r_fd = SmartFD::from_owned_fd(r_pipe)?;
 		let w_fd = SmartFD::from_owned_fd(w_pipe)?;
 		Ok((r_fd,w_fd))
 	}
 
 	/// Produce a `SmartFD` that points to the same resource as the 'self' `SmartFD`
-	pub fn dup(&self) -> LashResult<Self> {
+	pub fn dup(&self) -> SlashResult<Self> {
 		if !self.is_valid() {
-			return Err(Low(LashErrLow::BadFD("Attempted to call `dup()` on an invalid SmartFD".into())))
+			return Err(Low(SlashErrLow::BadFD("Attempted to call `dup()` on an invalid SmartFD".into())))
 		}
 		let new_fd = dup(self.fd).unwrap();
 		Ok(SmartFD { fd: new_fd })
 	}
 
 	/// A wrapper for nix::unistd::dup2(), 'self' is duplicated to the given target file descriptor.
-	pub fn dup2<T: AsRawFd>(&self, target: &T) -> LashResult<()> {
+	pub fn dup2<T: AsRawFd>(&self, target: &T) -> SlashResult<()> {
 		let target_fd = target.as_raw_fd();
 		if self.fd == target_fd {
 			// Nothing to do here
 			return Ok(())
 		}
 		if !self.is_valid() || target_fd < 0 {
-			return Err(Low(LashErrLow::BadFD("Attempted to call `dup2()` on an invalid SmartFD".into())))
+			return Err(Low(SlashErrLow::BadFD("Attempted to call `dup2()` on an invalid SmartFD".into())))
 		}
 
 		dup2(self.fd, target_fd).unwrap();
@@ -396,27 +399,27 @@ impl<'a> SmartFD {
 	}
 
 	/// Open a file using a file descriptor, with the given OFlags and Mode bits
-	pub fn open(path: &Path, flags: OFlag, mode: Mode) -> LashResult<Self> {
+	pub fn open(path: &Path, flags: OFlag, mode: Mode) -> SlashResult<Self> {
 		let file_fd = open(path, flags, mode);
 		if let Ok(file_fd) = file_fd {
 			Ok(Self { fd: file_fd })
 		} else {
-			return Err(Low(LashErrLow::BadFD(format!("Attempted to open non-existant file '{}'",path.to_str().unwrap()))))
+			return Err(Low(SlashErrLow::BadFD(format!("Attempted to open non-existant file '{}'",path.to_str().unwrap()))))
 		}
 	}
 
-	pub fn std_open(path: &Path) -> LashResult<Self> {
+	pub fn std_open(path: &Path) -> SlashResult<Self> {
 		let flags = OFlag::O_RDWR;
 		let mode = Mode::from_bits(0o644).unwrap();
 		let fd = open(path, flags, mode);
 		if let Ok(file) = fd {
 			Ok(Self { fd: file})
 		} else {
-			return Err(Low(LashErrLow::BadFD(format!("Attempted to open non-existant file '{}'",path.to_str().unwrap()))))
+			return Err(Low(SlashErrLow::BadFD(format!("Attempted to open non-existant file '{}'",path.to_str().unwrap()))))
 		}
 	}
 
-	pub fn close(&mut self) -> LashResult<()> {
+	pub fn close(&mut self) -> SlashResult<()> {
 		if !self.is_valid() {
 			return Ok(())
 		}
@@ -477,11 +480,11 @@ pub fn exec_external(command: CString, argv: Vec<CString>, envp: Vec<CString>,bl
 	let Err(e) = execvpe(&command, &argv, &envp);
 	match e {
 		Errno::ENOENT => {
-			let error = High(LashErrHigh::cmd_not_found(command.to_str().unwrap(), blame));
+			let error = High(SlashErrHigh::cmd_not_found(command.to_str().unwrap(), blame));
 			eprintln!("{}",error);
 		}
 		Errno::EACCES => {
-			let error = High(LashErrHigh::no_permission(command.to_str().unwrap(), blame));
+			let error = High(SlashErrHigh::no_permission(command.to_str().unwrap(), blame));
 			eprintln!("{}",error);
 		}
 		_ => unimplemented!("Case for `{}` not implemented", e.to_string())
@@ -489,7 +492,7 @@ pub fn exec_external(command: CString, argv: Vec<CString>, envp: Vec<CString>,bl
 	std::process::exit(e as i32)
 }
 
-pub fn handle_parent_process<'a>(child: Pid, command: String, lash: &mut Lash) -> LashResult<()> {
+pub fn handle_parent_process<'a>(child: Pid, command: String, slash: &mut Slash) -> SlashResult<()> {
 	let children = vec![
 		ChildProc::new(child, Some(&command), None)?
 	];
@@ -498,11 +501,11 @@ pub fn handle_parent_process<'a>(child: Pid, command: String, lash: &mut Lash) -
 		.with_pgid(child)
 		.build();
 
-	helper::handle_fg(lash,job)?;
+	helper::handle_fg(slash,job)?;
 	Ok(())
 }
 
-pub fn save_fds() -> LashResult<(SmartFD,SmartFD,SmartFD)> {
+pub fn save_fds() -> SlashResult<(SmartFD,SmartFD,SmartFD)> {
 	Ok((
 		SmartFD::from_stdin()?,
 		SmartFD::from_stdout()?,
@@ -510,12 +513,19 @@ pub fn save_fds() -> LashResult<(SmartFD,SmartFD,SmartFD)> {
 	))
 }
 
-pub fn restore_fds(mut stdio: (SmartFD,SmartFD,SmartFD)) -> LashResult<()> {
-	stdio.0.dup2(&0)?;
-	stdio.0.close()?;
-	stdio.1.dup2(&1)?;
-	stdio.1.close()?;
-	stdio.2.dup2(&2)?;
-	stdio.2.close()?;
+pub fn restore_fds(mut stdio: (SmartFD,SmartFD,SmartFD), slash: &mut Slash) -> SlashResult<()> {
+	let flags = slash.ctx().flags();
+	if !flags.contains(ExecFlags::NO_RESET_IN) {
+		stdio.0.dup2(&0)?;
+		stdio.0.close()?;
+	}
+	if !flags.contains(ExecFlags::NO_RESET_OUT) {
+		stdio.1.dup2(&1)?;
+		stdio.1.close()?;
+	}
+	if !flags.contains(ExecFlags::NO_RESET_ERR) {
+		stdio.2.dup2(&2)?;
+		stdio.2.close()?;
+	}
 	Ok(())
 }

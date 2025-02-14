@@ -4,19 +4,19 @@ use nix::{sys::signal::{kill, Signal}, unistd::Pid};
 use rustyline::{completion::FilenameCompleter, error::ReadlineError, history::History, Helper};
 
 use crate::prelude::*;
-use crate::{error::{LashErr::*, LashErrLow}, expand, shellenv::Lash, LashResult};
+use crate::{error::{SlashErr::*, SlashErrLow}, expand, shellenv::Slash, SlashResult};
 
 use super::rl_init;
 
 #[derive(Helper)]
-pub struct LashHelper<'a> {
+pub struct SlashHelper<'a> {
 	pub filename_comp: FilenameCompleter,
-	pub lash: &'a mut Lash,
+	pub slash: &'a mut Slash,
 	pub commands: Vec<String>
 }
 
-impl<'a> LashHelper<'a> {
-	pub fn new(lash: &'a mut Lash) -> Self {
+impl<'a> SlashHelper<'a> {
+	pub fn new(slash: &'a mut Slash) -> Self {
 		// Prepopulate some built-in commands (could also load dynamically)
 		let commands = vec![
 			"cd".to_string(),
@@ -25,9 +25,9 @@ impl<'a> LashHelper<'a> {
 			"exit".to_string(),
 		];
 
-		let mut helper = LashHelper {
+		let mut helper = SlashHelper {
 			filename_comp: FilenameCompleter::new(),
-			lash,
+			slash,
 			commands,
 		};
 		helper.update_commands_from_path();
@@ -65,15 +65,15 @@ impl<'a> LashHelper<'a> {
 	}
 }
 
-pub fn run_prompt(lash: &mut Lash) -> LashResult<String> {
-	lash.stop_timer()?;
-	lash.meta_mut().enter_prompt();
+pub fn run_prompt(slash: &mut Slash) -> SlashResult<String> {
+	slash.stop_timer()?;
+	slash.meta_mut().enter_prompt();
 
-	let hist_path = lash.vars().get_evar("HIST_FILE").unwrap_or_else(|| -> String {
-		let home = lash.vars().get_evar("HOME").unwrap_or_default();
-		format!("{}/.lash_hist",home)
+	let hist_path = slash.vars().get_evar("HIST_FILE").unwrap_or_else(|| -> String {
+		let home = slash.vars().get_evar("HOME").unwrap_or_default();
+		format!("{}/.slash_hist",home)
 	});
-	let prompt = match expand::misc::expand_prompt(None,lash) {
+	let prompt = match expand::misc::expand_prompt(None,slash) {
 		Ok(expanded) => expanded,
 		Err(e) => {
 			eprintln!("Prompt Expansion Error: {}",e);
@@ -81,34 +81,34 @@ pub fn run_prompt(lash: &mut Lash) -> LashResult<String> {
 		}
 	};
 
-	let mut lash_clone = lash.clone();
-	let mut rl = rl_init::init_prompt(&mut lash_clone)?;
+	let mut slash_clone = slash.clone();
+	let mut rl = rl_init::init_prompt(&mut slash_clone)?;
 	match rl.readline(&prompt) {
 		Ok(line) => {
-			lash.meta_mut().leave_prompt();
+			slash.meta_mut().leave_prompt();
 			if !line.is_empty() {
 				rl.history_mut()
 					.add(&line)
-					.map_err(|_| Low(LashErrLow::InternalErr("Failed to write to history file".into())))?;
+					.map_err(|_| Low(SlashErrLow::InternalErr("Failed to write to history file".into())))?;
 					rl.history_mut()
 						.save(Path::new(&hist_path))
-						.map_err(|_| Low(LashErrLow::InternalErr("Failed to write to history file".into())))?;
-					lash.meta_mut().set_last_input(&line);
+						.map_err(|_| Low(SlashErrLow::InternalErr("Failed to write to history file".into())))?;
+					slash.meta_mut().set_last_input(&line);
 			}
 			Ok(line)
 		}
 		Err(ReadlineError::Interrupted) => {
-			lash.meta_mut().leave_prompt();
+			slash.meta_mut().leave_prompt();
 			Ok(String::new())
 		}
 		Err(ReadlineError::Eof) => {
-			lash.meta_mut().leave_prompt();
-			kill(Pid::this(), Signal::SIGQUIT).map_err(|_| Low(LashErrLow::from_io()))?;
+			slash.meta_mut().leave_prompt();
+			kill(Pid::this(), Signal::SIGQUIT).map_err(|_| Low(SlashErrLow::from_io()))?;
 			Ok(String::new())
 		}
 		Err(e) => {
-			lash.meta_mut().leave_prompt();
-			Err(Low(LashErrLow::InternalErr(format!("rustyline error: {}",e.to_string()))))?
+			slash.meta_mut().leave_prompt();
+			Err(Low(SlashErrLow::InternalErr(format!("rustyline error: {}",e.to_string()))))?
 		}
 	}
 }

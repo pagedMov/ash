@@ -1,9 +1,9 @@
 use crate::pest_ext::ARG_RULES;
 use crate::prelude::*;
 
-use crate::{error::{LashErr::*, LashErrHigh}, helper::{self}, shellenv::{HashFloat, Lash, LashVal}, LashResult};
+use crate::{error::{SlashErr::*, SlashErrHigh}, helper::{self}, shellenv::{HashFloat, Slash, SlashVal}, SlashResult};
 
-pub fn execute<'a>(assign: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
+pub fn execute<'a>(assign: Pair<'a,Rule>, slash: &mut Slash) -> SlashResult<()> {
 	let blame = assign.clone();
 	let mut argv = assign.filter(&ARG_RULES[..]);
 	let cmd_name = assign.scry(Rule::cmd_name).unpack()?;
@@ -13,55 +13,55 @@ pub fn execute<'a>(assign: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
 				let var_name = arg.scry(Rule::var_ident).unpack()?;
 				if let Some(val) = arg.scry(&[Rule::word,Rule::array][..]) {
 					let rule = val.as_rule();
-					let val = helper::try_expansion(lash,val)?;
-					let lash_val = match cmd_name.as_str() {
+					let val = helper::try_expansion(slash,val)?;
+					let slash_val = match cmd_name.as_str() {
 						"string" => {
-							LashVal::String(val.trim_quotes().to_string())
+							SlashVal::String(val.trim_quotes().to_string())
 						}
 						"int" => {
-							let lash_int = val.as_str().parse::<i32>();
-							if lash_int.is_err() {
+							let slash_int = val.as_str().parse::<i32>();
+							if slash_int.is_err() {
 								let msg = format!("Expected an integer in `int` assignment");
-								return Err(High(LashErrHigh::syntax_err(msg, blame)))
+								return Err(High(SlashErrHigh::syntax_err(msg, blame)))
 							}
-							LashVal::Int(lash_int.unwrap())
+							SlashVal::Int(slash_int.unwrap())
 						}
 						"bool" => {
-							let lash_bool = val.as_str().parse::<bool>();
-							if lash_bool.is_err() {
+							let slash_bool = val.as_str().parse::<bool>();
+							if slash_bool.is_err() {
 								let msg = format!("Expected a boolean in `bool` assignment");
-								return Err(High(LashErrHigh::syntax_err(msg, blame)))
+								return Err(High(SlashErrHigh::syntax_err(msg, blame)))
 							}
-							LashVal::Bool(lash_bool.unwrap())
+							SlashVal::Bool(slash_bool.unwrap())
 						}
 						"float" => {
-							let lash_float = val.as_str().parse::<f64>();
-							if lash_float.is_err() {
+							let slash_float = val.as_str().parse::<f64>();
+							if slash_float.is_err() {
 								let msg = format!("Expected a floating point value in `float` assignment");
-								return Err(High(LashErrHigh::syntax_err(msg, blame)))
+								return Err(High(SlashErrHigh::syntax_err(msg, blame)))
 							}
-							LashVal::Float(HashFloat(lash_float.unwrap()))
+							SlashVal::Float(HashFloat(slash_float.unwrap()))
 						}
 						"arr" => {
 							if let Rule::array = rule {
-								let val = LashVal::parse(val.as_str())?;
+								let val = SlashVal::parse(val.as_str())?;
 								val
 							} else {
 								let msg = format!("Expected an array in `array` assignment");
-								return Err(High(LashErrHigh::syntax_err(msg, blame)))
+								return Err(High(SlashErrHigh::syntax_err(msg, blame)))
 							}
 						}
 						_ => unimplemented!("Have not yet implemented var type builtin '{}'",cmd_name.as_str())
 					};
-					lash.vars_mut().set_var(var_name.as_str(), lash_val);
+					slash.vars_mut().set_var(var_name.as_str(), slash_val);
 				} else {
-					lash.vars_mut().unset_var(var_name.as_str());
+					slash.vars_mut().unset_var(var_name.as_str());
 				}
 			}
 			Rule::redir => { /* Do nothing */ }
 			_ => {
 				let msg = format!("Expected assignment in '{}' args, found this: '{}'",cmd_name.as_str(),arg.as_str());
-				return Err(High(LashErrHigh::syntax_err(msg, blame)))
+				return Err(High(SlashErrHigh::syntax_err(msg, blame)))
 			}
 		}
 	}
@@ -76,56 +76,56 @@ use super::*;
 
 	#[test]
 	fn test_assign_int() {
-		let mut lash = Lash::new();
+		let mut slash = Slash::new();
 		let input = "int var=5";
 
-		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
-		assert_eq!(lash.vars().get_var("var"), Some(LashVal::Int(5)))
+		execute::dispatch::exec_input(input.to_string(), &mut slash).unwrap();
+		assert_eq!(slash.vars().get_var("var"), Some(SlashVal::Int(5)))
 	}
 	#[test]
 	fn test_assign_string() {
-		let mut lash = Lash::new();
+		let mut slash = Slash::new();
 		let input = "string var=\"foo bar\"";
 
-		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
-		assert_eq!(lash.vars().get_var("var"), Some(LashVal::String("foo bar".to_string())))
+		execute::dispatch::exec_input(input.to_string(), &mut slash).unwrap();
+		assert_eq!(slash.vars().get_var("var"), Some(SlashVal::String("foo bar".to_string())))
 	}
 	#[test]
 	fn test_assign_float() {
-		let mut lash = Lash::new();
+		let mut slash = Slash::new();
 		let input = "float pi=3.14";
 
-		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
-		assert_eq!(lash.vars().get_var("pi"), Some(LashVal::Float(HashFloat(3.14))))
+		execute::dispatch::exec_input(input.to_string(), &mut slash).unwrap();
+		assert_eq!(slash.vars().get_var("pi"), Some(SlashVal::Float(HashFloat(3.14))))
 	}
 	#[test]
 	fn test_assign_bool() {
-		let mut lash = Lash::new();
+		let mut slash = Slash::new();
 		let input = "bool var=true";
 
-		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
-		assert_eq!(lash.vars().get_var("var"), Some(LashVal::Bool(true)));
+		execute::dispatch::exec_input(input.to_string(), &mut slash).unwrap();
+		assert_eq!(slash.vars().get_var("var"), Some(SlashVal::Bool(true)));
 
-		let mut lash = Lash::new();
+		let mut slash = Slash::new();
 		let input = "bool var=false";
 
-		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
-		assert_eq!(lash.vars().get_var("var"), Some(LashVal::Bool(false)))
+		execute::dispatch::exec_input(input.to_string(), &mut slash).unwrap();
+		assert_eq!(slash.vars().get_var("var"), Some(SlashVal::Bool(false)))
 	}
 	#[test]
 	fn test_assign_array() {
-		let mut lash = Lash::new();
+		let mut slash = Slash::new();
 		let input = "arr list=[1, \"foo\", 3.14, true, [1,2,3]]";
 
-		execute::dispatch::exec_input(input.to_string(), &mut lash).unwrap();
-		let array = lash.vars().get_var("list").unwrap();
+		execute::dispatch::exec_input(input.to_string(), &mut slash).unwrap();
+		let array = slash.vars().get_var("list").unwrap();
 
-		if let LashVal::Array(mut list) = array {
-			assert_eq!(list.remove(4), LashVal::Array(vec![LashVal::Int(1),LashVal::Int(2),LashVal::Int(3)]));
-			assert_eq!(list.remove(3), LashVal::Bool(true));
-			assert_eq!(list.remove(2), LashVal::Float(HashFloat(3.14)));
-			assert_eq!(list.remove(1), LashVal::String("foo".into()));
-			assert_eq!(list.remove(0), LashVal::Int(1));
+		if let SlashVal::Array(mut list) = array {
+			assert_eq!(list.remove(4), SlashVal::Array(vec![SlashVal::Int(1),SlashVal::Int(2),SlashVal::Int(3)]));
+			assert_eq!(list.remove(3), SlashVal::Bool(true));
+			assert_eq!(list.remove(2), SlashVal::Float(HashFloat(3.14)));
+			assert_eq!(list.remove(1), SlashVal::String("foo".into()));
+			assert_eq!(list.remove(0), SlashVal::Int(1));
 		} else { panic!() }
 	}
 }

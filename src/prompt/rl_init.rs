@@ -2,35 +2,35 @@ use rustyline::{config::Configurer, history::DefaultHistory, ColorMode, Config, 
 
 use crate::{prelude::*, shellenv::EnvMeta};
 
-use super::prompt::LashHelper;
+use super::prompt::SlashHelper;
 
-pub fn load_history(path: &Path, rl: &mut Editor<LashHelper, DefaultHistory>) -> LashResult<()> {
+pub fn load_history(path: &Path, rl: &mut Editor<SlashHelper, DefaultHistory>) -> SlashResult<()> {
 	if let Err(e) = rl.load_history(path) {
 		eprintln!("No previous history found or failed to load history: {}", e);
 	}
 	Ok(())
 }
 
-pub fn init_prompt<'a>(lash: &'a mut Lash) -> LashResult<Editor<LashHelper<'a>, DefaultHistory>> {
-	let config = build_editor_config(lash.meta())?;
-	let path = format!("{}/.lash_hist",env::var("HOME").unwrap_or_default());
+pub fn init_prompt<'a>(slash: &'a mut Slash) -> SlashResult<Editor<SlashHelper<'a>, DefaultHistory>> {
+	let config = build_editor_config(slash.meta())?;
+	let path = format!("{}/.slash_hist",env::var("HOME").unwrap_or_default());
 	let hist_path = Path::new(&path);
-	let mut rl = initialize_editor(lash,config)?;
+	let mut rl = initialize_editor(slash,config)?;
 	load_history(hist_path,&mut rl)?;
 	Ok(rl)
 }
 
-pub fn initialize_editor<'a>(lash: &'a mut Lash,config: Config) -> LashResult<Editor<LashHelper<'a>, DefaultHistory>> {
+pub fn initialize_editor<'a>(slash: &'a mut Slash,config: Config) -> SlashResult<Editor<SlashHelper<'a>, DefaultHistory>> {
 	let mut rl = Editor::with_config(config).unwrap_or_else(|e| {
 		eprintln!("Failed to initialize Rustyline editor: {}", e);
 		std::process::exit(1);
 	});
 	rl.set_completion_type(rustyline::CompletionType::List);
-	rl.set_helper(Some(LashHelper::new(lash)));
+	rl.set_helper(Some(SlashHelper::new(slash)));
 	Ok(rl)
 }
 
-pub fn build_editor_config(meta: &EnvMeta) -> LashResult<Config> {
+pub fn build_editor_config(meta: &EnvMeta) -> SlashResult<Config> {
 	let mut config = Config::builder();
 
 	let max_size = meta.get_shopt("core.max_hist")?.parse::<usize>().unwrap();
@@ -40,7 +40,7 @@ pub fn build_editor_config(meta: &EnvMeta) -> LashResult<Config> {
 		"emacs" => EditMode::Emacs,
 		"vi" => EditMode::Vi,
 		_ => {
-			return Err(Low(LashErrLow::InternalErr("Invalid shopts.prompt.edit_mode value".into())))
+			return Err(Low(SlashErrLow::InternalErr("Invalid shopts.prompt.edit_mode value".into())))
 		}
 	};
 	let auto_hist = meta.get_shopt("core.auto_hist")?.parse::<bool>().unwrap();

@@ -1,6 +1,6 @@
 use crate::{prelude::*, utils};
 
-use crate::{error::{LashErr::*, LashErrHigh}, helper::{self, StrExtension}, shellenv::{write_jobs, ChildProc, JobBuilder, Lash}, LashResult, pest_ext::Rule};
+use crate::{error::{SlashErr::*, SlashErrHigh}, helper::{self, StrExtension}, shellenv::{write_jobs, ChildProc, JobBuilder, Slash}, SlashResult, pest_ext::Rule};
 
 bitflags! {
 	#[derive(Debug)]
@@ -12,10 +12,10 @@ bitflags! {
 		const EXPAND_OX_ESC = 0b10000;
 	}
 }
-pub fn execute<'a>(echo_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
+pub fn execute<'a>(echo_call: Pair<'a,Rule>, slash: &mut Slash) -> SlashResult<()> {
 	let mut flags = EchoFlags::empty();
 	let blame = echo_call.clone();
-	let mut argv = helper::prepare_argv(echo_call.clone(),lash)?;
+	let mut argv = helper::prepare_argv(echo_call.clone(),slash)?;
 	argv.pop_front();
 	let mut arg_buffer = vec![];
 	let redirs = helper::prepare_redirs(echo_call)?;
@@ -64,9 +64,9 @@ pub fn execute<'a>(echo_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> 
 		utils::SmartFD::new(STDOUT_FILENO)?
 	};
 
-	lash.consume_redirs(redirs)?;
+	slash.consume_redirs(redirs)?;
 
-	if lash.ctx().flags().contains(utils::ExecFlags::NO_FORK) {
+	if slash.ctx().flags().contains(utils::ExecFlags::NO_FORK) {
 		if newline {
 			writeln!(target_fd,"{}",output)?;
 		} else {
@@ -84,7 +84,7 @@ pub fn execute<'a>(echo_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> 
 			std::process::exit(0);
 		}
 		Ok(ForkResult::Parent { child }) => {
-			setpgid(child, child).map_err(|_| High(LashErrHigh::io_err(blame.clone())))?;
+			setpgid(child, child).map_err(|_| High(SlashErrHigh::io_err(blame.clone())))?;
 			let children = vec![
 				ChildProc::new(child, Some("echo"), None)?
 			];
@@ -93,13 +93,13 @@ pub fn execute<'a>(echo_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> 
 				.with_children(children)
 				.build();
 
-			if lash.ctx().flags().contains(utils::ExecFlags::BACKGROUND) {
+			if slash.ctx().flags().contains(utils::ExecFlags::BACKGROUND) {
 				write_jobs(|j| j.insert_job(job,false))??;
 			} else {
-				helper::handle_fg(lash,job)?;
+				helper::handle_fg(slash,job)?;
 			}
 		}
-		Err(_) => return Err(High(LashErrHigh::exec_err("Failed to fork in echo()", blame)))
+		Err(_) => return Err(High(SlashErrHigh::exec_err("Failed to fork in echo()", blame)))
 	}
 
 	Ok(())

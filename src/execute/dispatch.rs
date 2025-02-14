@@ -1,17 +1,17 @@
-use crate::{builtin::{self, BUILTINS}, error::LashErrExt, expand, helper, prelude::*, script, utils::{ExecFlags, Redir}};
+use crate::{builtin::{self, BUILTINS}, error::SlashErrExt, expand, helper, prelude::*, script, utils::{ExecFlags, Redir}};
 
 use super::{pipeline, command, func};
 
-pub fn dispatch_exec<'a>(node: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
+pub fn dispatch_exec<'a>(node: Pair<'a,Rule>, slash: &mut Slash) -> SlashResult<()> {
 		match node.as_rule() {
 			Rule::simple_cmd => {
 				let command_name = node.clone().into_inner().find(|pair| pair.as_rule() == Rule::cmd_name).unpack()?.as_str();
-				if !lash.ctx().flags().contains(ExecFlags::IGN_FUNC) && lash.is_func(command_name)? {
-					func::exec_func(node,lash)?;
+				if !slash.ctx().flags().contains(ExecFlags::IGN_FUNC) && slash.is_func(command_name)? {
+					func::exec_func(node,slash)?;
 				} else if BUILTINS.contains(&command_name) {
-					exec_builtin(node,command_name,lash)?;
+					exec_builtin(node,command_name,slash)?;
 				} else {
-					command::exec_cmd(node, lash)?;
+					command::exec_cmd(node, slash)?;
 				}
 			}
 			Rule::shell_cmd => {
@@ -19,29 +19,29 @@ pub fn dispatch_exec<'a>(node: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()>
 				let shell_cmd = shell_cmd_inner.pop_front().unpack()?;
 				while shell_cmd_inner.front().is_some_and(|pair| pair.as_rule() == Rule::redir) {
 					let redir = Redir::from_pair(shell_cmd_inner.pop_front().unpack()?)?;
-					lash.ctx_mut().push_redir(redir);
+					slash.ctx_mut().push_redir(redir);
 				}
 				match shell_cmd.as_rule() {
-					Rule::for_cmd => script::fordo::exec_for_cmd(shell_cmd, lash)?,
-					Rule::match_cmd => script::matchdo::exec_match_cmd(shell_cmd, lash)?,
-					Rule::loop_cmd => script::loopdo::exec_loop_cmd(shell_cmd, lash)?,
-					Rule::if_cmd => script::ifthen::exec_if_cmd(shell_cmd, lash)?,
-					Rule::subshell => super::subshell::exec_subshell(shell_cmd, lash)?,
+					Rule::for_cmd => script::fordo::exec_for_cmd(shell_cmd, slash)?,
+					Rule::match_cmd => script::matchdo::exec_match_cmd(shell_cmd, slash)?,
+					Rule::loop_cmd => script::loopdo::exec_loop_cmd(shell_cmd, slash)?,
+					Rule::if_cmd => script::ifthen::exec_if_cmd(shell_cmd, slash)?,
+					Rule::subshell => super::subshell::exec_subshell(shell_cmd, slash)?,
 					Rule::brace_grp => todo!(),
-					Rule::assignment => super::assignment::exec_assignment(shell_cmd, lash)?,
-					Rule::func_def => super::func::exec_func_def(shell_cmd, lash)?,
+					Rule::assignment => super::assignment::exec_assignment(shell_cmd, slash)?,
+					Rule::func_def => super::func::exec_func_def(shell_cmd, slash)?,
 					_ => unreachable!()
 				};
 			}
-			Rule::pipeline => { pipeline::exec_pipeline(node, lash)?; },
+			Rule::pipeline => { pipeline::exec_pipeline(node, slash)?; },
 			Rule::EOI => { /* Do nothing */ }
 			_ => todo!("Support for rule '{:?}' is unimplemented",node.as_rule())
 		}
 		Ok(())
 }
 
-pub fn descend(mut node_stack: VecDeque<Pair<Rule>>, lash: &mut Lash) -> LashResult<()> {
-	lash.ctx_mut().descend()?; // Increment depth counter
+pub fn descend(mut node_stack: VecDeque<Pair<Rule>>, slash: &mut Slash) -> SlashResult<()> {
+	slash.ctx_mut().descend()?; // Increment depth counter
 	while let Some(node) = node_stack.pop_front() {
 		match node.as_rule() {
 			Rule::main | Rule::cmd_list => {
@@ -53,13 +53,13 @@ pub fn descend(mut node_stack: VecDeque<Pair<Rule>>, lash: &mut Lash) -> LashRes
 				if let Some(op) = option {
 					match op.as_rule() {
 						Rule::and => {
-							let is_success = lash.get_status() == 0;
+							let is_success = slash.get_status() == 0;
 							if !is_success {
 								break
 							}
 						}
 						Rule::or => {
-							let is_success = lash.get_status() == 0;
+							let is_success = slash.get_status() == 0;
 							if is_success {
 								break
 							}
@@ -70,21 +70,21 @@ pub fn descend(mut node_stack: VecDeque<Pair<Rule>>, lash: &mut Lash) -> LashRes
 			}
 			Rule::bg_cmd => {
 				if let Some(cmd) = node.step(1) {
-					let flags = lash.ctx_mut().flags_mut();
+					let flags = slash.ctx_mut().flags_mut();
 					*flags |= ExecFlags::BACKGROUND;
-					dispatch_exec(cmd, lash)?
+					dispatch_exec(cmd, slash)?
 				}
 			}
-			_ => dispatch_exec(node, lash)?
+			_ => dispatch_exec(node, slash)?
 		}
 	}
-	lash.ctx_mut().ascend()?; // Decrement depth counter
+	slash.ctx_mut().ascend()?; // Decrement depth counter
 	Ok(())
 }
 
-pub fn exec_input(mut input: String, lash: &mut Lash) -> LashResult<()> {
-	input = expand::dispatch::expand_aliases(input, 0, vec![],lash)?;
-	let mut lists = LashParse::parse(Rule::main, &input).map_err(|e| Low(LashErrLow::Parse(e.to_string())))?.next().unwrap().into_inner().collect::<VecDeque<_>>();
+pub fn exec_input(mut input: String, slash: &mut Slash) -> SlashResult<()> {
+	input = expand::dispatch::expand_aliases(input, 0, vec![],slash)?;
+	let mut lists = SlashParse::parse(Rule::main, &input).map_err(|e| Low(SlashErrLow::Parse(e.to_string())))?.next().unwrap().into_inner().collect::<VecDeque<_>>();
 	lists.pop_back();
 	// Chew through the input one list at a time
 	while let Some(list) = lists.pop_front() {
@@ -94,14 +94,14 @@ pub fn exec_input(mut input: String, lash: &mut Lash) -> LashResult<()> {
 				let op = cmd.scry(&[Rule::and,Rule::or][..]).unpack()?;
 				match op.as_rule() {
 					Rule::and => {
-						if lash.get_status() != 0 {
+						if slash.get_status() != 0 {
 							break
 						} else {
 							continue
 						}
 					}
 					Rule::or => {
-						if lash.get_status() == 0 {
+						if slash.get_status() == 0 {
 							break
 						} else {
 							continue
@@ -112,51 +112,51 @@ pub fn exec_input(mut input: String, lash: &mut Lash) -> LashResult<()> {
 			}
 			let blame = cmd.clone();
 			let node_stack = VecDeque::from([cmd]);
-			descend(node_stack, lash).blame_no_overwrite(blame)?;
+			descend(node_stack, slash).blame_no_overwrite(blame)?;
 		}
 	}
 	Ok(())
 }
 
-pub fn exec_builtin(cmd: Pair<Rule>, name: &str, lash: &mut Lash) -> LashResult<()> {
+pub fn exec_builtin(cmd: Pair<Rule>, name: &str, slash: &mut Slash) -> SlashResult<()> {
 	let blame = cmd.clone();
 	match name {
 		"test" | "[" => {
-			let mut argv = helper::prepare_argv(cmd,lash)?;
+			let mut argv = helper::prepare_argv(cmd,slash)?;
 			argv.pop_front(); // Ignore the command name
-			let result = builtin::test::test(&mut argv, lash).blame(blame)?;
+			let result = builtin::test::test(&mut argv, slash).blame(blame)?;
 			if result {
-				lash.set_code(0);
+				slash.set_code(0);
 				return Ok(())
 			} else {
-				lash.set_code(1);
+				slash.set_code(1);
 				return Ok(())
 			}
 		}
-		"string" | "float" | "int" | "arr" | "bool" => builtin::assign::execute(cmd, lash)?,
-		"exec" => builtin::exec::run_exec(cmd, lash)?,
-		"fg" => builtin::job::continue_job(cmd, lash, true)?,
-		"bg" => builtin::job::continue_job(cmd, lash, false)?,
-		"jobs" => builtin::job::jobs(cmd, lash)?,
-		"return" => builtin::control::func_return(cmd, lash)?,
-		"break" => builtin::control::loop_break(cmd, lash)?,
+		"string" | "float" | "int" | "arr" | "bool" => builtin::assign::execute(cmd, slash)?,
+		"exec" => builtin::exec::run_exec(cmd, slash)?,
+		"fg" => builtin::job::continue_job(cmd, slash, true)?,
+		"bg" => builtin::job::continue_job(cmd, slash, false)?,
+		"jobs" => builtin::job::jobs(cmd, slash)?,
+		"return" => builtin::control::func_return(cmd, slash)?,
+		"break" => builtin::control::loop_break(cmd, slash)?,
 		"continue" => builtin::control::loop_continue()?,
-		"pushd" => builtin::dir_stack::pushd(cmd, lash)?,
-		"source" => builtin::source::execute(cmd, lash)?,
-		"popd" => builtin::dir_stack::popd(cmd, lash)?,
-		"setopt" => builtin::opts::setopt(cmd, lash)?,
-		"getopt" => builtin::opts::getopt(cmd, lash)?,
-		"exit" => builtin::control::exit(cmd, lash)?,
-		"cd" => builtin::cd::execute(cmd, lash)?,
-		"alias" => builtin::alias::execute(cmd, lash)?,
-		"unalias" => builtin::alias::unalias(cmd, lash)?,
-		"pwd" => builtin::pwd::execute(cmd, lash)?,
-		"export" => builtin::export::execute(cmd, lash)?,
-		"echo" => builtin::echo::execute(cmd, lash)?,
-		"builtin" => builtin::cmd_override::execute(cmd, lash, true)?,
-		"command" => builtin::cmd_override::execute(cmd, lash, false)?,
-		_ => return Err(High(LashErrHigh::exec_err(format!("Have not implemented support for builtin `{}` yet",name),blame)))
+		"pushd" => builtin::dir_stack::pushd(cmd, slash)?,
+		"source" => builtin::source::execute(cmd, slash)?,
+		"popd" => builtin::dir_stack::popd(cmd, slash)?,
+		"setopt" => builtin::opts::setopt(cmd, slash)?,
+		"getopt" => builtin::opts::getopt(cmd, slash)?,
+		"exit" => builtin::control::exit(cmd, slash)?,
+		"cd" => builtin::cd::execute(cmd, slash)?,
+		"alias" => builtin::alias::execute(cmd, slash)?,
+		"unalias" => builtin::alias::unalias(cmd, slash)?,
+		"pwd" => builtin::pwd::execute(cmd, slash)?,
+		"export" => builtin::export::execute(cmd, slash)?,
+		"echo" => builtin::echo::execute(cmd, slash)?,
+		"builtin" => builtin::cmd_override::execute(cmd, slash, true)?,
+		"command" => builtin::cmd_override::execute(cmd, slash, false)?,
+		_ => return Err(High(SlashErrHigh::exec_err(format!("Have not implemented support for builtin `{}` yet",name),blame)))
 	};
-	lash.set_code(0);
+	slash.set_code(0);
 	Ok(())
 }

@@ -6,13 +6,13 @@
       pkgs = import nixpkgs {
         system = "x86_64-linux"; # Replace with your target system if necessary
       };
-      lashBuild = pkgs.rustPlatform.buildRustPackage rec {
-        pname = "lash";
+      slashBuild = pkgs.rustPlatform.buildRustPackage rec {
+        pname = "slash";
         version = "v0.2.0";
 
         src = pkgs.fetchFromGitHub {
           owner = "pagedMov";
-          repo = "lash";
+          repo = "slash";
           rev = "65a7a713a954c0f3fba668c6d7e0cdd023f705f7";
           hash = "sha256-AVBDv0HQn7hAGo0tW1ZFCdfO4+3VJQ0mCDkow8skD7U=";
         };
@@ -29,12 +29,12 @@
 
         PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
         passthru = {
-          shellPath = "/bin/lash";
+          shellPath = "/bin/slash";
         };
       };
     in
     {
-      packages.${pkgs.system}.default = lashBuild;
+      packages.${pkgs.system}.default = slashBuild;
 
       devShells.default = pkgs.mkShell {
         nativeBuildInputs = [
@@ -53,7 +53,7 @@
         ];
 
         shellHook = ''
-          exec lash
+          exec slash
         '';
       };
     };

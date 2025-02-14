@@ -7,7 +7,7 @@ use once_cell::sync::Lazy;
 use std::sync::RwLock;
 
 use crate::{execute::dispatch, prelude::*, utils::{self, Redir}};
-use crate::{error::{LashErr::*, LashErrLow}, helper::{self, VecDequeExtension}, shopt::ShOpts, LashResult};
+use crate::{error::{SlashErr::*, SlashErrLow}, helper::{self, VecDequeExtension}, shopt::ShOpts, SlashResult};
 
 
 #[derive(Debug)]
@@ -103,14 +103,14 @@ bitflags! {
 }
 
 #[derive(Debug,Clone)]
-pub struct Lash {
+pub struct Slash {
 	vars: VarTable,
 	logic: LogicTable,
 	meta: EnvMeta,
 	ctx: ExecCtx
 }
 
-impl Lash {
+impl Slash {
 	pub fn new() -> Self {
 		let env = Self::init_env_vars(true);
 		let vars = VarTable::new(env);
@@ -161,13 +161,13 @@ impl Lash {
 	pub fn in_pipe(&self) -> bool {
 		self.meta.flags().contains(EnvFlags::IN_SUB_PROC)
 	}
-	pub fn push_state(&mut self) -> LashResult<()> {
+	pub fn push_state(&mut self) -> SlashResult<()> {
 		self.ctx.push_state()
 	}
-	pub fn pop_state(&mut self) -> LashResult<()> {
+	pub fn pop_state(&mut self) -> SlashResult<()> {
 		self.ctx.pop_state()
 	}
-	pub fn consume_redirs(&mut self, redirs: VecDeque<Redir>) -> LashResult<()> {
+	pub fn consume_redirs(&mut self, redirs: VecDeque<Redir>) -> SlashResult<()> {
 		self.ctx_mut().extend_redirs(redirs);
 		self.ctx_mut().activate_redirs()?;
 		Ok(())
@@ -175,7 +175,7 @@ impl Lash {
 	pub fn start_timer(&mut self) {
 		self.meta.timer_start = Some(Instant::now())
 	}
-	pub fn stop_timer(&mut self) -> LashResult<()> {
+	pub fn stop_timer(&mut self) -> SlashResult<()> {
 		if let Some(start_time) = self.meta.timer_start {
 			self.meta.cmd_duration = Some(start_time.elapsed());
 			self.vars.export_var("OX_CMD_TIME", &self.meta.cmd_duration.unwrap().as_millis().to_string());
@@ -183,45 +183,45 @@ impl Lash {
 		Ok(())
 	}
 
-	pub fn change_dir(&mut self, path: &Path) -> LashResult<()> {
-		let cwd = env::var("PWD").map_err(|_| Low(LashErrLow::from_io()))?;
+	pub fn change_dir(&mut self, path: &Path) -> SlashResult<()> {
+		let cwd = env::var("PWD").map_err(|_| Low(SlashErrLow::from_io()))?;
 		self.vars.export_var("OLDPWD", &cwd);
 		env::set_current_dir(path)?;
-		let cwd = env::current_dir().map_err(|_| Low(LashErrLow::from_io()))?;
+		let cwd = env::current_dir().map_err(|_| Low(SlashErrLow::from_io()))?;
 		self.vars.export_var("PWD", cwd.to_str().unwrap());
 		Ok(())
 	}
 
-	pub fn source_rc(&mut self, path: Option<PathBuf>) -> LashResult<()> {
+	pub fn source_rc(&mut self, path: Option<PathBuf>) -> SlashResult<()> {
 		let path = if let Some(path) = path {
 			path
 		} else {
 			let home = env::var("HOME").unwrap();
-			PathBuf::from(format!("{home}/.lashrc"))
+			PathBuf::from(format!("{home}/.slashrc"))
 		};
 		if let Err(e) = self.source_file(path.to_str().unwrap()) {
 			self.set_code(1);
-			eprintln!("Failed to source lashrc: {}",e);
+			eprintln!("Failed to source slashrc: {}",e);
 		}
 		Ok(())
 	}
 
 
-	pub fn source_file<'a>(&mut self, path: &str) -> LashResult<()> {
+	pub fn source_file<'a>(&mut self, path: &str) -> SlashResult<()> {
 		let mut file = utils::SmartFD::std_open(Path::new(path))?;
 		let mut buffer = String::new();
-		file.read_to_string(&mut buffer).map_err(|_| Low(LashErrLow::from_io()))?;
+		file.read_to_string(&mut buffer).map_err(|_| Low(SlashErrLow::from_io()))?;
 		file.close()?;
 
 		dispatch::exec_input(buffer, self)
 	}
 
-	pub fn get_cstring_evars<'a>(&self) -> LashResult<Vec<CString>> {
+	pub fn get_cstring_evars<'a>(&self) -> SlashResult<Vec<CString>> {
 		let env = self.vars.borrow_evars();
 		let env = env.iter().map(|(k,v)| CString::new(format!("{}={}",k,v).as_str()).unwrap()).collect::<Vec<CString>>();
 		Ok(env)
 	}
-	pub fn is_func(&self, name: &str) -> LashResult<bool> {
+	pub fn is_func(&self, name: &str) -> SlashResult<bool> {
 		let result = self.logic.get_func(name).is_some();
 		Ok(result)
 	}
@@ -281,12 +281,12 @@ impl Lash {
 		env::set_var("HOME", home.clone());
 		env_vars.insert("SHELL".into(), pathbuf_to_string(std::env::current_exe()));
 		env::set_var("SHELL", pathbuf_to_string(std::env::current_exe()));
-		env_vars.insert("HIST_FILE".into(),format!("{}/.lash_hist",home));
-		env::set_var("HIST_FILE",format!("{}/.lash_hist",home));
+		env_vars.insert("HIST_FILE".into(),format!("{}/.slash_hist",home));
+		env::set_var("HIST_FILE",format!("{}/.slash_hist",home));
 
 		env_vars
 	}
-	pub fn exec_as_cond(&mut self, input: &str) -> LashResult<i32> {
+	pub fn exec_as_cond(&mut self, input: &str) -> SlashResult<i32> {
 		let saved = self.ctx.clone();
 		self.ctx = self.ctx.as_cond();
 		dispatch::exec_input(input.to_string(), self)?;
@@ -295,7 +295,7 @@ impl Lash {
 		self.set_code(status);
 		Ok(status)
 	}
-	pub fn exec_as_body(&mut self, input: &str) -> LashResult<i32> {
+	pub fn exec_as_body(&mut self, input: &str) -> SlashResult<i32> {
 		let saved = self.ctx.clone();
 		self.ctx = self.ctx.as_body();
 		dispatch::exec_input(input.to_string(), self)?;
@@ -341,7 +341,7 @@ impl ExecCtx {
 		clone.redir_queue = body_redirs.into();
 		clone
 	}
-	pub fn refresh(&mut self) -> LashResult<()> {
+	pub fn refresh(&mut self) -> SlashResult<()> {
 		*self = ExecCtx::new();
 		Ok(())
 	}
@@ -358,27 +358,27 @@ impl ExecCtx {
 		}
 		(in_redirs,out_redirs)
 	}
-	pub fn push_state(&mut self) -> LashResult<()> {
+	pub fn push_state(&mut self) -> SlashResult<()> {
 		let saved_state = Box::new(self.clone());
 		self.state_stack.push(saved_state);
 		Ok(())
 	}
-	pub fn pop_state(&mut self) -> LashResult<()> {
+	pub fn pop_state(&mut self) -> SlashResult<()> {
 		if let Some(state) = self.state_stack.pop() {
 			*self = *state;
 		}
 		Ok(())
 	}
-	pub fn ascend(&mut self) -> LashResult<()> {
+	pub fn ascend(&mut self) -> SlashResult<()> {
 		self.pop_state()?;
 		self.depth = self.depth.saturating_sub(1);
 		Ok(())
 	}
-	pub fn descend(&mut self) -> LashResult<()> {
+	pub fn descend(&mut self) -> SlashResult<()> {
 		self.push_state()?;
 		self.depth += 1;
 		if self.depth >= self.max_recurse_depth {
-			Err(Low(LashErrLow::InternalErr(format!("Hit maximum recursion depth during execution: {}",self.max_recurse_depth))))
+			Err(Low(SlashErrLow::InternalErr(format!("Hit maximum recursion depth during execution: {}",self.max_recurse_depth))))
 		} else {
 			Ok(())
 		}
@@ -410,7 +410,7 @@ impl ExecCtx {
 	pub fn consume_redirs(&mut self) -> utils::CmdRedirs {
 		utils::CmdRedirs::new(self.take_redirs())
 	}
-	pub fn activate_redirs(&mut self) -> LashResult<()> {
+	pub fn activate_redirs(&mut self) -> SlashResult<()> {
 		let mut redirs = self.consume_redirs();
 		redirs.activate()
 	}
@@ -433,7 +433,7 @@ pub struct ChildProc {
 }
 
 impl<'a> ChildProc {
-	pub fn new(pid: Pid, command: Option<&str>, pgid: Option<Pid>) -> LashResult<Self> {
+	pub fn new(pid: Pid, command: Option<&str>, pgid: Option<Pid>) -> SlashResult<Self> {
 		let command = command.map(|str| str.to_string());
     let status = if kill(pid, None).is_ok() {
         WaitStatus::StillAlive // The process is still running
@@ -474,9 +474,9 @@ impl<'a> ChildProc {
 	pub fn set_status(&mut self, status: WaitStatus) {
 		self.status = status;
 	}
-	pub fn kill(&self, signal: Signal) -> LashResult<()> {
+	pub fn kill(&self, signal: Signal) -> SlashResult<()> {
 		kill(self.pid, Some(signal))
-			.map_err(|_| Low(LashErrLow::from_io()))
+			.map_err(|_| Low(SlashErrLow::from_io()))
 	}
 	pub fn is_alive(&self) -> bool {
 		matches!(self.status, WaitStatus::StillAlive)
@@ -570,7 +570,7 @@ impl Job {
 	pub fn get_pids(&self) -> Vec<Pid> {
 		self.children.iter().map(|chld| chld.pid()).collect::<Vec<Pid>>()
 	}
-	pub fn update_by_id(&mut self, id: JobID, status: WaitStatus) -> LashResult<()> {
+	pub fn update_by_id(&mut self, id: JobID, status: WaitStatus) -> SlashResult<()> {
 		match id {
     JobID::Pid(pid) => {
 			let query_result = self.children.iter_mut().find(|chld| chld.pid() == pid);
@@ -603,7 +603,7 @@ impl Job {
 }
 		Ok(())
 	}
-	pub fn poll_children(&mut self) -> LashResult<()> {
+	pub fn poll_children(&mut self) -> SlashResult<()> {
 		for child in self.children.iter_mut() {
 			let pid = child.pid();
 			match waitpid(pid, Some(WaitPidFlag::WNOHANG | WaitPidFlag::WUNTRACED | WaitPidFlag::WCONTINUED)) {
@@ -633,20 +633,20 @@ impl Job {
 	pub fn new_child(&mut self, child: ChildProc) {
 		self.children.push(child);
 	}
-	pub fn to_fg(&self) -> LashResult<()> {
+	pub fn to_fg(&self) -> SlashResult<()> {
 		attach_tty(self.pgid)
 	}
-	pub fn killpg(&mut self, signal: Signal) -> LashResult<()> {
+	pub fn killpg(&mut self, signal: Signal) -> SlashResult<()> {
 		let status = match signal {
 			Signal::SIGTSTP => WaitStatus::Stopped(self.pgid, Signal::SIGTSTP),
 			Signal::SIGCONT => WaitStatus::Continued(self.pgid),
 			_ => unimplemented!()
 		};
 		self.set_statuses(status);
-		killpg(self.pgid, Some(signal)).map_err(|_| Low(LashErrLow::from_io()))?;
+		killpg(self.pgid, Some(signal)).map_err(|_| Low(SlashErrLow::from_io()))?;
 		Ok(())
 	}
-	pub fn wait_pgrp<'a>(&mut self) -> LashResult<Vec<WaitStatus>> {
+	pub fn wait_pgrp<'a>(&mut self) -> SlashResult<Vec<WaitStatus>> {
 		let mut statuses = Vec::new();
 
 		for child in self.children.iter_mut() {
@@ -660,7 +660,7 @@ impl Job {
 					break;
 				}
 				Err(_) => {
-					return Err(Low(LashErrLow::from_io()));
+					return Err(Low(SlashErrLow::from_io()));
 				}
 			}
 		}
@@ -732,7 +732,7 @@ impl JobTable {
 			None
 		}
 	}
-	pub fn insert_job(&mut self, mut job: Job, silent: bool) -> LashResult<usize> {
+	pub fn insert_job(&mut self, mut job: Job, silent: bool) -> SlashResult<usize> {
 		self.prune_jobs();
 		let table_position = if let Some(id) = job.table_id() { id } else { self.next_open_pos() };
 		job.set_table_id(table_position);
@@ -751,7 +751,7 @@ impl JobTable {
 	pub fn job_order(&self) -> &[usize] {
 		&self.order
 	}
-	pub fn new_fg<'a>(&mut self, job: Job) -> LashResult<Vec<WaitStatus>> {
+	pub fn new_fg<'a>(&mut self, job: Job) -> SlashResult<Vec<WaitStatus>> {
 		let pgid = job.pgid();
 		self.fg = Some(job);
 		attach_tty(pgid)?;
@@ -760,7 +760,7 @@ impl JobTable {
 		Ok(statuses)
 	}
 
-	pub fn fg_to_bg(&mut self, status: WaitStatus) -> LashResult<()> {
+	pub fn fg_to_bg(&mut self, status: WaitStatus) -> SlashResult<()> {
 		attach_tty(getpgrp())?;
 		if self.fg.is_none() {
 			return Ok(())
@@ -781,10 +781,10 @@ impl JobTable {
 			None
 		}
 	}
-	pub fn bg_to_fg(&mut self,lash: &mut Lash, id: JobID) -> LashResult<()> {
+	pub fn bg_to_fg(&mut self,slash: &mut Slash, id: JobID) -> SlashResult<()> {
 		let job = self.remove_job(id);
 		if let Some(job) = job {
-			helper::handle_fg(lash,job)?;
+			helper::handle_fg(slash,job)?;
 		}
 		Ok(())
 	}
@@ -921,7 +921,7 @@ impl JobTable {
 	pub fn reset_recents(&mut self) {
 		self.new_updates.clear()
 	}
-	pub fn print_jobs(&self, flags: &JobCmdFlags, mut fmt: impl Write) -> LashResult<()> {
+	pub fn print_jobs(&self, flags: &JobCmdFlags, mut fmt: impl Write) -> SlashResult<()> {
 		let jobs = if flags.contains(JobCmdFlags::NEW_ONLY) {
 			&self.jobs
 				.iter()
@@ -949,7 +949,7 @@ impl JobTable {
 		}
 		Ok(())
 	}
-	pub fn update_job_statuses<'a>(&mut self) -> LashResult<()> {
+	pub fn update_job_statuses<'a>(&mut self) -> SlashResult<()> {
 		for job in self.jobs.iter_mut().flatten() {
 			//job.poll_children()?;
 		}
@@ -990,123 +990,123 @@ impl HashFloat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum LashVal {
+pub enum SlashVal {
 	String(String),
 	Int(i32),
 	Float(HashFloat),
 	Bool(bool),
-	Array(Vec<LashVal>),
-	Dict(BTreeMap<String, LashVal>),
+	Array(Vec<SlashVal>),
+	Dict(BTreeMap<String, SlashVal>),
 }
 
-impl LashVal {
-	pub fn parse(mut s: &str) -> LashResult<Self> {
+impl SlashVal {
+	pub fn parse(mut s: &str) -> SlashResult<Self> {
 		if let Ok(int) = s.parse::<i32>() {
-			return Ok(LashVal::Int(int));
+			return Ok(SlashVal::Int(int));
 		}
 		if let Ok(float) = s.parse::<f64>() {
-			return Ok(LashVal::Float(HashFloat(float)));
+			return Ok(SlashVal::Float(HashFloat(float)));
 		}
 		if let Ok(boolean) = s.parse::<bool>() {
-			return Ok(LashVal::Bool(boolean));
+			return Ok(SlashVal::Bool(boolean));
 		}
 		if s.starts_with('"') && s.ends_with('"') {
 			s = s.trim_matches('"');
-			return Ok(LashVal::String(s.to_string()))
+			return Ok(SlashVal::String(s.to_string()))
 		} else if s.starts_with('\'') && s.ends_with('\'') {
 			s = s.trim_matches('\'');
-			return Ok(LashVal::String(s.to_string()))
+			return Ok(SlashVal::String(s.to_string()))
 		}
-		if let Ok(array) = LashParse::parse(Rule::array, s) {
+		if let Ok(array) = SlashParse::parse(Rule::array, s) {
 			let mut arr_inner = array.into_iter().next().unpack()?.into_inner();
 			let mut elements = vec![];
 			if arr_inner.as_str() == "[]" {
-				return Ok(LashVal::Array(elements))
+				return Ok(SlashVal::Array(elements))
 			} else {
 				while let Some(element) = arr_inner.next() {
-					let lash_val = LashVal::parse(element.as_str())?;
-					elements.push(lash_val)
+					let slash_val = SlashVal::parse(element.as_str())?;
+					elements.push(slash_val)
 				}
-				return Ok(LashVal::Array(elements))
+				return Ok(SlashVal::Array(elements))
 			}
 		}
-		Ok(LashVal::String(s.to_string()))
+		Ok(SlashVal::String(s.to_string()))
 	}
 
 	pub fn as_os_str(&self) -> Option<&OsStr> {
 		match self {
-			LashVal::String(s) => Some(OsStr::new(s)),
+			SlashVal::String(s) => Some(OsStr::new(s)),
 			_ => None, // Only strings can be converted to OsStr
 		}
 	}
 
 	pub fn fmt_type(&self) -> String {
 		match self {
-			LashVal::String(_) => String::from("string"),
-			LashVal::Int(_) => String::from("int"),
-			LashVal::Float(_) => String::from("float"),
-			LashVal::Bool(_) => String::from("bool"),
-			LashVal::Array(_) => String::from("array"),
-			LashVal::Dict(_) => String::from("dict"),
+			SlashVal::String(_) => String::from("string"),
+			SlashVal::Int(_) => String::from("int"),
+			SlashVal::Float(_) => String::from("float"),
+			SlashVal::Bool(_) => String::from("bool"),
+			SlashVal::Array(_) => String::from("array"),
+			SlashVal::Dict(_) => String::from("dict"),
 		}
 	}
 
-	pub fn operate<F: FnOnce(&mut LashVal) -> LashVal>(&mut self, operation: F) -> LashResult<()> {
+	pub fn operate<F: FnOnce(&mut SlashVal) -> SlashVal>(&mut self, operation: F) -> SlashResult<()> {
 		*self = operation(self);
 		Ok(())
 	}
 
-	pub fn increment(&mut self) -> LashResult<()> {
+	pub fn increment(&mut self) -> SlashResult<()> {
 		match *self {
 			Self::Int(i) => {
 				self.operate(|_| Self::Int(i + 1))?
 			}
-			_ => return Err(Low(LashErrLow::InternalErr("Expected an integer in increment call".into()))),
+			_ => return Err(Low(SlashErrLow::InternalErr("Expected an integer in increment call".into()))),
 		}
 		Ok(())
 	}
 
-	pub fn decrement(&mut self) -> LashResult<()> {
+	pub fn decrement(&mut self) -> SlashResult<()> {
 		match *self {
 			Self::Int(i) => {
 				self.operate(|_| Self::Int(i - 1))?
 			}
-			_ => return Err(Low(LashErrLow::InternalErr("Expected an integer in decrement call".into()))),
+			_ => return Err(Low(SlashErrLow::InternalErr("Expected an integer in decrement call".into()))),
 		}
 		Ok(())
 	}
 
-	pub fn concat(&mut self, val: LashVal) -> LashResult<()> {
+	pub fn concat(&mut self, val: SlashVal) -> SlashResult<()> {
 		match self {
-			LashVal::String(ref mut word) => {
+			SlashVal::String(ref mut word) => {
 				*word = format!("{}{}",word,val);
 			}
-			_ => return Err(Low(LashErrLow::InternalErr("Expected an array in append call".into()))),
+			_ => return Err(Low(SlashErrLow::InternalErr("Expected an array in append call".into()))),
 		}
 		Ok(())
 	}
 
-	pub fn push(&mut self, val: LashVal) -> LashResult<()> {
+	pub fn push(&mut self, val: SlashVal) -> SlashResult<()> {
 		match self {
-			LashVal::Array(ref mut arr) => {
+			SlashVal::Array(ref mut arr) => {
 				arr.push(val);
 			}
-			_ => return Err(Low(LashErrLow::InternalErr("Expected an array in append call".into()))),
+			_ => return Err(Low(SlashErrLow::InternalErr("Expected an array in append call".into()))),
 		}
 		Ok(())
 	}
 
-	pub fn pop(&mut self) -> LashResult<Option<LashVal>> {
+	pub fn pop(&mut self) -> SlashResult<Option<SlashVal>> {
 		match self {
-			LashVal::Array(ref mut arr) => {
+			SlashVal::Array(ref mut arr) => {
 				Ok(arr.pop())
 			}
-			_ => return Err(Low(LashErrLow::InternalErr("Expected an array in pop call".into()))),
+			_ => return Err(Low(SlashErrLow::InternalErr("Expected an array in pop call".into()))),
 		}
 	}
 
 	pub fn as_string(&self) -> Option<&String> {
-		if let LashVal::String(s) = self {
+		if let SlashVal::String(s) = self {
 			Some(s)
 		} else {
 			None
@@ -1114,7 +1114,7 @@ impl LashVal {
 	}
 
 	pub fn as_int(&self) -> Option<i32> {
-		if let LashVal::Int(i) = self {
+		if let SlashVal::Int(i) = self {
 			Some(*i)
 		} else {
 			None
@@ -1122,7 +1122,7 @@ impl LashVal {
 	}
 
 	pub fn as_float(&self) -> Option<f64> {
-		if let LashVal::Float(f) = self {
+		if let SlashVal::Float(f) = self {
 			Some(f.0)
 		} else {
 			None
@@ -1130,81 +1130,81 @@ impl LashVal {
 	}
 
 	pub fn as_bool(&self) -> Option<bool> {
-		if let LashVal::Bool(b) = self {
+		if let SlashVal::Bool(b) = self {
 			Some(*b)
 		} else {
 			None
 		}
 	}
 
-	pub fn as_array(&self) -> Option<&Vec<LashVal>> {
-		if let LashVal::Array(arr) = self {
+	pub fn as_array(&self) -> Option<&Vec<SlashVal>> {
+		if let SlashVal::Array(arr) = self {
 			Some(arr)
 		} else {
 			None
 		}
 	}
 
-	pub fn as_dict(&self) -> Option<&BTreeMap<String, LashVal>> {
-		if let LashVal::Dict(dict) = self {
+	pub fn as_dict(&self) -> Option<&BTreeMap<String, SlashVal>> {
+		if let SlashVal::Dict(dict) = self {
 			Some(dict)
 		} else {
 			None
 		}
 	}
 
-	pub fn try_insert(&mut self, key: String, val: LashVal) -> LashResult<()> {
-		if let LashVal::Dict(map) = self {
+	pub fn try_insert(&mut self, key: String, val: SlashVal) -> SlashResult<()> {
+		if let SlashVal::Dict(map) = self {
 			map.insert(key,val);
 			Ok(())
 		} else {
-			Err(Low(LashErrLow::InternalErr("Called try_insert() on a non-dict LashVal".into())))
+			Err(Low(SlashErrLow::InternalErr("Called try_insert() on a non-dict SlashVal".into())))
 		}
 	}
 
-	pub fn try_get(&mut self, key: &str) -> LashResult<Option<&LashVal>> {
-		if let LashVal::Dict(map) = self {
+	pub fn try_get(&mut self, key: &str) -> SlashResult<Option<&SlashVal>> {
+		if let SlashVal::Dict(map) = self {
 			Ok(map.get(key))
 		} else {
-			Err(Low(LashErrLow::InternalErr("Called try_get() on a non-dict LashVal".into())))
+			Err(Low(SlashErrLow::InternalErr("Called try_get() on a non-dict SlashVal".into())))
 		}
 	}
 
-	pub fn try_get_mut<'a>(&mut self, key: &str) -> LashResult<Option<&mut LashVal>> {
-		if let LashVal::Dict(map) = self {
+	pub fn try_get_mut<'a>(&mut self, key: &str) -> SlashResult<Option<&mut SlashVal>> {
+		if let SlashVal::Dict(map) = self {
 			Ok(map.get_mut(key))
 		} else {
-			Err(Low(LashErrLow::InternalErr("Called try_get_mut() on a non-dict LashVal".into())))
+			Err(Low(SlashErrLow::InternalErr("Called try_get_mut() on a non-dict SlashVal".into())))
 		}
 	}
 
-	pub fn try_remove(&mut self, key: &str) -> LashResult<Option<LashVal>> {
-		if let LashVal::Dict(map) = self {
+	pub fn try_remove(&mut self, key: &str) -> SlashResult<Option<SlashVal>> {
+		if let SlashVal::Dict(map) = self {
 			Ok(map.remove(key))
 		} else {
-			Err(Low(LashErrLow::InternalErr("Called try_remove() on a non-dict LashVal".into())))
+			Err(Low(SlashErrLow::InternalErr("Called try_remove() on a non-dict SlashVal".into())))
 		}
 	}
 }
 
-impl Default for LashVal {
+impl Default for SlashVal {
 	fn default() -> Self {
-		LashVal::String("".into())
+		SlashVal::String("".into())
 	}
 }
 
-impl fmt::Display for LashVal {
+impl fmt::Display for SlashVal {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			LashVal::Int(int) => write!(f, "{}", int),
-			LashVal::String(string) => write!(f, "{}", string),
-			LashVal::Float(float) => write!(f, "{}", float.0),
-			LashVal::Bool(bool) => write!(f, "{}", bool),
-			LashVal::Array(array) => {
+			SlashVal::Int(int) => write!(f, "{}", int),
+			SlashVal::String(string) => write!(f, "{}", string),
+			SlashVal::Float(float) => write!(f, "{}", float.0),
+			SlashVal::Bool(bool) => write!(f, "{}", bool),
+			SlashVal::Array(array) => {
 				let formatted_array: Vec<String> = array.iter().map(|val| format!("{}", val)).collect();
 				write!(f, "{}", formatted_array.join(" "))
 			}
-			LashVal::Dict(dict) => {
+			SlashVal::Dict(dict) => {
 				let formatted_dict: Vec<String> = dict
 					.iter()
 					.map(|(key, value)| format!("{}: {}", key, value))
@@ -1224,7 +1224,7 @@ pub struct VarTable {
 	env: HashMap<String,String>,
 	params: HashMap<String,String>,
 	pos_params: VecDeque<String>,
-	vars: HashMap<String,LashVal>
+	vars: HashMap<String,SlashVal>
 }
 
 impl VarTable {
@@ -1237,7 +1237,7 @@ impl VarTable {
 		}
 	}
 
-	pub fn vars(&self) -> &HashMap<String, LashVal> {
+	pub fn vars(&self) -> &HashMap<String, SlashVal> {
 		&self.vars
 	}
 
@@ -1295,40 +1295,40 @@ impl VarTable {
 		self.params.remove(key);
 	}
 
-	pub fn set_var(&mut self, key: &str, val: LashVal) {
+	pub fn set_var(&mut self, key: &str, val: SlashVal) {
 		self.vars.insert(key.to_string(),val);
 	}
 	pub fn unset_var(&mut self, key: &str) {
 		self.vars.remove(key);
 	}
-	pub fn get_var(&self, key: &str) -> Option<LashVal> {
+	pub fn get_var(&self, key: &str) -> Option<SlashVal> {
 		if let Some(var) = self.vars.get(key).cloned() {
 			Some(var)
 		} else if let Some(var) = self.params.get(key).cloned() {
-			let val = LashVal::String(var);
+			let val = SlashVal::String(var);
 			Some(val)
 		} else {
-			let var = self.env.get(key).cloned().map(LashVal::String);
+			let var = self.env.get(key).cloned().map(SlashVal::String);
 			var
 		}
 	}
-	pub fn get_var_mut(&mut self, key: &str) -> Option<&mut LashVal> {
+	pub fn get_var_mut(&mut self, key: &str) -> Option<&mut SlashVal> {
 		self.vars.get_mut(key)
 	}
 
-	pub fn index_arr(&self, key: &str, index: usize) -> LashResult<LashVal> {
+	pub fn index_arr(&self, key: &str, index: usize) -> SlashResult<SlashVal> {
 		if let Some(var) = self.vars.get(key) {
-			if let LashVal::Array(arr) = var {
+			if let SlashVal::Array(arr) = var {
 				if let Some(value) = arr.get(index) {
 					Ok(value.clone())
 				} else {
-					Err(Low(LashErrLow::ExecFailed(format!("Index `{}` out of range for array `{}`",index,key))))
+					Err(Low(SlashErrLow::ExecFailed(format!("Index `{}` out of range for array `{}`",index,key))))
 				}
 			} else {
-				Err(Low(LashErrLow::ExecFailed(format!("{} is not an array",key))))
+				Err(Low(SlashErrLow::ExecFailed(format!("{} is not an array",key))))
 			}
 		} else {
-			Err(Low(LashErrLow::ExecFailed(format!("{} is not a variable",key))))
+			Err(Low(SlashErrLow::ExecFailed(format!("{} is not a variable",key))))
 		}
 	}
 }
@@ -1444,12 +1444,12 @@ impl EnvMeta {
 	pub fn borrow_shopts(&self) -> &ShOpts {
 		&self.shopts
 	}
-	pub fn set_shopt(&mut self, key: &str, val: &str) -> LashResult<()> {
-		let val = LashVal::parse(val)?;
+	pub fn set_shopt(&mut self, key: &str, val: &str) -> SlashResult<()> {
+		let val = SlashVal::parse(val)?;
 		let query = key.split('.').map(|str| str.to_string()).collect::<VecDeque<String>>();
 		self.shopts.set(query,val)
 	}
-	pub fn get_shopt<'a>(&self, key: &str) -> LashResult<String> {
+	pub fn get_shopt<'a>(&self, key: &str) -> SlashResult<String> {
 		let result = &self.shopts.get(key)?;
 		Ok(result.to_string().trim().to_string())
 	}
@@ -1469,25 +1469,25 @@ pub fn disable_reaping() {
 }
 
 /// Re-enable the sigchld handler
-pub fn enable_reaping<'a>() -> LashResult<()> {
+pub fn enable_reaping<'a>() -> SlashResult<()> {
 	write_jobs(|j| j.update_job_statuses())??;
 	unsafe { signal(Signal::SIGCHLD, SigHandler::Handler(crate::signal::handle_sigchld)) }.unwrap();
 	Ok(())
 }
 
-pub fn read_jobs<'a,F,T>(f: F) -> LashResult<T>
+pub fn read_jobs<'a,F,T>(f: F) -> SlashResult<T>
 where F: FnOnce(&JobTable) -> T {
-	let lock = JOBS.read().map_err(|_| Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
+	let lock = JOBS.read().map_err(|_| Low(SlashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
 	Ok(f(&lock))
 }
 
-pub fn write_jobs<'a,F,T>(f: F) -> LashResult<T>
+pub fn write_jobs<'a,F,T>(f: F) -> SlashResult<T>
 where F: FnOnce(&mut JobTable) -> T {
-	let mut lock = JOBS.write().map_err(|_| Low(LashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
+	let mut lock = JOBS.write().map_err(|_| Low(SlashErrLow::InternalErr("Failed to obtain write lock; lock might be poisoned".into())))?;
 	Ok(f(&mut lock))
 }
 
-pub fn attach_tty<'a>(pgid: Pid) -> LashResult<()> {
+pub fn attach_tty<'a>(pgid: Pid) -> SlashResult<()> {
 	if !isatty(0).unwrap_or(false) || pgid == term_controller() {
 		return Ok(())
 	}

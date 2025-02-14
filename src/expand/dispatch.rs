@@ -30,7 +30,7 @@ impl<'a> ExpansionIR<'a> {
 	}
 }
 
-pub fn expand_list<'a>(list: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<String> {
+pub fn expand_list<'a>(list: Pair<'a,Rule>,slash: &mut Slash) -> SlashResult<String> {
 	let mut buffer = list.get_input().to_string();
 	let list_body = list.as_str().to_string();
 	let mut result = String::new();
@@ -47,7 +47,7 @@ pub fn expand_list<'a>(list: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<String
 
 		// Get the span of the current cmd_list part
 		let span = cmd.as_span();
-		result = expand_cmd(cmd,lash)?; // Expand it
+		result = expand_cmd(cmd,slash)?; // Expand it
 
 		// Reset the buffer with the newly expanded string
 		buffer.replace_span(span,&result);
@@ -62,7 +62,7 @@ pub fn expand_list<'a>(list: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<String
 	}
 }
 
-pub fn expand_cmd<'a>(cmd: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<String> {
+pub fn expand_cmd<'a>(cmd: Pair<'a,Rule>, slash: &mut Slash) -> SlashResult<String> {
 	if cmd.as_rule() == Rule::op { return Ok(cmd.as_str().to_string()) }
 	let mut buffer = cmd.as_str().to_string();
 	// Order matters
@@ -77,18 +77,18 @@ pub fn expand_cmd<'a>(cmd: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<String>
 		Rule::brace_word,
 		Rule::tilde_sub
 	];
-	buffer = alias_pass(buffer,lash)?;
+	buffer = alias_pass(buffer,slash)?;
 	for rule in expand_rules {
 		// Expand each rule in order
-		buffer = rule_pass(rule,buffer,lash)?;
+		buffer = rule_pass(rule,buffer,slash)?;
 	}
 	Ok(buffer)
 }
 
-pub fn alias_pass<'a>(buffer: String, lash: &mut Lash) -> LashResult<String> {
+pub fn alias_pass<'a>(buffer: String, slash: &mut Slash) -> SlashResult<String> {
 	let mut result = buffer.clone();
-	let mut list = LashParse::parse(Rule::find_expansions, &buffer).unwrap().next().unpack()?.to_vec();
-	let logic = lash.logic().clone();
+	let mut list = SlashParse::parse(Rule::find_expansions, &buffer).unwrap().next().unpack()?.to_vec();
+	let logic = slash.logic().clone();
 
 	while let Some(word) = list.pop() {
 		if let Some(body) = logic.get_alias(word.as_str()) {
@@ -99,13 +99,13 @@ pub fn alias_pass<'a>(buffer: String, lash: &mut Lash) -> LashResult<String> {
 	Ok(result)
 }
 
-pub fn expand_aliases(input: String, depth: usize, mut cached: Vec<String>, lash: &mut Lash) -> LashResult<String> {
+pub fn expand_aliases(input: String, depth: usize, mut cached: Vec<String>, slash: &mut Slash) -> SlashResult<String> {
 	if depth > 10 {
 		return Ok(input)
 	}
 	let mut result = input.clone();
-	let mut alias_pass = LashParse::parse(Rule::main, &input)?;
-	let logic = lash.logic().clone();
+	let mut alias_pass = SlashParse::parse(Rule::main, &input)?;
+	let logic = slash.logic().clone();
 
 	let mut cmd_names = alias_pass.next().unwrap().seek_all(Rule::cmd_name);
 	while let Some(cmd_name) = cmd_names.pop_back() {
@@ -118,16 +118,16 @@ pub fn expand_aliases(input: String, depth: usize, mut cached: Vec<String>, lash
 		}
 	}
 	if result != input {
-		return expand_aliases(result, depth + 1, cached, lash)
+		return expand_aliases(result, depth + 1, cached, slash)
 	} else {
 		Ok(result)
 	}
 }
 
-pub fn rule_pass<'a>(rule: Rule, buffer: String, lash: &mut Lash) -> LashResult<String> {
+pub fn rule_pass<'a>(rule: Rule, buffer: String, slash: &mut Slash) -> SlashResult<String> {
 	// Need to clone buffer here to detach 'result' from the lifetime of 'list'
 	let mut result = buffer.clone();
-	let mut list = LashParse::parse(Rule::find_expansions, &buffer).unwrap().next().unpack()?.to_vec();
+	let mut list = SlashParse::parse(Rule::find_expansions, &buffer).unwrap().next().unpack()?.to_vec();
 	const BREAKER_RULES: &[Rule] = &[
 		Rule::assignment, // These rules signal the expansion logic to break up the pair
 		Rule::arg_assign, // and push the inner pairs back onto the stack
@@ -147,17 +147,17 @@ pub fn rule_pass<'a>(rule: Rule, buffer: String, lash: &mut Lash) -> LashResult<
 			let span = word.as_span();
 			let expanded = match rule {
 				Rule::var_sub => {
-					lash.vars().get_var(&word.as_str()[1..]).unwrap_or_default().to_string()
+					slash.vars().get_var(&word.as_str()[1..]).unwrap_or_default().to_string()
 				}
 				Rule::param_sub => {
-					let param = lash.vars().get_param(&word.as_str()[1..]).unwrap_or_default().to_string();
+					let param = slash.vars().get_param(&word.as_str()[1..]).unwrap_or_default().to_string();
 					param
 				}
-				Rule::dquoted => expand::string::expand_string(word,lash)?,
-				Rule::arr_index => expand::index::expand_index(word,lash)?,
+				Rule::dquoted => expand::string::expand_string(word,slash)?,
+				Rule::arr_index => expand::index::expand_index(word,slash)?,
 				Rule::glob_word => expand::glob::expand_glob(word),
 				Rule::brace_word => expand::brace::expand_brace(word),
-				Rule::cmd_sub => expand::cmdsub::expand_cmd_sub(word,lash)?,
+				Rule::cmd_sub => expand::cmdsub::expand_cmd_sub(word,slash)?,
 				Rule::proc_sub => expand::cmdsub::expand_proc_sub(word),
 				Rule::tilde_sub => expand::misc::expand_tilde(word)?,
 				_ => unreachable!()
@@ -178,10 +178,10 @@ pub fn rule_queue() -> Vec<Rule> {
 	]
 }
 
-pub fn expand_word<'a>(pair: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<String> {
+pub fn expand_word<'a>(pair: Pair<'a,Rule>, slash: &mut Slash) -> SlashResult<String> {
 	let word = pair.as_str();
 	let mut rule_queue = rule_queue();
-	let expansions = match LashParse::parse(Rule::expand_word_loud, word) {
+	let expansions = match SlashParse::parse(Rule::expand_word_loud, word) {
 		Ok(mut parsed) => parsed.next().unwrap(),
 		Err(_) => return Ok(word.to_string())
 	};
@@ -192,18 +192,18 @@ pub fn expand_word<'a>(pair: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<Strin
 		while let Some(pair) = matches.pop_front() {
 			let span = pair.as_span();
 			let expanded = match rule {
-				Rule::cmd_sub => expand::cmdsub::expand_cmd_sub(pair,lash)?,
+				Rule::cmd_sub => expand::cmdsub::expand_cmd_sub(pair,slash)?,
 				Rule::param_sub => {
 					let param_name = &pair.as_str()[1..];
-					let param = lash.vars().get_param(param_name).unwrap_or_default().to_string();
+					let param = slash.vars().get_param(param_name).unwrap_or_default().to_string();
 					param
 				}
 				Rule::var_sub => {
 					let var_name = &pair.as_str()[1..];
-					let result = lash.vars().get_var(var_name).unwrap_or_default().to_string();
+					let result = slash.vars().get_var(var_name).unwrap_or_default().to_string();
 					result
 				}
-				Rule::dquoted => expand::string::expand_string(pair,lash)?,
+				Rule::dquoted => expand::string::expand_string(pair,slash)?,
 				_ => unreachable!()
 			};
 			let exp = Expansion { expanded, span };

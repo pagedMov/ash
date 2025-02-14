@@ -3,21 +3,21 @@ use rustyline::{hint::{Hint, Hinter}, Context};
 
 use crate::prelude::*;
 
-use super::prompt::LashHelper;
+use super::prompt::SlashHelper;
 
-pub struct LashHint {
+pub struct SlashHint {
 	text: String,
 	styled_text: String
 }
 
-impl LashHint {
+impl SlashHint {
 	pub fn new(text: String) -> Self {
 		let styled_text = style(&text).with(Color::DarkGrey).to_string();
 		Self { text, styled_text }
 	}
 }
 
-impl Hint for LashHint {
+impl Hint for SlashHint {
 	fn display(&self) -> &str {
 		&self.styled_text
 	}
@@ -30,7 +30,7 @@ impl Hint for LashHint {
 	}
 }
 
-impl<'a> Hinter for LashHelper<'a> {
+impl<'a> Hinter for SlashHelper<'a> {
 	fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<Self::Hint> {
 		if line.is_empty() {
 			return None
@@ -39,12 +39,12 @@ impl<'a> Hinter for LashHelper<'a> {
 		let result = self.hist_substr_search(line, history);
 		if let Some(hist_line) = result {
 			let window = hist_line[line.len()..].to_string();
-			let hint = LashHint::new(window);
+			let hint = SlashHint::new(window);
 			Some(hint)
 		} else {
 			None
 		}
 	}
 
-	type Hint = LashHint;
+	type Hint = SlashHint;
 }

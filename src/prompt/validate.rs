@@ -2,13 +2,13 @@ use rustyline::validate::Validator;
 
 use crate::prelude::*;
 
-use super::prompt::LashHelper;
+use super::prompt::SlashHelper;
 
 fn try_parse(input: &str) -> bool {
-	LashParse::parse(Rule::main, input).is_ok()
+	SlashParse::parse(Rule::main, input).is_ok()
 }
 
-impl<'a> Validator for LashHelper<'a> {
+impl<'a> Validator for SlashHelper<'a> {
 	fn validate(&self, ctx: &mut rustyline::validate::ValidationContext) -> rustyline::Result<rustyline::validate::ValidationResult> {
 	    let input = ctx.input();
 

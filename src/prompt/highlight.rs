@@ -2,7 +2,7 @@ use rustyline::highlight::Highlighter;
 
 use crate::{builtin::BUILTINS, prelude::*};
 
-use super::prompt::LashHelper;
+use super::prompt::SlashHelper;
 
 pub const RESET: &str = "\x1b[0m";
 pub const BLACK: &str = "\x1b[30m";
@@ -35,14 +35,14 @@ pub const COMMENT: &str = BRIGHT_BLACK;
 pub const FUNCNAME: &str = CYAN;
 
 #[derive(Debug)]
-struct LashHighlighter<'a> {
+struct SlashHighlighter<'a> {
 	expect: Vec<Vec<Rule>>,
-	lash: &'a mut Lash
+	slash: &'a mut Slash
 }
 
-impl<'a> LashHighlighter<'a> {
-	pub fn new(lash: &'a mut Lash) -> Self {
-		Self { expect: vec![], lash }
+impl<'a> SlashHighlighter<'a> {
+	pub fn new(slash: &'a mut Slash) -> Self {
+		Self { expect: vec![], slash }
 	}
 
 	pub fn then_expectation() -> Vec<Rule> {
@@ -57,7 +57,7 @@ impl<'a> LashHighlighter<'a> {
 		if target.is_empty() || path.is_empty() {
 			return false
 		}
-		let logic = self.lash.logic().clone();
+		let logic = self.slash.logic().clone();
 		let is_cmd = path.split(':')
 			.map(Path::new)
 			.any(|p| p.join(target).exists());
@@ -207,7 +207,7 @@ impl<'a> LashHighlighter<'a> {
 		debug_assert!(pair.as_rule() == Rule::hl_redir);
 		let mut body = pair.as_str().to_string();
 
-		let redir = LashParse::parse(Rule::hl_redir, pair.as_str()).unwrap().into_iter().next().unwrap();
+		let redir = SlashParse::parse(Rule::hl_redir, pair.as_str()).unwrap().into_iter().next().unwrap();
 		let mut inner = redir.into_inner().rev();
 		while let Some(part) = inner.next() {
 			let span = part.as_span();
@@ -238,7 +238,7 @@ impl<'a> LashHighlighter<'a> {
 		debug_assert!(pair.as_rule() == Rule::dquoted);
 
 		let body = pair.scry(Rule::dquote_body).unwrap().as_str();
-		let sub_parse = LashParse::parse(Rule::syntax_hl, body);
+		let sub_parse = SlashParse::parse(Rule::syntax_hl, body);
 		if let Ok(parse) = sub_parse {
 			let mut buffer = body.to_string();
 			let mut words = parse.into_iter().next().unwrap().to_deque();
@@ -414,7 +414,7 @@ impl<'a> LashHighlighter<'a> {
 	}
 
 	fn highlight_input(&mut self,input: &'a str) -> String {
-		let parsed_input = LashParse::parse(Rule::syntax_hl, input);
+		let parsed_input = SlashParse::parse(Rule::syntax_hl, input);
 		match parsed_input {
 			Ok(parsed_input) => {
 				let mut buffer = parsed_input.as_str().to_string().fill_from(input);
@@ -431,11 +431,11 @@ impl<'a> LashHighlighter<'a> {
 	}
 }
 
-impl<'a> Highlighter for LashHelper<'a> {
+impl<'a> Highlighter for SlashHelper<'a> {
 	fn highlight<'l>(&self, line: &'l str, pos: usize) -> std::borrow::Cow<'l, str> {
 		let _ = pos;
-		let mut cloned = self.lash.clone();
-		let mut highlighter = LashHighlighter { expect: vec![], lash: &mut cloned };
+		let mut cloned = self.slash.clone();
+		let mut highlighter = SlashHighlighter { expect: vec![], slash: &mut cloned };
 		std::borrow::Cow::Owned(highlighter.highlight_input(line))
 	}
 

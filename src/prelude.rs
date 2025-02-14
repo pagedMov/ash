@@ -90,9 +90,9 @@ pub use crate::{
 		PairExt,
 		Rules,
 		Rule,
-		LashParse,
+		SlashParse,
 	},
-	shellenv::Lash,
+	shellenv::Slash,
 	helper::{
 		StrExtension,
 		StringExt,
@@ -100,10 +100,10 @@ pub use crate::{
 		VecDequeExtension,
 	},
 	error::{
-		LashErrExt,
-		LashResult,
-		LashErr::*,
-		LashErrLow,
-		LashErrHigh
+		SlashErrExt,
+		SlashResult,
+		SlashErr::*,
+		SlashErrLow,
+		SlashErrHigh
 	},
 };

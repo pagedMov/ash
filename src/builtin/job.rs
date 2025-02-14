@@ -1,21 +1,21 @@
 use crate::{helper, prelude::*, shellenv::{read_jobs, write_jobs, JobCmdFlags, JobID}, utils};
 
-pub fn continue_job<'a>(fg_call: Pair<'a,Rule>,lash: &mut Lash, fg: bool) -> LashResult<()> {
+pub fn continue_job<'a>(fg_call: Pair<'a,Rule>,slash: &mut Slash, fg: bool) -> SlashResult<()> {
 	let mut stdout = utils::SmartFD::new(1)?;
-	let mut argv = helper::prepare_argv(fg_call.clone(), lash)?;
+	let mut argv = helper::prepare_argv(fg_call.clone(), slash)?;
 	let blame = fg_call.clone();
 	let redirs = helper::prepare_redirs(fg_call)?;
 	argv.pop_front();
-	lash.consume_redirs(redirs)?;
+	slash.consume_redirs(redirs)?;
 
 	if read_jobs(|j| j.get_fg().is_some())? {
-		return Err(High(LashErrHigh::exec_err("Somehow called fg when there is already a foreground process", blame)))
+		return Err(High(SlashErrHigh::exec_err("Somehow called fg when there is already a foreground process", blame)))
 	}
 
 	let curr_job_id = if let Some(id) = read_jobs(|j| j.curr_job())? {
 		id
 	} else {
-		return Err(High(LashErrHigh::exec_err("Did not find a job to move to the foreground", blame)))
+		return Err(High(SlashErrHigh::exec_err("Did not find a job to move to the foreground", blame)))
 	};
 
 	let job_id = match argv.pop_front() {
@@ -29,14 +29,14 @@ pub fn continue_job<'a>(fg_call: Pair<'a,Rule>,lash: &mut Lash, fg: bool) -> Las
 		if query_result.is_some() {
 			Ok(j.remove_job(id).unwrap())
 		} else {
-			Err(High(LashErrHigh::exec_err(format!("Job ID `{}' not found", job_id), blame)))
+			Err(High(SlashErrHigh::exec_err(format!("Job ID `{}' not found", job_id), blame)))
 		}
 	})??;
 
 	job.killpg(Signal::SIGCONT)?;
 
 	if fg {
-		helper::handle_fg(lash, job)?;
+		helper::handle_fg(slash, job)?;
 	} else {
 		let job_order = read_jobs(|j| j.job_order().to_vec())?;
 		writeln!(stdout, "{}", job.display(&job_order, JobCmdFlags::PIDS))?;
@@ -47,11 +47,11 @@ pub fn continue_job<'a>(fg_call: Pair<'a,Rule>,lash: &mut Lash, fg: bool) -> Las
 	Ok(())
 }
 
-pub fn jobs<'a>(jobs_call: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<()> {
-	let mut argv = helper::prepare_argv(jobs_call.clone(), lash)?;
+pub fn jobs<'a>(jobs_call: Pair<'a,Rule>,slash: &mut Slash) -> SlashResult<()> {
+	let mut argv = helper::prepare_argv(jobs_call.clone(), slash)?;
 	let mut redirs = helper::prepare_redirs(jobs_call.clone())?;
 	let mut stdout = utils::SmartFD::new(1)?;
-	lash.consume_redirs(redirs)?;
+	slash.consume_redirs(redirs)?;
 	let blame = jobs_call;
 	argv.pop_front();
 
@@ -59,7 +59,7 @@ pub fn jobs<'a>(jobs_call: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<()> {
 	while let Some(arg) = argv.pop_front() {
 		let mut chars = arg.chars().peekable();
 		if chars.peek().is_none_or(|ch| *ch != '-') {
-			return Err(High(LashErrHigh::syntax_err(format!("Invalid flag in `jobs' call: {}",arg), blame)))
+			return Err(High(SlashErrHigh::syntax_err(format!("Invalid flag in `jobs' call: {}",arg), blame)))
 		}
 
 		chars.next(); // Ignore the hyphen
@@ -70,7 +70,7 @@ pub fn jobs<'a>(jobs_call: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<()> {
 				'n' => JobCmdFlags::NEW_ONLY,
 				'r' => JobCmdFlags::RUNNING,
 				's' => JobCmdFlags::STOPPED,
-				_ => return Err(High(LashErrHigh::syntax_err("Invalid flag in `jobs` invocation", blame)))
+				_ => return Err(High(SlashErrHigh::syntax_err("Invalid flag in `jobs` invocation", blame)))
 			};
 			flags |= flag;
 		}
@@ -81,7 +81,7 @@ pub fn jobs<'a>(jobs_call: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<()> {
 	Ok(())
 }
 
-fn parse_job_id<'a>(arg: &str, blame: Pair<'a,Rule>) -> LashResult<usize> {
+fn parse_job_id<'a>(arg: &str, blame: Pair<'a,Rule>) -> SlashResult<usize> {
 	if arg.starts_with('%') {
 		let arg = arg.strip_prefix('%').unwrap();
 		if arg.chars().all(|ch| ch.is_ascii_digit()) {
@@ -93,7 +93,7 @@ fn parse_job_id<'a>(arg: &str, blame: Pair<'a,Rule>) -> LashResult<usize> {
 			})?;
 			match result {
 				Some(id) => Ok(id),
-				None => Err(High(LashErrHigh::internal_err("Found a job but no table id in parse_job_id()", blame)))
+				None => Err(High(SlashErrHigh::internal_err("Found a job but no table id in parse_job_id()", blame)))
 			}
 		}
 	} else if arg.chars().all(|ch| ch.is_ascii_digit()) {
@@ -113,9 +113,9 @@ fn parse_job_id<'a>(arg: &str, blame: Pair<'a,Rule>) -> LashResult<usize> {
 
 		match result {
 			Some(id) => Ok(id),
-			None => Err(High(LashErrHigh::internal_err("Found a job but no table id in parse_job_id()", blame)))
+			None => Err(High(SlashErrHigh::internal_err("Found a job but no table id in parse_job_id()", blame)))
 		}
 	} else {
-		Err(High(LashErrHigh::syntax_err(format!("Invalid fg argument: {}",arg), blame)))
+		Err(High(SlashErrHigh::syntax_err(format!("Invalid fg argument: {}",arg), blame)))
 	}
 }

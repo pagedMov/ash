@@ -5,7 +5,7 @@ use io::Read;
 use nix::unistd::getpgrp;
 
 use crate::{expand, prelude::*, utils};
-use crate::{utils::REGEX, error::{LashErr, LashErrHigh, LashErrLow}, shellenv::{self, attach_tty, disable_reaping, enable_reaping, write_jobs, DisplayWaitStatus, HashFloat, Job, Lash, LashVal}, LashResult};
+use crate::{utils::REGEX, error::{SlashErr, SlashErrHigh, SlashErrLow}, shellenv::{self, attach_tty, disable_reaping, enable_reaping, write_jobs, DisplayWaitStatus, HashFloat, Job, Slash, SlashVal}, SlashResult};
 
 
 #[macro_export]
@@ -87,7 +87,7 @@ pub trait StrExtension {
 
 impl StrExtension for str {
 	fn as_pair_from_rule(&self, rule: Rule) -> Option<Pair<Rule>> {
-		match LashParse::parse(rule, self) {
+		match SlashParse::parse(rule, self) {
 			Ok(mut pair) => Some(pair.next().unwrap()),
 			Err(_) => None
 		}
@@ -393,8 +393,8 @@ impl StrExtension for str {
 
 }
 
-pub fn validate_autocd(lash: &mut Lash,argv: &VecDeque<String>) -> LashResult<bool> {
-	if lash.meta().get_shopt("core.autocd").is_ok_and(|opt| opt.parse::<bool>().unwrap()) && argv.len() == 1 {
+pub fn validate_autocd(slash: &mut Slash,argv: &VecDeque<String>) -> SlashResult<bool> {
+	if slash.meta().get_shopt("core.autocd").is_ok_and(|opt| opt.parse::<bool>().unwrap()) && argv.len() == 1 {
 		let candidate = argv.front().unwrap();
 		Ok(Path::new(candidate).is_dir())
 	} else {
@@ -402,9 +402,9 @@ pub fn validate_autocd(lash: &mut Lash,argv: &VecDeque<String>) -> LashResult<bo
 	}
 }
 
-pub fn try_expansion<'a>(lash: &mut Lash,pair: Pair<'a,Rule>) -> LashResult<String> {
+pub fn try_expansion<'a>(slash: &mut Slash,pair: Pair<'a,Rule>) -> SlashResult<String> {
 	if pair.contains_rules(&[Rule::expand_word,Rule::dquoted][..]) {
-		expand::dispatch::expand_word(pair,lash)
+		expand::dispatch::expand_word(pair,slash)
 	} else {
 		Ok(pair.as_str().to_string())
 	}
@@ -452,12 +452,12 @@ pub fn try_brace(word: &str) -> VecDeque<String> {
 	unpacked
 }
 
-pub fn prepare_argv<'a>(pair: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<VecDeque<String>> {
+pub fn prepare_argv<'a>(pair: Pair<'a,Rule>,slash: &mut Slash) -> SlashResult<VecDeque<String>> {
 	let mut args = VecDeque::new();
 	let mut inner = pair.into_inner().filter(|pr| matches!(pr.as_rule(), Rule::cmd_name | Rule::arg_assign | Rule::word));
 	while let Some(pair) = inner.next() {
 		let word = pair.as_str().trim_quotes().to_string();
-		let expanded = VecDeque::from(vec![try_expansion(lash,pair)?]);
+		let expanded = VecDeque::from(vec![try_expansion(slash,pair)?]);
 		let expanded_ext = try_glob(expanded.clone());
 		let expanded_ext = try_tilde(expanded_ext);
 		if !expanded_ext.is_empty() {
@@ -473,7 +473,7 @@ pub fn prepare_argv<'a>(pair: Pair<'a,Rule>,lash: &mut Lash) -> LashResult<VecDe
 	Ok(args)
 }
 
-pub fn get_pipeline_cmd<'a>(pair: Pair<'a,Rule>) -> LashResult<String> {
+pub fn get_pipeline_cmd<'a>(pair: Pair<'a,Rule>) -> SlashResult<String> {
 	Ok(match pair.as_rule() {
 		Rule::simple_cmd => {
 			let mut argv = pair.into_inner();
@@ -499,7 +499,7 @@ pub fn get_pipeline_cmd<'a>(pair: Pair<'a,Rule>) -> LashResult<String> {
 	})
 }
 
-pub fn prepare_redirs<'a>(pair: Pair<'a,Rule>) -> LashResult<VecDeque<utils::Redir>> {
+pub fn prepare_redirs<'a>(pair: Pair<'a,Rule>) -> SlashResult<VecDeque<utils::Redir>> {
 	let mut results = pair.filter(Rule::redir).into_iter().map(|pr| utils::Redir::from_pair(pr)).collect::<VecDeque<_>>();
 	let mut redirs = VecDeque::new();
 	while let Some(result) = results.pop_front() {
@@ -630,7 +630,7 @@ pub fn contains_glob(word: &str) -> bool {
 	false
 }
 
-pub fn parse_vec(input: &str) -> Result<Vec<LashVal>,String> {
+pub fn parse_vec(input: &str) -> Result<Vec<SlashVal>,String> {
 	if !input.starts_with('[') {
 		return Err("Did not find an opening bracket for this array definition".into())
 	}
@@ -645,11 +645,11 @@ pub fn parse_vec(input: &str) -> Result<Vec<LashVal>,String> {
 	}
 }
 
-pub fn vec_by_type(str: &str) -> Option<Vec<LashVal>> {
+pub fn vec_by_type(str: &str) -> Option<Vec<SlashVal>> {
 	str.split(',')
 		.map(str::trim)
-		.map(LashVal::parse)
-		.collect::<Result<Vec<LashVal>, _>>()
+		.map(SlashVal::parse)
+		.collect::<Result<Vec<SlashVal>, _>>()
 		.ok()
 }
 
@@ -689,8 +689,8 @@ pub fn slice_completion(line: &str, candidate: &str) -> String {
 	}
 }
 
-pub fn which(lash: &mut Lash,command: &str) -> Option<String> {
-	if let Some(env_path) = lash.vars().get_evar("PATH") {
+pub fn which(slash: &mut Slash,command: &str) -> Option<String> {
+	if let Some(env_path) = slash.vars().get_evar("PATH") {
 		for path in env::split_paths(&env_path) {
 			let full_path = path.join(command);
 			if full_path.is_file() && is_exec(&full_path) {
@@ -707,35 +707,35 @@ pub fn is_exec(path: &Path) -> bool {
 		.unwrap_or(false)
 }
 
-pub fn write_alias(lash: &mut Lash,alias: &str, body: &str) -> LashResult<()> {
-	if lash.logic().get_func(alias).is_some() {
-		lash.logic_mut().remove_func(alias);
+pub fn write_alias(slash: &mut Slash,alias: &str, body: &str) -> SlashResult<()> {
+	if slash.logic().get_func(alias).is_some() {
+		slash.logic_mut().remove_func(alias);
 	}
-	lash.logic_mut().new_alias(alias, body.into());
+	slash.logic_mut().new_alias(alias, body.into());
 	Ok(())
 }
 
-pub fn write_func(lash: &mut Lash,func: &str, body: &str) -> LashResult<()> {
-	if lash.logic().get_alias(func).is_some() {
-		lash.logic_mut().remove_alias(func);
+pub fn write_func(slash: &mut Slash,func: &str, body: &str) -> SlashResult<()> {
+	if slash.logic().get_alias(func).is_some() {
+		slash.logic_mut().remove_alias(func);
 	}
-	lash.logic_mut().new_func(func, body);
+	slash.logic_mut().new_func(func, body);
 	Ok(())
 }
 
-pub fn unset_var_conflicts(lash: &mut Lash,key: &str) -> LashResult<()> {
-	if lash.vars().get_var(key).is_some() {
-		lash.vars_mut().unset_var(key)
+pub fn unset_var_conflicts(slash: &mut Slash,key: &str) -> SlashResult<()> {
+	if slash.vars().get_var(key).is_some() {
+		slash.vars_mut().unset_var(key)
 	}
-	if lash.vars().get_evar(key).is_some() {
+	if slash.vars().get_evar(key).is_some() {
 		std::env::remove_var(key);
-		lash.vars_mut().unset_evar(key);
+		slash.vars_mut().unset_evar(key);
 	}
 
 	Ok(())
 }
 
-pub fn handle_fg(lash: &mut Lash, job: Job) -> LashResult<()> {
+pub fn handle_fg(slash: &mut Slash, job: Job) -> SlashResult<()> {
 	let mut code = 0;
 	attach_tty(job.pgid())?;
 	disable_reaping();
@@ -757,7 +757,7 @@ pub fn handle_fg(lash: &mut Lash, job: Job) -> LashResult<()> {
 		}
 	}
 	attach_tty(getpgrp())?;
-	lash.set_code(code);
+	slash.set_code(code);
 	write_jobs(|j| {
 		j.update_job_statuses().unwrap();
 		j.reset_fg();
@@ -765,20 +765,20 @@ pub fn handle_fg(lash: &mut Lash, job: Job) -> LashResult<()> {
 	enable_reaping()
 }
 
-pub fn extract_return<T>(result: &LashResult<T>) -> LashResult<i32> {
+pub fn extract_return<T>(result: &SlashResult<T>) -> SlashResult<i32> {
 	match result {
 		Ok(_) => Ok(0),
 		Err(err) => match err {
 			High(ref high) => match *high.get_err() {
-				LashErrLow::FuncReturn(code) |
-				LashErrLow::LoopBreak(code) => {
+				SlashErrLow::FuncReturn(code) |
+				SlashErrLow::LoopBreak(code) => {
 					Ok(code)
 				}
 				_ => Err(err.clone())
 			}
 			Low(ref low) => match low {
-				LashErrLow::FuncReturn(code) |
-				LashErrLow::LoopBreak(code) => {
+				SlashErrLow::FuncReturn(code) |
+				SlashErrLow::LoopBreak(code) => {
 					Ok(*code)
 				}
 				_ => Err(err.clone())
@@ -787,7 +787,7 @@ pub fn extract_return<T>(result: &LashResult<T>) -> LashResult<i32> {
 	}
 }
 
-pub fn handle_prompt_visgroup(lash: &mut Lash,pair: Pair<Rule>) -> LashResult<String> {
+pub fn handle_prompt_visgroup(slash: &mut Slash,pair: Pair<Rule>) -> SlashResult<String> {
 	let mut found = false;
 	let span = pair.as_span();
 	let mut visgroup = pair.as_str().to_string();
@@ -805,7 +805,7 @@ pub fn handle_prompt_visgroup(lash: &mut Lash,pair: Pair<Rule>) -> LashResult<St
 			Rule::esc_return |
 			Rule::esc_ansi_seq |
 			Rule::esc_newline => {
-				let meta_char = expand::misc::expand_esc(lash,esc)?;
+				let meta_char = expand::misc::expand_esc(slash,esc)?;
 				let cur_len = ps1.len();
 				ps1.replace_span(span, &meta_char);
 				len_delta += ps1.len() as isize - cur_len as isize;
@@ -813,7 +813,7 @@ pub fn handle_prompt_visgroup(lash: &mut Lash,pair: Pair<Rule>) -> LashResult<St
 			}
 			_ => { /* Pass */ }
 		}
-		let expanded = expand::misc::expand_esc(lash,esc)?;
+		let expanded = expand::misc::expand_esc(slash,esc)?;
 		if !expanded.is_empty() {
 			found = true;
 		}
@@ -895,7 +895,7 @@ pub fn capture_ansi_escape(chars: &mut VecDeque<char>) -> String {
 	sequence
 }
 
-pub fn handle_prompt_hidegroup<'a>() -> LashResult<String> {
+pub fn handle_prompt_hidegroup<'a>() -> SlashResult<String> {
 	todo!()
 }
 
@@ -1062,28 +1062,28 @@ pub fn format_cmd_runtime(dur: std::time::Duration) -> String {
 	result.join(" ")
 }
 
-pub fn escseq_cmdtime<'a>() -> LashResult<String> {
+pub fn escseq_cmdtime<'a>() -> SlashResult<String> {
 	Ok(env::var("OX_CMD_TIME").unwrap_or_default())
 }
 
-pub fn escseq_custom(lash: &mut Lash,query: &str) -> LashResult<String> {
-	let command = lash.meta().get_shopt(&format!("prompt.custom.{query}"))?;
+pub fn escseq_custom(slash: &mut Slash,query: &str) -> SlashResult<String> {
+	let command = slash.meta().get_shopt(&format!("prompt.custom.{query}"))?;
 	let cmd_sub = format!("$({command})");
-	let parsed = LashParse::parse(Rule::cmd_sub, &cmd_sub)
-		.map_err(|e| LashErr::Low(LashErrLow::Parse(e.to_string())))?
+	let parsed = SlashParse::parse(Rule::cmd_sub, &cmd_sub)
+		.map_err(|e| SlashErr::Low(SlashErrLow::Parse(e.to_string())))?
 		.into_iter()
 		.next()
 		.unpack()?;
-	expand::cmdsub::expand_cmd_sub(parsed,lash)
+	expand::cmdsub::expand_cmd_sub(parsed,slash)
 }
 
-pub fn escseq_exitcode<'a>(lash: &mut Lash) -> LashResult<String> {
-	Ok(lash.vars().get_param("?").unwrap_or_default())
+pub fn escseq_exitcode<'a>(slash: &mut Slash) -> SlashResult<String> {
+	Ok(slash.vars().get_param("?").unwrap_or_default())
 }
 
-pub fn escseq_success<'a>(lash: &mut Lash) -> LashResult<String> {
-	let code = lash.vars().get_param("?");
-	let success = lash.meta().get_shopt("prompt.exit_status.success")?.trim_matches('"').to_string();
+pub fn escseq_success<'a>(slash: &mut Slash) -> SlashResult<String> {
+	let code = slash.vars().get_param("?");
+	let success = slash.meta().get_shopt("prompt.exit_status.success")?.trim_matches('"').to_string();
 	if let Some(code) = code {
 		match code.as_str() {
 			"0" => Ok(success),
@@ -1094,9 +1094,9 @@ pub fn escseq_success<'a>(lash: &mut Lash) -> LashResult<String> {
 	}
 }
 
-pub fn escseq_fail<'a>(lash: &mut Lash) -> LashResult<String> {
-	let code = lash.vars().get_param("?");
-	let failure = lash.meta().get_shopt("prompt.exit_status.failure")?.trim_matches('"').to_string();
+pub fn escseq_fail<'a>(slash: &mut Slash) -> SlashResult<String> {
+	let code = slash.vars().get_param("?");
+	let failure = slash.meta().get_shopt("prompt.exit_status.failure")?.trim_matches('"').to_string();
 	if let Some(code) = code {
 		match code.as_str() {
 			"0" => Ok(String::new()),
@@ -1107,7 +1107,7 @@ pub fn escseq_fail<'a>(lash: &mut Lash) -> LashResult<String> {
 	}
 }
 
-pub fn escseq_octal_escape(chars: &mut VecDeque<char>, first_digit: char) -> LashResult<char> {
+pub fn escseq_octal_escape(chars: &mut VecDeque<char>, first_digit: char) -> SlashResult<char> {
 	let mut octal_digits = String::new();
 	octal_digits.push(first_digit); // Add the first digit
 
@@ -1125,7 +1125,7 @@ pub fn escseq_octal_escape(chars: &mut VecDeque<char>, first_digit: char) -> Las
 		Ok(value as char)
 	} else {
 		// Invalid sequence, treat as literal
-		Err(LashErr::Low(LashErrLow::InternalErr(format!("Invalid octal sequence: \\{}", octal_digits))))
+		Err(SlashErr::Low(SlashErrLow::InternalErr(format!("Invalid octal sequence: \\{}", octal_digits))))
 	}
 }
 
@@ -1154,13 +1154,13 @@ pub fn escseq_non_printing_sequence(chars: &mut VecDeque<char>, result: &mut Str
 }
 
 /// Handles the current working directory.
-pub fn escseq_working_directory<'a>(lash: &mut Lash) -> LashResult<String> {
+pub fn escseq_working_directory<'a>(slash: &mut Slash) -> SlashResult<String> {
 	let mut cwd = env::var("PWD").unwrap_or_default();
 	let home = env::var("HOME").unwrap_or_default();
 	if cwd.starts_with(&home) {
 		cwd = cwd.replacen(&home, "~", 1); // Use `replacen` to replace only the first occurrence
 	}
-	let trunc_len = lash.meta().get_shopt("prompt.trunc_prompt_path").unwrap_or("0".into()).parse::<usize>().unwrap();
+	let trunc_len = slash.meta().get_shopt("prompt.trunc_prompt_path").unwrap_or("0".into()).parse::<usize>().unwrap();
 	if trunc_len > 0 {
 		let mut path = PathBuf::from(cwd);
 		let mut cwd_components: Vec<_> = path.components().collect();
@@ -1174,10 +1174,10 @@ pub fn escseq_working_directory<'a>(lash: &mut Lash) -> LashResult<String> {
 }
 
 /// Handles the basename of the current working directory.
-pub fn escseq_basename_working_directory<'a>(lash: &mut Lash) -> LashResult<String> {
-	let cwd = PathBuf::from(lash.vars().get_evar("PWD").map_or("".to_string(), |pwd| pwd.to_string()));
+pub fn escseq_basename_working_directory<'a>(slash: &mut Slash) -> SlashResult<String> {
+	let cwd = PathBuf::from(slash.vars().get_evar("PWD").map_or("".to_string(), |pwd| pwd.to_string()));
 	let mut cwd = cwd.components().last().map(|comp| comp.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
-	let home = lash.vars().get_evar("HOME").map_or("".into(), |home| home);
+	let home = slash.vars().get_evar("HOME").map_or("".into(), |home| home);
 	if cwd.starts_with(&home) {
 		cwd = cwd.replacen(&home, "~", 1); // Replace HOME with '~'
 	}
@@ -1185,14 +1185,14 @@ pub fn escseq_basename_working_directory<'a>(lash: &mut Lash) -> LashResult<Stri
 }
 
 /// Handles the full hostname.
-pub fn escseq_full_hostname<'a>(lash: &mut Lash) -> LashResult<String> {
-	let hostname: String = lash.vars().get_evar("HOSTNAME").map_or("unknown host".into(), |host| host);
+pub fn escseq_full_hostname<'a>(slash: &mut Slash) -> SlashResult<String> {
+	let hostname: String = slash.vars().get_evar("HOSTNAME").map_or("unknown host".into(), |host| host);
 	Ok(hostname)
 }
 
 /// Handles the short hostname.
-pub fn escseq_short_hostname<'a>(lash: &mut Lash) -> LashResult<String> {
-	let hostname = lash.vars().get_evar("HOSTNAME").map_or("unknown host".into(), |host| host);
+pub fn escseq_short_hostname<'a>(slash: &mut Slash) -> SlashResult<String> {
+	let hostname = slash.vars().get_evar("HOSTNAME").map_or("unknown host".into(), |host| host);
 	if let Some((hostname, _)) = hostname.split_once('.') {
 		Ok(hostname.to_string())
 	} else {
@@ -1201,20 +1201,20 @@ pub fn escseq_short_hostname<'a>(lash: &mut Lash) -> LashResult<String> {
 }
 
 /// Handles the shell name.
-pub fn escseq_shell_name<'a>(lash: &mut Lash) -> LashResult<String> {
-	let sh_name = lash.vars().get_evar("SHELL").map_or("rsh".into(), |sh| sh);
+pub fn escseq_shell_name<'a>(slash: &mut Slash) -> SlashResult<String> {
+	let sh_name = slash.vars().get_evar("SHELL").map_or("rsh".into(), |sh| sh);
 	Ok(sh_name)
 }
 
 /// Handles the username.
-pub fn escseq_username<'a>(lash: &mut Lash) -> LashResult<String> {
-	let user = lash.vars().get_evar("USER").map_or("unknown".into(), |user| user);
+pub fn escseq_username<'a>(slash: &mut Slash) -> SlashResult<String> {
+	let user = slash.vars().get_evar("USER").map_or("unknown".into(), |user| user);
 	Ok(user)
 }
 
 /// Handles the prompt symbol based on the user ID.
-pub fn escseq_prompt_symbol<'a>(lash: &mut Lash) -> LashResult<char> {
-	let uid = lash.vars().get_evar("UID").map_or("0".into(), |uid| uid);
+pub fn escseq_prompt_symbol<'a>(slash: &mut Slash) -> SlashResult<char> {
+	let uid = slash.vars().get_evar("UID").map_or("0".into(), |uid| uid);
 	match uid.as_str() {
 		"0" => Ok('#'),
 		_ => Ok('$'),
@@ -1263,7 +1263,7 @@ pub fn process_ansi_escapes(input: &str) -> String {
 					}
 				}
 			} else {
-				// Trailing backslash, treat literally
+				// Trailing backsslash, treat literally
 				result.push('\\');
 			}
 		} else if c == '\x1B' {
@@ -1389,112 +1389,112 @@ pub fn has_valid_delims(input: &str, open: &str, close: &str) -> bool {
 }
 
 
-pub fn subtract_vars<'a>(left: LashVal, right: LashVal) -> LashResult<LashVal> {
+pub fn subtract_vars<'a>(left: SlashVal, right: SlashVal) -> SlashResult<SlashVal> {
 	match left {
-		LashVal::String(left_str) => {
+		SlashVal::String(left_str) => {
 			let right_str = right.to_string();
 			if let Some(result) = left_str.strip_suffix(&right_str) {
-				Ok(LashVal::String(result.to_string()))
+				Ok(SlashVal::String(result.to_string()))
 			} else {
-				Ok(LashVal::String(left_str))
+				Ok(SlashVal::String(left_str))
 			}
 		}
-		LashVal::Int(left_num) => {
-			if let LashVal::Int(right_num) = right {
+		SlashVal::Int(left_num) => {
+			if let SlashVal::Int(right_num) = right {
 				let diff = left_num - right_num;
-				Ok(LashVal::Int(diff))
+				Ok(SlashVal::Int(diff))
 			} else {
-				Err(LashErr::Low(LashErrLow::Parse(format!("Tried to subtract non-integer type '{}' from integer", right.fmt_type()))))
+				Err(SlashErr::Low(SlashErrLow::Parse(format!("Tried to subtract non-integer type '{}' from integer", right.fmt_type()))))
 			}
 		}
-		LashVal::Float(left_num) => {
-			if let LashVal::Float(right_num) = right {
+		SlashVal::Float(left_num) => {
+			if let SlashVal::Float(right_num) = right {
 				let diff = left_num.to_f64() - right_num.to_f64();
-				Ok(LashVal::Float(HashFloat::from_f64(diff)))
+				Ok(SlashVal::Float(HashFloat::from_f64(diff)))
 			} else {
-				Err(LashErr::Low(LashErrLow::Parse(format!("Tried to subtract non-float type '{}' from float", right.fmt_type()))))
+				Err(SlashErr::Low(SlashErrLow::Parse(format!("Tried to subtract non-float type '{}' from float", right.fmt_type()))))
 			}
 		}
-		LashVal::Bool(left_bool) => {
-			if let LashVal::Bool(right_bool) = right {
+		SlashVal::Bool(left_bool) => {
+			if let SlashVal::Bool(right_bool) = right {
 				// Treat as "remove" operation (XOR-like behavior)
 				let result = left_bool != right_bool;
-				Ok(LashVal::Bool(result))
+				Ok(SlashVal::Bool(result))
 			} else {
-				Err(LashErr::Low(LashErrLow::Parse(format!("Tried to subtract non-bool type '{}' from bool", right.fmt_type()))))
+				Err(SlashErr::Low(SlashErrLow::Parse(format!("Tried to subtract non-bool type '{}' from bool", right.fmt_type()))))
 			}
 		}
-		LashVal::Array(mut vec) => {
+		SlashVal::Array(mut vec) => {
 			if let Some(pos) = vec.iter().position(|elem| *elem == right) {
 				vec.remove(pos);
-				Ok(LashVal::Array(vec))
+				Ok(SlashVal::Array(vec))
 			} else {
-				Ok(LashVal::Array(vec))
+				Ok(SlashVal::Array(vec))
 			}
 		}
-		LashVal::Dict(_) => todo!(),
+		SlashVal::Dict(_) => todo!(),
 	}
 }
 
-/// Processes the LashResult<T> type alias.
+/// Processes the SlashResult<T> type alias.
 ///
-/// This function is used in contexts where a LashErrLow returns from a lower level function
+/// This function is used in contexts where a SlashErrLow returns from a lower level function
 /// into a context where a pair can be blamed for the error
-/// Wraps LashErrLow in LashErrHigh
+/// Wraps SlashErrLow in SlashErrHigh
 ///
 /// Returns the Ok value if it's not an error
-pub fn proc_res<T>(result: LashResult<T>, pair: Pair<Rule>) -> LashResult<T> {
+pub fn proc_res<T>(result: SlashResult<T>, pair: Pair<Rule>) -> SlashResult<T> {
 	match result {
 		Ok(val) => Ok(val),
 		Err(err) => match err {
-			LashErr::Low(low) => {
-				Err(LashErr::High(LashErrHigh::blame(pair, low)))
+			SlashErr::Low(low) => {
+				Err(SlashErr::High(SlashErrHigh::blame(pair, low)))
 			},
-			LashErr::High(high) => Err(LashErr::High(high))
+			SlashErr::High(high) => Err(SlashErr::High(high))
 		}
 	}
 }
 
-pub fn build_lash_err<R: pest::RuleType>(pair: Pair<R>, message: String) -> String {
+pub fn build_slash_err<R: pest::RuleType>(pair: Pair<R>, message: String) -> String {
 	pest::error::Error::<R>::new_from_span(pest::error::ErrorVariant::CustomError { message }, pair.as_span()).to_string()
 }
 
-pub fn add_vars<'a>(left: LashVal, right: LashVal) -> LashResult<LashVal> {
+pub fn add_vars<'a>(left: SlashVal, right: SlashVal) -> SlashResult<SlashVal> {
 	match left {
-		LashVal::String(_) => {
+		SlashVal::String(_) => {
 			let left_string = left.to_string();
 			let right_string = right.to_string();
-			Ok(LashVal::String(format!("{}{}",left_string,right_string)))
+			Ok(SlashVal::String(format!("{}{}",left_string,right_string)))
 		}
-		LashVal::Int(left_num) => {
-			if let LashVal::Int(right_num) = right {
+		SlashVal::Int(left_num) => {
+			if let SlashVal::Int(right_num) = right {
 				let sum = left_num + right_num;
-				Ok(LashVal::Int(sum))
+				Ok(SlashVal::Int(sum))
 			} else {
-				Err(LashErr::Low(LashErrLow::Parse(format!("Tried to add non-integer type '{}' from integer", right.fmt_type()))))
+				Err(SlashErr::Low(SlashErrLow::Parse(format!("Tried to add non-integer type '{}' from integer", right.fmt_type()))))
 			}
 		}
-		LashVal::Float(left_num) => {
-			if let LashVal::Float(right_num) = right {
+		SlashVal::Float(left_num) => {
+			if let SlashVal::Float(right_num) = right {
 				let sum = left_num.to_f64() + right_num.to_f64();
-				Ok(LashVal::Float(HashFloat::from_f64(sum)))
+				Ok(SlashVal::Float(HashFloat::from_f64(sum)))
 			} else {
-				Err(LashErr::Low(LashErrLow::Parse(format!("Tried to add non-float type '{}' from float", right.fmt_type()))))
+				Err(SlashErr::Low(SlashErrLow::Parse(format!("Tried to add non-float type '{}' from float", right.fmt_type()))))
 			}
 		}
-		LashVal::Bool(left_bool) => {
-			if let LashVal::Bool(right_bool) = right {
+		SlashVal::Bool(left_bool) => {
+			if let SlashVal::Bool(right_bool) = right {
 				let result = left_bool | right_bool;
-				Ok(LashVal::Bool(result))
+				Ok(SlashVal::Bool(result))
 			} else {
-				Err(LashErr::Low(LashErrLow::Parse(format!("Tried to add non-bool type '{}' from bool", right.fmt_type()))))
+				Err(SlashErr::Low(SlashErrLow::Parse(format!("Tried to add non-bool type '{}' from bool", right.fmt_type()))))
 			}
 		}
-		LashVal::Array(vec) => {
+		SlashVal::Array(vec) => {
 			let mut new_vec = vec.clone();
 			new_vec.push(right);
-			Ok(LashVal::Array(new_vec))
+			Ok(SlashVal::Array(new_vec))
 		}
-		LashVal::Dict(btree_map) => todo!(),
+		SlashVal::Dict(btree_map) => todo!(),
 	}
 }

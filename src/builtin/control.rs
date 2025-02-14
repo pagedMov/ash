@@ -1,7 +1,7 @@
 use crate::{helper, prelude::*};
 
-pub fn exit<'a>(pair: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
-	let mut argv = helper::prepare_argv(pair, lash)?;
+pub fn exit<'a>(pair: Pair<'a,Rule>, slash: &mut Slash) -> SlashResult<()> {
+	let mut argv = helper::prepare_argv(pair, slash)?;
 	argv.pop_front();
 	let code = if let Some(arg) = argv.pop_front() {
 		let word = arg.as_str();
@@ -13,11 +13,11 @@ pub fn exit<'a>(pair: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
 	} else {
 		0
 	};
-	Err(Low(LashErrLow::CleanExit(code)))
+	Err(Low(SlashErrLow::CleanExit(code)))
 }
 
-pub fn func_return<'a>(pair: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
-	let mut argv = helper::prepare_argv(pair, lash)?;
+pub fn func_return<'a>(pair: Pair<'a,Rule>, slash: &mut Slash) -> SlashResult<()> {
+	let mut argv = helper::prepare_argv(pair, slash)?;
 	argv.pop_front();
 	let code = if let Some(arg) = argv.pop_front() {
 		let word = arg.as_str();
@@ -29,11 +29,11 @@ pub fn func_return<'a>(pair: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
 	} else {
 		0
 	};
-	Err(Low(LashErrLow::FuncReturn(code)))
+	Err(Low(SlashErrLow::FuncReturn(code)))
 }
 
-pub fn loop_break<'a>(pair: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
-	let mut argv = helper::prepare_argv(pair, lash)?;
+pub fn loop_break<'a>(pair: Pair<'a,Rule>, slash: &mut Slash) -> SlashResult<()> {
+	let mut argv = helper::prepare_argv(pair, slash)?;
 	argv.pop_front();
 	let code = if let Some(arg) = argv.pop_front() {
 		let word = arg.as_str();
@@ -45,9 +45,9 @@ pub fn loop_break<'a>(pair: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
 	} else {
 		0
 	};
-	Err(Low(LashErrLow::LoopBreak(code)))
+	Err(Low(SlashErrLow::LoopBreak(code)))
 }
 
-pub fn loop_continue<'a>() -> LashResult<()> {
-	Err(Low(LashErrLow::LoopCont))
+pub fn loop_continue<'a>() -> SlashResult<()> {
+	Err(Low(SlashErrLow::LoopCont))
 }

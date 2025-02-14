@@ -1,16 +1,16 @@
 use crate::{prelude::*, utils};
 
-use crate::{error::{LashErr::*, LashErrHigh}, helper::{self}, shellenv::Lash, LashResult};
+use crate::{error::{SlashErr::*, SlashErrHigh}, helper::{self}, shellenv::Slash, SlashResult};
 
-pub fn execute<'a>(pwd_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
+pub fn execute<'a>(pwd_call: Pair<'a,Rule>, slash: &mut Slash) -> SlashResult<()> {
 	let blame = pwd_call.clone();
 	let redirs = helper::prepare_redirs(pwd_call)?;
 
-	lash.ctx_mut().extend_redirs(redirs);
+	slash.ctx_mut().extend_redirs(redirs);
 
-	let redirs = lash.ctx_mut().take_redirs();
+	let redirs = slash.ctx_mut().take_redirs();
 	if !redirs.is_empty() {
-		let mut redirs = lash.ctx_mut().consume_redirs();
+		let mut redirs = slash.ctx_mut().consume_redirs();
 		redirs.activate()?;
 	}
 
@@ -20,7 +20,7 @@ pub fn execute<'a>(pwd_call: Pair<'a,Rule>, lash: &mut Lash) -> LashResult<()> {
 		Ok(())
 	} else {
 		let msg = String::from("PWD environment variable is unset");
-		Err(High(LashErrHigh::exec_err(msg, blame)))
+		Err(High(SlashErrHigh::exec_err(msg, blame)))
 	}
 }
 

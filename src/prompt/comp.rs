@@ -4,7 +4,7 @@ use skim::{prelude::{Key, SkimItemReader, SkimOptionsBuilder}, Skim};
 
 use crate::{helper, prelude::*};
 
-use super::prompt::LashHelper;
+use super::prompt::SlashHelper;
 
 pub struct CompRegistry {
 	path_completer: FilenameCompleter,
@@ -93,7 +93,7 @@ impl Display for CompOption {
 	}
 }
 
-impl<'a> Completer for LashHelper<'a> {
+impl<'a> Completer for SlashHelper<'a> {
 	type Candidate = CompOption;
 
 	fn complete(

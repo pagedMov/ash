@@ -5,12 +5,12 @@ use nix::unistd::{access, getegid, geteuid, AccessFlags};
 
 use crate::prelude::*;
 
-use crate::{error::{LashErr::*, LashErrLow}, shellenv::Lash, LashResult};
+use crate::{error::{SlashErr::*, SlashErrLow}, shellenv::Slash, SlashResult};
 
-pub fn run_test<T,F1,F2>(arg: Option<String>,alter: F1,check_property: F2) -> LashResult<bool>
-where F1: FnOnce(&str) -> LashResult<T>, F2: FnOnce(&T) -> bool {
+pub fn run_test<T,F1,F2>(arg: Option<String>,alter: F1,check_property: F2) -> SlashResult<bool>
+where F1: FnOnce(&str) -> SlashResult<T>, F2: FnOnce(&T) -> bool {
 	if arg.is_none() {
-		return Err(Low(LashErrLow::ExecFailed("Missing operand in this test call".into())))
+		return Err(Low(SlashErrLow::ExecFailed("Missing operand in this test call".into())))
 	}
 	let altered = alter(arg.unwrap().as_str()).map_err(|_| false);
 	if altered.is_err() {
@@ -19,10 +19,10 @@ where F1: FnOnce(&str) -> LashResult<T>, F2: FnOnce(&T) -> bool {
 	Ok(check_property(&altered.unwrap()))
 }
 
-pub fn do_cmp<T,F1,F2>(lhs: &str, rhs: Option<String>, alter: F1, cmp: F2) -> LashResult<bool>
-where F1: Fn(&str) -> LashResult<T>, F2: FnOnce(&T,&T) -> bool {
+pub fn do_cmp<T,F1,F2>(lhs: &str, rhs: Option<String>, alter: F1, cmp: F2) -> SlashResult<bool>
+where F1: Fn(&str) -> SlashResult<T>, F2: FnOnce(&T,&T) -> bool {
 	if rhs.is_none() {
-		return Err(Low(LashErrLow::ExecFailed("Missing operand in this test call".into())))
+		return Err(Low(SlashErrLow::ExecFailed("Missing operand in this test call".into())))
 	}
 	let lhs = alter(lhs).map_err(|_| false);
 	let rhs = alter(rhs.unwrap().as_str()).map_err(|_| false);
@@ -32,8 +32,8 @@ where F1: Fn(&str) -> LashResult<T>, F2: FnOnce(&T,&T) -> bool {
 	Ok(cmp(&lhs.unwrap(),&rhs.unwrap()))
 }
 
-fn do_log_op<'a>(args: &mut VecDeque<String>, result: bool, operator: &str, lash: &mut Lash) -> LashResult<bool> {
-	let rec_result = test(args,lash)?;
+fn do_log_op<'a>(args: &mut VecDeque<String>, result: bool, operator: &str, slash: &mut Slash) -> SlashResult<bool> {
+	let rec_result = test(args,slash)?;
 	match operator {
 		"!" => Ok(!rec_result),
 		"-a" => Ok(result && rec_result),
@@ -44,26 +44,26 @@ fn do_log_op<'a>(args: &mut VecDeque<String>, result: bool, operator: &str, lash
 
 /// The test function is a special snowflake and takes a mutable reference to an already prepared arg vector
 /// instead of a raw pair like the other builtins. This is to make recursion with -a/-o flags easier
-pub fn test<'a>(test_call: &mut VecDeque<String>, lash: &mut Lash) -> LashResult<bool> {
+pub fn test<'a>(test_call: &mut VecDeque<String>, slash: &mut Slash) -> SlashResult<bool> {
 	if test_call.back().is_some_and(|arg| arg.as_str() == "]") {
 		test_call.pop_back();
 	}
 	// Here we define some useful closures to use later
 	let is_int = |arg: &str| -> bool { arg.parse::<i32>().is_ok() };
-	let to_int = |arg: &str| -> LashResult<i32> {
-		arg.parse::<i32>().map_err(|_| Low(LashErrLow::InvalidSyntax("Expected an integer for this test flag".into())))
+	let to_int = |arg: &str| -> SlashResult<i32> {
+		arg.parse::<i32>().map_err(|_| Low(SlashErrLow::InvalidSyntax("Expected an integer for this test flag".into())))
 	};
 	let is_path = |arg: &str| -> bool { Path::new(arg).exists() };
-	let to_meta = |arg: &str| -> LashResult<fs::Metadata> {
-		fs::metadata(arg).map_err(|_| Low(LashErrLow::InvalidSyntax("Invalid path used in test".into())))
+	let to_meta = |arg: &str| -> SlashResult<fs::Metadata> {
+		fs::metadata(arg).map_err(|_| Low(SlashErrLow::InvalidSyntax("Invalid path used in test".into())))
 	};
-	let str_no_op = |arg: &str| -> LashResult<String> { Ok(arg.to_string()) };
+	let str_no_op = |arg: &str| -> SlashResult<String> { Ok(arg.to_string()) };
 	let mut result = false;
 
 	// Now we will use our helper functions and pass those closures to use for type conversions on the arg string
 	if let Some(arg) = test_call.pop_front() {
 		result = match arg.as_str() {
-			"!" => do_log_op(test_call, true, arg.as_str(), lash)?,
+			"!" => do_log_op(test_call, true, arg.as_str(), slash)?,
 			"-t" => run_test(test_call.pop_front(), to_int, |int| isatty(*int).is_ok())?,
 			"-b" => run_test(test_call.pop_front(), to_meta, |meta| meta.file_type().is_block_device())?,
 			"-c" => run_test(test_call.pop_front(), to_meta, |meta| meta.file_type().is_char_device())?,
@@ -95,10 +95,10 @@ pub fn test<'a>(test_call: &mut VecDeque<String>, lash: &mut Lash) -> LashResult
 						"-le" => do_cmp(arg.as_str(),test_call.pop_front(), to_int, |lhs, rhs| lhs <= rhs)?,
 						"-lt" => do_cmp(arg.as_str(),test_call.pop_front(), to_int, |lhs, rhs| lhs < rhs)?,
 						"-ne" => do_cmp(arg.as_str(),test_call.pop_front(), to_int, |lhs, rhs| lhs != rhs)?,
-						_ => return Err(Low(LashErrLow::InvalidSyntax("Expected an integer after comparison flag in test call".into())))
+						_ => return Err(Low(SlashErrLow::InvalidSyntax("Expected an integer after comparison flag in test call".into())))
 					}
 				} else {
-					return Err(Low(LashErrLow::InvalidSyntax("Expected a comparison flag after integer in test call".into())))
+					return Err(Low(SlashErrLow::InvalidSyntax("Expected a comparison flag after integer in test call".into())))
 				}
 			}
 			_ if is_path(arg.as_str()) && test_call.front().is_some_and(|arg| matches!(arg.as_str(), "-ef" | "nt" | "-ot")) => {
@@ -128,14 +128,14 @@ pub fn test<'a>(test_call: &mut VecDeque<String>, lash: &mut Lash) -> LashResult
 						"!=" => do_cmp(arg.as_str(), test_call.pop_front(), str_no_op, |lhs, rhs| lhs != rhs)?,
 						_ => {
 							if cmp.as_str() == "==" {
-								return Err(Low(LashErrLow::InvalidSyntax("'==' is not a valid comparison operator for test calls. Use '=' instead.".into())));
+								return Err(Low(SlashErrLow::InvalidSyntax("'==' is not a valid comparison operator for test calls. Use '=' instead.".into())));
 							} else {
-								return Err(Low(LashErrLow::InvalidSyntax("Expected either '==' or '!=' after string in test call".into())));
+								return Err(Low(SlashErrLow::InvalidSyntax("Expected either '==' or '!=' after string in test call".into())));
 							}
 						}
 					}
 				} else {
-					return Err(Low(LashErrLow::InvalidSyntax("Expected either '==' or '!=' after string in test call".into())));
+					return Err(Low(SlashErrLow::InvalidSyntax("Expected either '==' or '!=' after string in test call".into())));
 				}
 			}
 		};
@@ -148,9 +148,9 @@ pub fn test<'a>(test_call: &mut VecDeque<String>, lash: &mut Lash) -> LashResult
 				return Ok(result); // Short-circuit OR if already true
 			}
 			if word == "-a" || word == "-o" {
-				result = do_log_op(test_call, result, word, lash)?;
+				result = do_log_op(test_call, result, word, slash)?;
 			} else {
-				return Err(Low(LashErrLow::InvalidSyntax(format!("Unexpected extra argument found in test call: {}",word))));
+				return Err(Low(SlashErrLow::InvalidSyntax(format!("Unexpected extra argument found in test call: {}",word))));
 			}
 		}
 	}
